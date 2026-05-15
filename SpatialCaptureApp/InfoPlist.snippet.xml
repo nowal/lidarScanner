@@ -1,0 +1,4 @@
+<key>NSCameraUsageDescription</key>
+<string>This app uses the camera and LiDAR sensor to capture room geometry and 3D meshes.</string>
+<key>NSLocalNetworkUsageDescription</key>
+<string>This app may use local network discovery while running AR services.</string>
