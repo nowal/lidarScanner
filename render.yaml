@@ -8,7 +8,6 @@ services:
     dockerContext: backend
     healthCheckPath: /health
     numInstances: 1
-    maxShutdownDelaySeconds: 300
     autoDeployTrigger: commit
     envVars:
       - key: LIDARAI_STORAGE_DIR
