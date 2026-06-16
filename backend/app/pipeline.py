@@ -4,15 +4,18 @@ import asyncio
 from array import array
 import base64
 import binascii
+from concurrent.futures import ProcessPoolExecutor
 import importlib
 import json
 import logging
 import math
+import multiprocessing
+import os
 import shutil
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Awaitable, Callable, Protocol
+from typing import Awaitable, Callable, NamedTuple, Protocol
 
 from PIL import Image, ImageEnhance
 
@@ -55,16 +58,70 @@ class ProjectionKeyframe:
     id: str | None = None
     path: str | None = None
     color_correction: dict | None = None
+    world_to_camera_values: tuple[float, ...] = field(init=False, repr=False)
+    fx: float = field(init=False)
+    fy: float = field(init=False)
+    cx: float = field(init=False)
+    cy: float = field(init=False)
+    edge_margin_threshold: float = field(init=False)
+    center_bias_denominator: float = field(init=False)
+    blend_edge_denominator: float = field(init=False)
+    debug_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.world_to_camera_values = tuple(float(value) for value in self.world_to_camera[:16])
+        self.fx = float(self.intrinsics[0]) if len(self.intrinsics) > 0 else 0.0
+        self.fy = float(self.intrinsics[4]) if len(self.intrinsics) > 4 else 0.0
+        self.cx = float(self.intrinsics[6]) if len(self.intrinsics) > 6 else 0.0
+        self.cy = float(self.intrinsics[7]) if len(self.intrinsics) > 7 else 0.0
+        min_dimension = min(self.width, self.height)
+        self.edge_margin_threshold = max(2.0, min_dimension * TEXTURE_BLEND_EDGE_MARGIN_RATIO)
+        self.center_bias_denominator = max(min_dimension * 0.25, 1)
+        self.blend_edge_denominator = max(min_dimension * 0.18, 1)
+        self.debug_id = self.id or self.path or "unknown"
 
 
 @dataclass
 class TextureProjectionCandidate:
     keyframe: ProjectionKeyframe
+    keyframe_debug_id: str
     score: float
     visible_vertex_count: int
     center_projection: tuple[float, float, float]
     facing: float
     center_edge_margin: float
+
+
+class TextureBlendResult(NamedTuple):
+    color: tuple[int, int, int]
+    accepted_sample_count: int
+    keyframe_contribution_keys: tuple[str, ...]
+    rejected_overexposed_sample_count: int
+    rejected_underexposed_sample_count: int
+    rejected_edge_sample_count: int
+    rejected_grazing_sample_count: int
+    rejected_invalid_projection_sample_count: int
+
+
+class TextureFaceResult(NamedTuple):
+    face_index: int
+    tile_bytes: bytes
+    selected_keyframe: str | None
+    filled_pixel_count: int
+    projected_pixel_count: int
+    fallback_pixel_count: int
+    blended_pixel_count: int
+    single_sample_pixel_count: int
+    accepted_projection_sample_count: int
+    rejected_overexposed_sample_count: int
+    rejected_underexposed_sample_count: int
+    rejected_edge_sample_count: int
+    rejected_grazing_sample_count: int
+    rejected_invalid_projection_sample_count: int
+    dilated_pixel_count: int
+    keyframe_contribution_keys: tuple[str, ...]
+    uv_vertex_sample_colors: tuple[tuple[int, int, int], ...]
+    uv_face_interior_sample_colors: tuple[tuple[int, int, int], ...]
 
 
 @dataclass
@@ -106,6 +163,9 @@ TEXTURE_BLEND_EDGE_MARGIN_RATIO = 0.018
 TEXTURE_REJECT_OVEREXPOSED_LUMINANCE = 245
 TEXTURE_REJECT_UNDEREXPOSED_LUMINANCE = 8
 TEXTURE_REJECT_LOW_DETAIL_RANGE = 10
+TEXTURE_PARALLEL_MIN_FACE_COUNT = 10_000
+TEXTURE_PARALLEL_CHUNK_SIZE = 384
+TEXTURE_PARALLEL_MAX_AUTO_WORKERS = 4
 RGBD_VOXEL_LENGTH_METERS = 0.05
 RGBD_SDF_TRUNC_METERS = 0.16
 RGBD_DEPTH_TRUNC_METERS = 6.0
@@ -1515,7 +1575,7 @@ def project_vertex_color(vertex: tuple[float, float, float], keyframes: list[Pro
 
         u, v, depth = projection
         edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
-        center_bias = max(0.05, min(edge_margin / max(min(keyframe.width, keyframe.height) * 0.25, 1), 1))
+        center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
         distance_weight = 1 / max(depth, 0.2)
         weight = center_bias * distance_weight
         samples.append((weight, sample_image_nearest(keyframe, u, v)))
@@ -2105,8 +2165,59 @@ async def write_textured_obj(
     uv_out_of_range_count = 0
     uv_non_finite_count = 0
     progress_interval = max(1, min(face_count // 50, 1_000))
+    parallel_worker_count = texture_parallel_worker_count(face_count)
+    parallel_result = None
+    if parallel_worker_count > 1:
+        try:
+            parallel_result = await rasterize_texture_atlas_parallel(
+                mesh=mesh,
+                keyframes=keyframes,
+                atlas_width=atlas_width,
+                atlas_height=atlas_height,
+                tile_size=tile_size,
+                columns=columns,
+                dilation_pixels=dilation_pixels,
+                worker_count=parallel_worker_count,
+                report_progress=report_progress,
+                is_cancelled=is_cancelled,
+            )
+        except Exception as exc:  # pragma: no cover - defensive fallback for production worker issues.
+            logger.exception("Parallel texture atlas rendering failed; falling back to serial renderer: %s", exc)
+            parallel_result = None
 
-    for face_index, face in enumerate(mesh.faces):
+    if parallel_result is not None:
+        texture = parallel_result["texture"]
+        texture_pixels = texture.load()
+        vt_lines = parallel_result["vt_lines"]
+        face_lines = parallel_result["face_lines"]
+        textured_face_count = parallel_result["textured_face_count"]
+        fallback_face_count = parallel_result["fallback_face_count"]
+        rasterized_pixel_count = parallel_result["rasterized_pixel_count"]
+        projected_pixel_count = parallel_result["projected_pixel_count"]
+        fallback_pixel_count = parallel_result["fallback_pixel_count"]
+        dilated_pixel_count = parallel_result["dilated_pixel_count"]
+        uv_vertex_sample_stats = parallel_result["uv_vertex_sample_stats"]
+        uv_face_interior_sample_stats = parallel_result["uv_face_interior_sample_stats"]
+        selected_keyframe_face_counts = parallel_result["selected_keyframe_face_counts"]
+        keyframe_contribution_counts = parallel_result["keyframe_contribution_counts"]
+        blended_pixel_count = parallel_result["blended_pixel_count"]
+        single_sample_pixel_count = parallel_result["single_sample_pixel_count"]
+        accepted_projection_sample_count = parallel_result["accepted_projection_sample_count"]
+        rejected_overexposed_sample_count = parallel_result["rejected_overexposed_sample_count"]
+        rejected_underexposed_sample_count = parallel_result["rejected_underexposed_sample_count"]
+        rejected_edge_sample_count = parallel_result["rejected_edge_sample_count"]
+        rejected_grazing_sample_count = parallel_result["rejected_grazing_sample_count"]
+        rejected_invalid_projection_sample_count = parallel_result["rejected_invalid_projection_sample_count"]
+        uv_min_u = parallel_result["uv_min_u"]
+        uv_min_v = parallel_result["uv_min_v"]
+        uv_max_u = parallel_result["uv_max_u"]
+        uv_max_v = parallel_result["uv_max_v"]
+        uv_out_of_range_count = parallel_result["uv_out_of_range_count"]
+        uv_non_finite_count = parallel_result["uv_non_finite_count"]
+    else:
+        parallel_worker_count = 1
+
+    for face_index, face in enumerate(mesh.faces) if parallel_result is None else []:
         if is_cancelled is not None and is_cancelled():
             raise asyncio.CancelledError
 
@@ -2130,7 +2241,7 @@ async def write_textured_obj(
         face_vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
         candidates = texture_projection_candidates(face_vertices, keyframes)
         if candidates:
-            selected_key = keyframe_debug_id(candidates[0].keyframe)
+            selected_key = candidates[0].keyframe_debug_id
             selected_keyframe_face_counts[selected_key] = selected_keyframe_face_counts.get(selected_key, 0) + 1
         fallback_color: tuple[int, int, int] | None = None
 
@@ -2225,6 +2336,10 @@ async def write_textured_obj(
         render_mesh_stats=mesh.stats.get("textureRenderMesh", {}),
         color_correction=color_correction,
     )
+    texture_diagnostics["processing"] = {
+        "textureWorkerCount": parallel_worker_count,
+        "parallelEnabled": parallel_worker_count > 1,
+    }
 
     texture.save(output_texture_path)
     if output_debug_preview_path is not None:
@@ -2294,8 +2409,345 @@ async def write_textured_obj(
         "fallbackFaceCount": fallback_face_count,
         "projectionCoverage": (textured_face_count / face_count) if face_count else 0,
         "renderMesh": mesh.stats.get("textureRenderMesh", {}),
+        "textureWorkerCount": parallel_worker_count,
         "diagnostics": texture_diagnostics,
     }
+
+
+_TEXTURE_WORKER_VERTICES: list[tuple[float, float, float]] = []
+_TEXTURE_WORKER_FACES: list[tuple[int, int, int]] = []
+_TEXTURE_WORKER_KEYFRAMES: list[ProjectionKeyframe] = []
+_TEXTURE_WORKER_TILE_SIZE = 0
+_TEXTURE_WORKER_COLUMNS = 0
+_TEXTURE_WORKER_DILATION_PIXELS = 0
+
+
+async def rasterize_texture_atlas_parallel(
+    *,
+    mesh: FusedMesh,
+    keyframes: list[ProjectionKeyframe],
+    atlas_width: int,
+    atlas_height: int,
+    tile_size: int,
+    columns: int,
+    dilation_pixels: int,
+    worker_count: int,
+    report_progress: Callable[[float, str], Awaitable[None]] | None,
+    is_cancelled: CancellationCheck | None,
+) -> dict:
+    face_count = len(mesh.faces)
+    texture = Image.new("RGB", (atlas_width, atlas_height), FALLBACK_COLOR)
+    vt_lines: list[str] = []
+    face_lines: list[str] = []
+    uv_vertex_sample_stats = ColorStatsAccumulator()
+    uv_face_interior_sample_stats = ColorStatsAccumulator()
+    selected_keyframe_face_counts: dict[str, int] = {}
+    keyframe_contribution_counts: dict[str, int] = {}
+    textured_face_count = 0
+    fallback_face_count = 0
+    rasterized_pixel_count = 0
+    projected_pixel_count = 0
+    fallback_pixel_count = 0
+    blended_pixel_count = 0
+    single_sample_pixel_count = 0
+    accepted_projection_sample_count = 0
+    rejected_overexposed_sample_count = 0
+    rejected_underexposed_sample_count = 0
+    rejected_edge_sample_count = 0
+    rejected_grazing_sample_count = 0
+    rejected_invalid_projection_sample_count = 0
+    dilated_pixel_count = 0
+    uv_min_u = math.inf
+    uv_min_v = math.inf
+    uv_max_u = -math.inf
+    uv_max_v = -math.inf
+    uv_out_of_range_count = 0
+    uv_non_finite_count = 0
+
+    for face_index, face in enumerate(mesh.faces):
+        tile = atlas_tile(face_index, tile_size, columns)
+        atlas_triangle = atlas_triangle_points(tile, tile_size)
+        uv_start = face_index * 3 + 1
+        for point in atlas_triangle:
+            u = (point[0] + 0.5) / atlas_width
+            v = 1 - ((point[1] + 0.5) / atlas_height)
+            if not math.isfinite(u) or not math.isfinite(v):
+                uv_non_finite_count += 1
+            else:
+                uv_min_u = min(uv_min_u, u)
+                uv_min_v = min(uv_min_v, v)
+                uv_max_u = max(uv_max_u, u)
+                uv_max_v = max(uv_max_v, v)
+                if not (0 <= u <= 1 and 0 <= v <= 1):
+                    uv_out_of_range_count += 1
+            vt_lines.append(f"vt {u:.8f} {v:.8f}")
+
+        face_lines.append(
+            f"f {face[0] + 1}/{uv_start} {face[1] + 1}/{uv_start + 1} {face[2] + 1}/{uv_start + 2}"
+        )
+
+    if face_count == 0:
+        return {
+            "texture": texture,
+            "vt_lines": vt_lines,
+            "face_lines": face_lines,
+            "textured_face_count": textured_face_count,
+            "fallback_face_count": fallback_face_count,
+            "rasterized_pixel_count": rasterized_pixel_count,
+            "projected_pixel_count": projected_pixel_count,
+            "fallback_pixel_count": fallback_pixel_count,
+            "dilated_pixel_count": dilated_pixel_count,
+            "uv_vertex_sample_stats": uv_vertex_sample_stats,
+            "uv_face_interior_sample_stats": uv_face_interior_sample_stats,
+            "selected_keyframe_face_counts": selected_keyframe_face_counts,
+            "keyframe_contribution_counts": keyframe_contribution_counts,
+            "blended_pixel_count": blended_pixel_count,
+            "single_sample_pixel_count": single_sample_pixel_count,
+            "accepted_projection_sample_count": accepted_projection_sample_count,
+            "rejected_overexposed_sample_count": rejected_overexposed_sample_count,
+            "rejected_underexposed_sample_count": rejected_underexposed_sample_count,
+            "rejected_edge_sample_count": rejected_edge_sample_count,
+            "rejected_grazing_sample_count": rejected_grazing_sample_count,
+            "rejected_invalid_projection_sample_count": rejected_invalid_projection_sample_count,
+            "uv_min_u": uv_min_u,
+            "uv_min_v": uv_min_v,
+            "uv_max_u": uv_max_u,
+            "uv_max_v": uv_max_v,
+            "uv_out_of_range_count": uv_out_of_range_count,
+            "uv_non_finite_count": uv_non_finite_count,
+        }
+
+    set_texture_worker_state(
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        keyframes=keyframes,
+        tile_size=tile_size,
+        columns=columns,
+        dilation_pixels=dilation_pixels,
+    )
+    processed_count = 0
+    progress_interval = max(1, min(face_count // 50, 1_000))
+    next_report_count = progress_interval
+    chunks = tuple(texture_face_chunks(face_count, TEXTURE_PARALLEL_CHUNK_SIZE))
+    logger.info(
+        "Rendering texture atlas with %s worker processes over %s chunks",
+        worker_count,
+        len(chunks),
+    )
+
+    try:
+        fork_context = multiprocessing.get_context("fork")
+        with ProcessPoolExecutor(max_workers=worker_count, mp_context=fork_context) as executor:
+            for chunk_results in executor.map(rasterize_texture_face_chunk_worker, chunks, chunksize=1):
+                if is_cancelled is not None and is_cancelled():
+                    raise asyncio.CancelledError
+
+                for result in chunk_results:
+                    tile = atlas_tile(result.face_index, tile_size, columns)
+                    tile_image = Image.frombytes("RGB", (tile_size, tile_size), result.tile_bytes)
+                    texture.paste(tile_image, tile)
+
+                    if result.selected_keyframe:
+                        selected_keyframe_face_counts[result.selected_keyframe] = (
+                            selected_keyframe_face_counts.get(result.selected_keyframe, 0) + 1
+                        )
+                    for key in result.keyframe_contribution_keys:
+                        keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + 1
+                    for color in result.uv_vertex_sample_colors:
+                        uv_vertex_sample_stats.add(color)
+                    for color in result.uv_face_interior_sample_colors:
+                        uv_face_interior_sample_stats.add(color)
+
+                    rasterized_pixel_count += result.filled_pixel_count
+                    projected_pixel_count += result.projected_pixel_count
+                    fallback_pixel_count += result.fallback_pixel_count
+                    blended_pixel_count += result.blended_pixel_count
+                    single_sample_pixel_count += result.single_sample_pixel_count
+                    accepted_projection_sample_count += result.accepted_projection_sample_count
+                    rejected_overexposed_sample_count += result.rejected_overexposed_sample_count
+                    rejected_underexposed_sample_count += result.rejected_underexposed_sample_count
+                    rejected_edge_sample_count += result.rejected_edge_sample_count
+                    rejected_grazing_sample_count += result.rejected_grazing_sample_count
+                    rejected_invalid_projection_sample_count += result.rejected_invalid_projection_sample_count
+                    dilated_pixel_count += result.dilated_pixel_count
+                    if result.projected_pixel_count > 0:
+                        textured_face_count += 1
+                    else:
+                        fallback_face_count += 1
+                    processed_count += 1
+
+                if report_progress is not None and (
+                    processed_count >= next_report_count or processed_count == face_count
+                ):
+                    fraction = processed_count / face_count
+                    coverage = int((textured_face_count / processed_count) * 100) if processed_count else 0
+                    await report_progress(
+                        83 + fraction * 10,
+                        (
+                            f"Texturing atlas faces {processed_count} / {face_count} "
+                            f"({coverage}% projected, {worker_count} workers)"
+                        ),
+                    )
+                    next_report_count = processed_count + progress_interval
+                    await asyncio.sleep(0)
+    finally:
+        set_texture_worker_state(vertices=[], faces=[], keyframes=[], tile_size=0, columns=0, dilation_pixels=0)
+
+    return {
+        "texture": texture,
+        "vt_lines": vt_lines,
+        "face_lines": face_lines,
+        "textured_face_count": textured_face_count,
+        "fallback_face_count": fallback_face_count,
+        "rasterized_pixel_count": rasterized_pixel_count,
+        "projected_pixel_count": projected_pixel_count,
+        "fallback_pixel_count": fallback_pixel_count,
+        "dilated_pixel_count": dilated_pixel_count,
+        "uv_vertex_sample_stats": uv_vertex_sample_stats,
+        "uv_face_interior_sample_stats": uv_face_interior_sample_stats,
+        "selected_keyframe_face_counts": selected_keyframe_face_counts,
+        "keyframe_contribution_counts": keyframe_contribution_counts,
+        "blended_pixel_count": blended_pixel_count,
+        "single_sample_pixel_count": single_sample_pixel_count,
+        "accepted_projection_sample_count": accepted_projection_sample_count,
+        "rejected_overexposed_sample_count": rejected_overexposed_sample_count,
+        "rejected_underexposed_sample_count": rejected_underexposed_sample_count,
+        "rejected_edge_sample_count": rejected_edge_sample_count,
+        "rejected_grazing_sample_count": rejected_grazing_sample_count,
+        "rejected_invalid_projection_sample_count": rejected_invalid_projection_sample_count,
+        "uv_min_u": uv_min_u,
+        "uv_min_v": uv_min_v,
+        "uv_max_u": uv_max_u,
+        "uv_max_v": uv_max_v,
+        "uv_out_of_range_count": uv_out_of_range_count,
+        "uv_non_finite_count": uv_non_finite_count,
+    }
+
+
+def texture_parallel_worker_count(face_count: int) -> int:
+    setting = os.getenv("LIDARAI_TEXTURE_WORKERS", "auto").strip().lower()
+    if setting in {"0", "1", "false", "off", "no", "serial"}:
+        return 1
+    if setting not in {"", "auto"}:
+        try:
+            return max(1, int(setting))
+        except ValueError:
+            logger.warning("Ignoring invalid LIDARAI_TEXTURE_WORKERS value: %s", setting)
+            return 1
+    if face_count < TEXTURE_PARALLEL_MIN_FACE_COUNT:
+        return 1
+    if sys.platform != "linux" or "fork" not in multiprocessing.get_all_start_methods():
+        return 1
+
+    cpu_count = os.cpu_count() or 1
+    if cpu_count <= 1:
+        return 1
+    return min(cpu_count, TEXTURE_PARALLEL_MAX_AUTO_WORKERS)
+
+
+def texture_face_chunks(face_count: int, chunk_size: int) -> list[tuple[int, ...]]:
+    return [
+        tuple(range(start, min(start + chunk_size, face_count)))
+        for start in range(0, face_count, max(1, chunk_size))
+    ]
+
+
+def set_texture_worker_state(
+    *,
+    vertices: list[tuple[float, float, float]],
+    faces: list[tuple[int, int, int]],
+    keyframes: list[ProjectionKeyframe],
+    tile_size: int,
+    columns: int,
+    dilation_pixels: int,
+) -> None:
+    global _TEXTURE_WORKER_VERTICES
+    global _TEXTURE_WORKER_FACES
+    global _TEXTURE_WORKER_KEYFRAMES
+    global _TEXTURE_WORKER_TILE_SIZE
+    global _TEXTURE_WORKER_COLUMNS
+    global _TEXTURE_WORKER_DILATION_PIXELS
+    _TEXTURE_WORKER_VERTICES = vertices
+    _TEXTURE_WORKER_FACES = faces
+    _TEXTURE_WORKER_KEYFRAMES = keyframes
+    _TEXTURE_WORKER_TILE_SIZE = tile_size
+    _TEXTURE_WORKER_COLUMNS = columns
+    _TEXTURE_WORKER_DILATION_PIXELS = dilation_pixels
+
+
+def rasterize_texture_face_chunk_worker(face_indices: tuple[int, ...]) -> list[TextureFaceResult]:
+    return [rasterize_texture_face_for_worker(face_index) for face_index in face_indices]
+
+
+def rasterize_texture_face_for_worker(face_index: int) -> TextureFaceResult:
+    tile_size = _TEXTURE_WORKER_TILE_SIZE
+    face = _TEXTURE_WORKER_FACES[face_index]
+    vertices = _TEXTURE_WORKER_VERTICES
+    keyframes = _TEXTURE_WORKER_KEYFRAMES
+    face_vertices = [vertices[face[0]], vertices[face[1]], vertices[face[2]]]
+    candidates = texture_projection_candidates(face_vertices, keyframes)
+    selected_keyframe = candidates[0].keyframe_debug_id if candidates else None
+    fallback_color: tuple[int, int, int] | None = None
+
+    def resolve_fallback_color() -> tuple[int, int, int]:
+        nonlocal fallback_color
+        if fallback_color is None:
+            fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
+        return fallback_color
+
+    tile_texture = Image.new("RGB", (tile_size, tile_size), FALLBACK_COLOR)
+    tile_mask = Image.new("L", (tile_size, tile_size), 0)
+    texture_pixels = tile_texture.load()
+    mask_pixels = tile_mask.load()
+    atlas_triangle = atlas_triangle_points((0, 0), tile_size)
+    raster_stats = rasterize_face_texture(
+        texture_pixels,
+        mask_pixels,
+        atlas_triangle,
+        face_vertices,
+        candidates,
+        resolve_fallback_color,
+    )
+    dilated_pixel_count = dilate_texture_tile(
+        texture_pixels,
+        mask_pixels,
+        (0, 0),
+        tile_size,
+        _TEXTURE_WORKER_DILATION_PIXELS,
+    )
+    uv_vertex_sample_colors = tuple(
+        sample_texture_at_atlas_point(texture_pixels, tile_size, tile_size, point[0], point[1])
+        for point in atlas_triangle
+    )
+    uv_face_interior_sample_colors = tuple(
+        sample_texture_at_atlas_point(texture_pixels, tile_size, tile_size, point[0], point[1])
+        for point in atlas_interior_sample_points(atlas_triangle)
+    )
+    keyframe_contribution_keys = tuple(
+        key
+        for key, count in raster_stats["keyframeContributionCounts"].items()
+        for _ in range(count)
+    )
+    return TextureFaceResult(
+        face_index=face_index,
+        tile_bytes=tile_texture.tobytes(),
+        selected_keyframe=selected_keyframe,
+        filled_pixel_count=raster_stats["filledPixelCount"],
+        projected_pixel_count=raster_stats["projectedPixelCount"],
+        fallback_pixel_count=raster_stats["fallbackPixelCount"],
+        blended_pixel_count=raster_stats["blendedPixelCount"],
+        single_sample_pixel_count=raster_stats["singleSamplePixelCount"],
+        accepted_projection_sample_count=raster_stats["acceptedProjectionSampleCount"],
+        rejected_overexposed_sample_count=raster_stats["rejectedOverexposedSampleCount"],
+        rejected_underexposed_sample_count=raster_stats["rejectedUnderexposedSampleCount"],
+        rejected_edge_sample_count=raster_stats["rejectedEdgeSampleCount"],
+        rejected_grazing_sample_count=raster_stats["rejectedGrazingSampleCount"],
+        rejected_invalid_projection_sample_count=raster_stats["rejectedInvalidProjectionSampleCount"],
+        dilated_pixel_count=dilated_pixel_count,
+        keyframe_contribution_keys=keyframe_contribution_keys,
+        uv_vertex_sample_colors=uv_vertex_sample_colors,
+        uv_face_interior_sample_colors=uv_face_interior_sample_colors,
+    )
 
 
 def atlas_layout(face_count: int, atlas_max_size: int = TEXTURE_ATLAS_MAX_SIZE) -> tuple[int, int, int, int]:
@@ -2583,10 +3035,10 @@ def texture_projection_candidates(
             continue
 
         edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
-        if edge_margin < projection_edge_margin_threshold(keyframe):
+        if edge_margin < keyframe.edge_margin_threshold:
             continue
 
-        center_bias = max(0.05, min(edge_margin / max(min(keyframe.width, keyframe.height) * 0.25, 1), 1))
+        center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
         view_vector = normalize(subtract(keyframe.camera_position, center))
         facing = abs(dot(normal, view_vector)) if normal != (0.0, 0.0, 0.0) else 0.25
         if facing < TEXTURE_BLEND_MIN_FACING:
@@ -2595,6 +3047,7 @@ def texture_projection_candidates(
         score = center_bias * (visible_vertex_count / 3) * max(facing, 0.15) / max(depth, 0.2)
         candidates.append(TextureProjectionCandidate(
             keyframe=keyframe,
+            keyframe_debug_id=keyframe.debug_id,
             score=score,
             visible_vertex_count=visible_vertex_count,
             center_projection=projection,
@@ -2641,28 +3094,28 @@ def rasterize_face_texture(
             if candidates:
                 world_point = interpolate_triangle(face_vertices, bary)
                 blend = blend_projected_texture_sample(world_point, candidates)
-                accepted_count = blend["acceptedSampleCount"]
+                accepted_count = blend.accepted_sample_count
                 if accepted_count > 0:
-                    color = blend["color"]
+                    color = blend.color
                     projected_pixel_count += 1
                     accepted_projection_sample_count += accepted_count
-                    rejected_overexposed_sample_count += blend["rejectedOverexposedSampleCount"]
-                    rejected_underexposed_sample_count += blend["rejectedUnderexposedSampleCount"]
-                    rejected_edge_sample_count += blend["rejectedEdgeSampleCount"]
-                    rejected_grazing_sample_count += blend["rejectedGrazingSampleCount"]
-                    rejected_invalid_projection_sample_count += blend["rejectedInvalidProjectionSampleCount"]
+                    rejected_overexposed_sample_count += blend.rejected_overexposed_sample_count
+                    rejected_underexposed_sample_count += blend.rejected_underexposed_sample_count
+                    rejected_edge_sample_count += blend.rejected_edge_sample_count
+                    rejected_grazing_sample_count += blend.rejected_grazing_sample_count
+                    rejected_invalid_projection_sample_count += blend.rejected_invalid_projection_sample_count
                     if accepted_count > 1:
                         blended_pixel_count += 1
                     else:
                         single_sample_pixel_count += 1
-                    for key, value in blend["keyframeContributionCounts"].items():
-                        keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + value
+                    for key in blend.keyframe_contribution_keys:
+                        keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + 1
                 else:
-                    rejected_overexposed_sample_count += blend["rejectedOverexposedSampleCount"]
-                    rejected_underexposed_sample_count += blend["rejectedUnderexposedSampleCount"]
-                    rejected_edge_sample_count += blend["rejectedEdgeSampleCount"]
-                    rejected_grazing_sample_count += blend["rejectedGrazingSampleCount"]
-                    rejected_invalid_projection_sample_count += blend["rejectedInvalidProjectionSampleCount"]
+                    rejected_overexposed_sample_count += blend.rejected_overexposed_sample_count
+                    rejected_underexposed_sample_count += blend.rejected_underexposed_sample_count
+                    rejected_edge_sample_count += blend.rejected_edge_sample_count
+                    rejected_grazing_sample_count += blend.rejected_grazing_sample_count
+                    rejected_invalid_projection_sample_count += blend.rejected_invalid_projection_sample_count
                     fallback_pixel_count += 1
             else:
                 fallback_pixel_count += 1
@@ -2712,7 +3165,7 @@ def blend_projected_texture_sample(
 
         u, v, depth = projection
         edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
-        if edge_margin < projection_edge_margin_threshold(keyframe):
+        if edge_margin < keyframe.edge_margin_threshold:
             rejected_edge_count += 1
             continue
 
@@ -2726,48 +3179,58 @@ def blend_projected_texture_sample(
             rejected_underexposed_count += 1
             continue
 
-        edge_weight = max(0.05, min(edge_margin / max(min(keyframe.width, keyframe.height) * 0.18, 1), 1))
+        edge_weight = max(0.05, min(edge_margin / keyframe.blend_edge_denominator, 1))
         weight = max(candidate.score, 1e-6) * edge_weight / max(depth, 0.2)
-        samples.append((weight, color, keyframe_debug_id(keyframe)))
+        samples.append((weight, color, candidate.keyframe_debug_id))
 
     if not samples:
-        return {
-            "color": FALLBACK_COLOR,
-            "acceptedSampleCount": 0,
-            "keyframeContributionCounts": {},
-            "rejectedOverexposedSampleCount": rejected_overexposed_count,
-            "rejectedUnderexposedSampleCount": rejected_underexposed_count,
-            "rejectedEdgeSampleCount": rejected_edge_count,
-            "rejectedGrazingSampleCount": rejected_grazing_count,
-            "rejectedInvalidProjectionSampleCount": rejected_invalid_projection_count,
-        }
+        return TextureBlendResult(
+            FALLBACK_COLOR,
+            0,
+            (),
+            rejected_overexposed_count,
+            rejected_underexposed_count,
+            rejected_edge_count,
+            rejected_grazing_count,
+            rejected_invalid_projection_count,
+        )
+
+    if len(samples) == 1:
+        _weight, color, key = samples[0]
+        return TextureBlendResult(
+            color,
+            1,
+            (key,),
+            rejected_overexposed_count,
+            rejected_underexposed_count,
+            rejected_edge_count,
+            rejected_grazing_count,
+            rejected_invalid_projection_count,
+        )
 
     total_weight = sum(weight for weight, _color, _key in samples)
     if total_weight <= 1e-8:
         total_weight = float(len(samples))
         samples = [(1.0, color, key) for _weight, color, key in samples]
 
-    linear_r = sum(weight * srgb_to_linear(color[0]) for weight, color, _key in samples) / total_weight
-    linear_g = sum(weight * srgb_to_linear(color[1]) for weight, color, _key in samples) / total_weight
-    linear_b = sum(weight * srgb_to_linear(color[2]) for weight, color, _key in samples) / total_weight
-    contribution_counts: dict[str, int] = {}
-    for _weight, _color, key in samples:
-        contribution_counts[key] = contribution_counts.get(key, 0) + 1
+    linear_r = sum(weight * SRGB_TO_LINEAR_LOOKUP[color[0]] for weight, color, _key in samples) / total_weight
+    linear_g = sum(weight * SRGB_TO_LINEAR_LOOKUP[color[1]] for weight, color, _key in samples) / total_weight
+    linear_b = sum(weight * SRGB_TO_LINEAR_LOOKUP[color[2]] for weight, color, _key in samples) / total_weight
 
-    return {
-        "color": (
+    return TextureBlendResult(
+        (
             linear_to_srgb(linear_r),
             linear_to_srgb(linear_g),
             linear_to_srgb(linear_b),
         ),
-        "acceptedSampleCount": len(samples),
-        "keyframeContributionCounts": contribution_counts,
-        "rejectedOverexposedSampleCount": rejected_overexposed_count,
-        "rejectedUnderexposedSampleCount": rejected_underexposed_count,
-        "rejectedEdgeSampleCount": rejected_edge_count,
-        "rejectedGrazingSampleCount": rejected_grazing_count,
-        "rejectedInvalidProjectionSampleCount": rejected_invalid_projection_count,
-    }
+        len(samples),
+        tuple(key for _weight, _color, key in samples),
+        rejected_overexposed_count,
+        rejected_underexposed_count,
+        rejected_edge_count,
+        rejected_grazing_count,
+        rejected_invalid_projection_count,
+    )
 
 
 def dilate_texture_tile(
@@ -2846,29 +3309,30 @@ def average_projected_color(
 
 
 def projection_edge_margin_threshold(keyframe: ProjectionKeyframe) -> float:
-    return max(2.0, min(keyframe.width, keyframe.height) * TEXTURE_BLEND_EDGE_MARGIN_RATIO)
+    return keyframe.edge_margin_threshold
 
 
 def keyframe_debug_id(keyframe: ProjectionKeyframe) -> str:
-    return keyframe.id or keyframe.path or "unknown"
+    return keyframe.debug_id
 
 
 def project_world_point(
     vertex: tuple[float, float, float],
     keyframe: ProjectionKeyframe,
 ) -> tuple[float, float, float] | None:
-    x, y, z = transform_point(keyframe.world_to_camera, list(vertex))
+    matrix = keyframe.world_to_camera_values
+    vx = float(vertex[0])
+    vy = float(vertex[1])
+    vz = float(vertex[2])
+    x = matrix[0] * vx + matrix[4] * vy + matrix[8] * vz + matrix[12]
+    y = matrix[1] * vx + matrix[5] * vy + matrix[9] * vz + matrix[13]
+    z = matrix[2] * vx + matrix[6] * vy + matrix[10] * vz + matrix[14]
     depth = -z
     if depth <= 0.05:
         return None
 
-    intrinsics = keyframe.intrinsics
-    fx = float(intrinsics[0])
-    fy = float(intrinsics[4])
-    cx = float(intrinsics[6])
-    cy = float(intrinsics[7])
-    u = fx * x / depth + cx
-    v = cy - fy * y / depth
+    u = keyframe.fx * x / depth + keyframe.cx
+    v = keyframe.cy - keyframe.fy * y / depth
     if not (0 <= u < keyframe.width and 0 <= v < keyframe.height):
         return None
 
@@ -2876,22 +3340,26 @@ def project_world_point(
 
 
 def sample_image_nearest(keyframe: ProjectionKeyframe, u: float, v: float) -> tuple[int, int, int]:
+    pixels = keyframe.pixels
     x = max(0, min(int(round(u)), keyframe.width - 1))
     y = max(0, min(int(round(v)), keyframe.height - 1))
-    return keyframe.pixels[x, y]
+    return pixels[x, y]
 
 
 def sample_image_bilinear(keyframe: ProjectionKeyframe, u: float, v: float) -> tuple[int, int, int]:
-    x0 = max(0, min(int(math.floor(u)), keyframe.width - 1))
-    y0 = max(0, min(int(math.floor(v)), keyframe.height - 1))
-    x1 = max(0, min(x0 + 1, keyframe.width - 1))
-    y1 = max(0, min(y0 + 1, keyframe.height - 1))
+    pixels = keyframe.pixels
+    width = keyframe.width
+    height = keyframe.height
+    x0 = max(0, min(int(math.floor(u)), width - 1))
+    y0 = max(0, min(int(math.floor(v)), height - 1))
+    x1 = max(0, min(x0 + 1, width - 1))
+    y1 = max(0, min(y0 + 1, height - 1))
     dx = u - x0
     dy = v - y0
-    c00 = keyframe.pixels[x0, y0]
-    c10 = keyframe.pixels[x1, y0]
-    c01 = keyframe.pixels[x0, y1]
-    c11 = keyframe.pixels[x1, y1]
+    c00 = pixels[x0, y0]
+    c10 = pixels[x1, y0]
+    c01 = pixels[x0, y1]
+    c11 = pixels[x1, y1]
     return (
         clamp_color((1 - dx) * (1 - dy) * c00[0] + dx * (1 - dy) * c10[0] + (1 - dx) * dy * c01[0] + dx * dy * c11[0]),
         clamp_color((1 - dx) * (1 - dy) * c00[1] + dx * (1 - dy) * c10[1] + (1 - dx) * dy * c01[1] + dx * dy * c11[1]),
@@ -2908,6 +3376,9 @@ def srgb_to_linear(value: int) -> float:
     if normalized <= 0.04045:
         return normalized / 12.92
     return ((normalized + 0.055) / 1.055) ** 2.4
+
+
+SRGB_TO_LINEAR_LOOKUP = tuple(srgb_to_linear(value) for value in range(256))
 
 
 def linear_to_srgb(value: float) -> int:
