@@ -166,6 +166,14 @@ class JobStore:
         record.error = error
         record.updated_at = now_utc().isoformat()
         self._persist(record)
+        logger.info(
+            "Job update status=%s stage=%s progress=%.1f message=%s",
+            record.status.value,
+            record.stage.value,
+            record.progress,
+            record.message,
+            extra={"job_id": record.job_id},
+        )
         await self.publish(record)
 
     def _persist(self, record: JobRecord) -> None:
