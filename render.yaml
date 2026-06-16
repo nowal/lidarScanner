@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: lidarai-processor
+    runtime: docker
+    plan: pro
+    region: oregon
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    healthCheckPath: /health
+    numInstances: 1
+    maxShutdownDelaySeconds: 300
+    autoDeployTrigger: commit
+    envVars:
+      - key: LIDARAI_STORAGE_DIR
+        value: /var/data
+      - key: LIDARAI_AUTH_TOKEN
+        sync: false
+      - key: LIDARAI_CORS_ORIGINS
+        value: "*"
+      - key: LIDARAI_JOB_TIMEOUT_SECONDS
+        value: "1200"
+    disk:
+      name: lidarai-processor-data
+      mountPath: /var/data
+      sizeGB: 20

@@ -1,0 +1,9 @@
+# Optional dense RGBD fusion stack.
+#
+# The default backend can decode compact depth frames and will fall back to
+# ARKit mesh-anchor fusion when this stack is not installed. Install this file
+# on a machine with enough disk space when you want Open3D TSDF fusion.
+-r requirements.txt
+numpy>=1.26,<3
+scipy>=1.14,<2
+open3d>=0.19,<1

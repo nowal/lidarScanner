@@ -4,3 +4,11 @@
 *.xcodeproj/xcuserdata/
 DerivedData/
 build/
+
+# Python/backend local state
+__pycache__/
+*.py[cod]
+.pytest_cache/
+backend/.env
+backend/.venv/
+backend/backend_storage/
