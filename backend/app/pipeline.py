@@ -2132,14 +2132,21 @@ async def write_textured_obj(
         if candidates:
             selected_key = keyframe_debug_id(candidates[0].keyframe)
             selected_keyframe_face_counts[selected_key] = selected_keyframe_face_counts.get(selected_key, 0) + 1
-        fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
+        fallback_color: tuple[int, int, int] | None = None
+
+        def resolve_fallback_color() -> tuple[int, int, int]:
+            nonlocal fallback_color
+            if fallback_color is None:
+                fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
+            return fallback_color
+
         raster_stats = rasterize_face_texture(
             texture_pixels,
             mask_pixels,
             atlas_triangle,
             face_vertices,
             candidates,
-            fallback_color,
+            resolve_fallback_color,
         )
         for key, value in raster_stats["keyframeContributionCounts"].items():
             keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + value
@@ -2605,7 +2612,7 @@ def rasterize_face_texture(
     atlas_triangle: list[tuple[float, float]],
     face_vertices: list[tuple[float, float, float]],
     candidates: list[TextureProjectionCandidate],
-    fallback_color: tuple[int, int, int],
+    fallback_color: Callable[[], tuple[int, int, int]],
 ) -> dict:
     min_x = max(0, int(math.floor(min(point[0] for point in atlas_triangle))))
     max_x = int(math.ceil(max(point[0] for point in atlas_triangle)))
@@ -2630,7 +2637,7 @@ def rasterize_face_texture(
             if bary is None or min(bary) < -1e-5:
                 continue
 
-            color = fallback_color
+            color: tuple[int, int, int] | None = None
             if candidates:
                 world_point = interpolate_triangle(face_vertices, bary)
                 blend = blend_projected_texture_sample(world_point, candidates)
@@ -2659,6 +2666,8 @@ def rasterize_face_texture(
                     fallback_pixel_count += 1
             else:
                 fallback_pixel_count += 1
+            if color is None:
+                color = fallback_color()
             texture_pixels[x, y] = color
             mask_pixels[x, y] = 255
             filled_pixel_count += 1
