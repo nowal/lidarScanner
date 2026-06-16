@@ -81,6 +81,18 @@ def test_job_store_rehydrates_persisted_job_records(tmp_path):
     assert "restart" in reloaded.message
 
 
+def test_job_store_loads_job_created_by_another_process(tmp_path):
+    reader_store = JobStore(str(tmp_path))
+    writer_store = JobStore(str(tmp_path))
+    record = writer_store.create_job()
+
+    loaded = reader_store.get(record.job_id)
+
+    assert loaded is not None
+    assert loaded.job_id == record.job_id
+    assert loaded.status == JobStatus.queued
+
+
 def test_arkit_depth_backprojection_roundtrips_through_keyframe_projection():
     intrinsics = [
         10, 0, 0,

@@ -61,7 +61,20 @@ class JobStore:
         return record
 
     def get(self, job_id: str) -> Optional[JobRecord]:
-        return self.jobs.get(job_id)
+        record = self.jobs.get(job_id)
+        if record and record.lock.locked():
+            return record
+        if record and record.status in {JobStatus.complete, JobStatus.failed, JobStatus.cancelled}:
+            return record
+
+        persisted = self._load_record(self._job_dir(job_id), mark_interrupted_running=False)
+        if persisted:
+            if record:
+                persisted.lock = record.lock
+            self.jobs[job_id] = persisted
+            return persisted
+
+        return record
 
     def _job_dir(self, job_id: str) -> Path:
         return self.jobs_path / job_id
@@ -199,16 +212,20 @@ class JobStore:
         for job_dir in sorted(self.jobs_path.iterdir()):
             if not job_dir.is_dir():
                 continue
-            record = self._load_record(job_dir)
+            record = self._load_record(job_dir, mark_interrupted_running=True)
             if record:
                 self.jobs[record.job_id] = record
 
-    def _load_record(self, job_dir: Path) -> Optional[JobRecord]:
+    def _load_record(self, job_dir: Path, *, mark_interrupted_running: bool) -> Optional[JobRecord]:
         record_path = job_dir / "record.json"
         if record_path.exists():
             try:
                 data = json.loads(record_path.read_text(encoding="utf-8"))
-                return self._record_from_private_json(job_dir, data)
+                return self._record_from_private_json(
+                    job_dir,
+                    data,
+                    mark_interrupted_running=mark_interrupted_running,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Could not load persisted job record", extra={"job_id": job_dir.name, "error": str(exc)})
 
@@ -239,13 +256,19 @@ class JobStore:
             artifact_path=artifact_path,
         )
 
-    def _record_from_private_json(self, job_dir: Path, data: dict) -> JobRecord:
+    def _record_from_private_json(
+        self,
+        job_dir: Path,
+        data: dict,
+        *,
+        mark_interrupted_running: bool,
+    ) -> JobRecord:
         status = JobStatus(data["status"])
         stage = JobStage(data["stage"])
         message = data.get("message", "")
         error = data.get("error")
 
-        if status == JobStatus.running:
+        if mark_interrupted_running and status == JobStatus.running:
             status = JobStatus.failed
             stage = JobStage.failed
             message = "Processing was interrupted by a service restart. Please retry the upload."
