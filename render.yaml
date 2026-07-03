@@ -18,6 +18,26 @@ services:
         value: "*"
       - key: LIDARAI_JOB_TIMEOUT_SECONDS
         value: "1200"
+      - key: LIDARAI_TEXTURE_WORKERS
+        value: "2"
+      - key: LIDARAI_AI_PROVIDER
+        value: openai
+      - key: LIDARAI_OPENAI_API_KEY
+        sync: false
+      - key: LIDARAI_OPENAI_ORGANIZATION
+        value: ""
+      - key: LIDARAI_OPENAI_PROJECT
+        value: ""
+      - key: LIDARAI_OPENAI_MODEL
+        value: gpt-5.5
+      - key: LIDARAI_OPENAI_FALLBACK_MODEL
+        value: ""
+      - key: LIDARAI_OPENAI_REASONING_EFFORT
+        value: medium
+      - key: LIDARAI_OPENAI_REQUEST_TIMEOUT_SECONDS
+        value: "45"
+      - key: LIDARAI_OPENAI_MAX_IMAGES_PER_REQUEST
+        value: "1"
     disk:
       name: lidarai-processor-data
       mountPath: /var/data

@@ -25,6 +25,14 @@ from .models import (
     UploadStateResponse,
     now_utc,
 )
+from .home_ai import (
+    HomeAIChatRequest,
+    HomeAIChatResponse,
+    HomeAIEventRequest,
+    HomeAIEventResponse,
+    generate_home_ai_response,
+    record_home_ai_event,
+)
 from .store import store
 
 configure_logging(settings.storage_dir)
@@ -51,6 +59,24 @@ def require_token(authorization: Optional[str] = Header(default=None)) -> None:
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(status="ok", time=now_utc())
+
+
+@app.post(
+    f"{settings.api_prefix}/ai/home-chat",
+    response_model=HomeAIChatResponse,
+    dependencies=[Depends(require_token)],
+)
+async def home_ai_chat(request_body: HomeAIChatRequest) -> HomeAIChatResponse:
+    return await generate_home_ai_response(request_body)
+
+
+@app.post(
+    f"{settings.api_prefix}/ai/home-events",
+    response_model=HomeAIEventResponse,
+    dependencies=[Depends(require_token)],
+)
+async def home_ai_event(request_body: HomeAIEventRequest) -> HomeAIEventResponse:
+    return await record_home_ai_event(request_body)
 
 
 @app.post(f"{settings.api_prefix}/jobs", response_model=CreateJobResponse, dependencies=[Depends(require_token)])

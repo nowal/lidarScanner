@@ -12,6 +12,15 @@ class Settings(BaseSettings):
     auth_token: str = ""
     cors_origins: str = "*"
     job_timeout_seconds: int = 1200
+    ai_provider: str = "openai"
+    openai_api_key: str = ""
+    openai_organization: str = ""
+    openai_project: str = ""
+    openai_model: str = "gpt-5.5"
+    openai_fallback_model: str = ""
+    openai_reasoning_effort: str = "medium"
+    openai_request_timeout_seconds: int = 45
+    openai_max_images_per_request: int = 1
 
 
 settings = Settings()
