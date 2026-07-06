@@ -298,7 +298,7 @@ class ProcessingProfile:
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
     "fast_onboarding": ProcessingProfile(
         name="fast_onboarding",
-        max_keyframes=40,
+        max_keyframes=18,
         max_depth_frames=48,
         max_rgbd_frames=36,
         use_rgbd_geometry=True,

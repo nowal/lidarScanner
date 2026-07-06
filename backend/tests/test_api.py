@@ -992,7 +992,7 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
 
         keyframe_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/keyframe_selection.json", headers=headers)).json()
         assert keyframe_selection["originalKeyframeCount"] == 55
-        assert keyframe_selection["selectedKeyframeCount"] == 40
+        assert keyframe_selection["selectedKeyframeCount"] == 18
 
         depth_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_selection.json", headers=headers)).json()
         assert depth_selection["originalDepthFrameCount"] == 55
