@@ -257,6 +257,7 @@ TEXTURE_PLANAR_CHART_PADDING_METERS = 0.06
 TEXTURE_PLANAR_CHART_ATLAS_HEIGHT_RATIO = 0.68
 TEXTURE_PLANAR_CHART_DIRECT_MAX_CANDIDATES = 3
 TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE = 0.35
+TEXTURE_PLANAR_CHART_NEIGHBOR_FILL_ENABLED = True
 TEXTURE_ISLAND_DILATION_PIXELS = 4
 TEXTURE_COLOR_SATURATION_BOOST = 1.12
 TEXTURE_COLOR_CONTRAST_BOOST = 1.05
@@ -2890,6 +2891,7 @@ async def write_textured_obj(
     rasterized_pixel_count = 0
     projected_pixel_count = 0
     fallback_pixel_count = 0
+    neighbor_filled_pixel_count = 0
     dilated_pixel_count = 0
     uv_vertex_sample_stats = ColorStatsAccumulator()
     uv_face_interior_sample_stats = ColorStatsAccumulator()
@@ -2944,6 +2946,7 @@ async def write_textured_obj(
         rasterized_pixel_count = parallel_result["rasterized_pixel_count"]
         projected_pixel_count = parallel_result["projected_pixel_count"]
         fallback_pixel_count = parallel_result["fallback_pixel_count"]
+        neighbor_filled_pixel_count = parallel_result.get("neighbor_filled_pixel_count", 0)
         dilated_pixel_count = parallel_result["dilated_pixel_count"]
         uv_vertex_sample_stats = parallel_result["uv_vertex_sample_stats"]
         uv_face_interior_sample_stats = parallel_result["uv_face_interior_sample_stats"]
@@ -3052,6 +3055,7 @@ async def write_textured_obj(
             rasterized_pixel_count += raster_stats["filledPixelCount"]
             projected_pixel_count += raster_stats["projectedPixelCount"]
             fallback_pixel_count += raster_stats["fallbackPixelCount"]
+            neighbor_filled_pixel_count += raster_stats.get("neighborFilledPixelCount", 0)
             blended_pixel_count += raster_stats["blendedPixelCount"]
             single_sample_pixel_count += raster_stats["singleSamplePixelCount"]
             accepted_projection_sample_count += raster_stats["acceptedProjectionSampleCount"]
@@ -3221,6 +3225,7 @@ async def write_textured_obj(
             chart_stats["rasterizedPixelCount"] = filled
             chart_stats["projectedPixelCount"] = projected
             chart_stats["fallbackPixelCount"] = int(context_stats.get("fallbackPixelCount", 0))
+            chart_stats["neighborFilledPixelCount"] = int(context_stats.get("neighborFilledPixelCount", 0))
             chart_stats["projectedPixelRatio"] = round(projected / max(filled, 1), 4)
     atlas_layout_debug_stats = {
         **atlas_layout_spec.stats,
@@ -3249,6 +3254,7 @@ async def write_textured_obj(
         rasterized_pixel_count=rasterized_pixel_count,
         projected_pixel_count=projected_pixel_count,
         fallback_pixel_count=fallback_pixel_count,
+        neighbor_filled_pixel_count=neighbor_filled_pixel_count,
         dilated_pixel_count=dilated_pixel_count,
         selected_keyframe_face_counts=selected_keyframe_face_counts,
         keyframe_contribution_counts=keyframe_contribution_counts,
@@ -4302,6 +4308,7 @@ def build_texture_diagnostics(
     rasterized_pixel_count: int,
     projected_pixel_count: int,
     fallback_pixel_count: int,
+    neighbor_filled_pixel_count: int,
     dilated_pixel_count: int,
     selected_keyframe_face_counts: dict[str, int],
     keyframe_contribution_counts: dict[str, int],
@@ -4386,6 +4393,7 @@ def build_texture_diagnostics(
             "rasterizedPixelCount": rasterized_pixel_count,
             "projectedPixelCount": projected_pixel_count,
             "fallbackPixelCount": fallback_pixel_count,
+            "neighborFilledPixelCount": neighbor_filled_pixel_count,
             "fallbackRasterPixelRatio": round(fallback_raster_ratio, 4),
             "dilatedPixelCount": dilated_pixel_count,
             "projectedRasterPixelRatio": round(raster_projection_ratio, 4),
@@ -4666,6 +4674,7 @@ def empty_texture_raster_stats() -> dict:
         "filledPixelCount": 0,
         "projectedPixelCount": 0,
         "fallbackPixelCount": 0,
+        "neighborFilledPixelCount": 0,
         "blendedPixelCount": 0,
         "singleSamplePixelCount": 0,
         "acceptedProjectionSampleCount": 0,
@@ -4686,6 +4695,7 @@ def merge_texture_raster_stats(total: dict, addition: dict) -> None:
         "filledPixelCount",
         "projectedPixelCount",
         "fallbackPixelCount",
+        "neighborFilledPixelCount",
         "blendedPixelCount",
         "singleSamplePixelCount",
         "acceptedProjectionSampleCount",
@@ -4861,10 +4871,11 @@ def rasterize_planar_chart_texture(
             block_width = min(stride, chart_right - x)
             block_height = min(stride, chart_bottom - y)
             block_pixel_count = block_width * block_height
+            mask_value = 255 if accepted_count > 0 else 0
             for block_y in range(y, y + block_height):
                 for block_x in range(x, x + block_width):
                     texture_pixels[block_x, block_y] = color
-                    mask_pixels[block_x, block_y] = 255
+                    mask_pixels[block_x, block_y] = mask_value
             stats["filledPixelCount"] += block_pixel_count
             if blend is not None:
                 stats["rejectedOverexposedSampleCount"] += blend.rejected_overexposed_sample_count
@@ -4888,7 +4899,121 @@ def rasterize_planar_chart_texture(
             else:
                 stats["fallbackPixelCount"] += block_pixel_count
 
+    if (
+        TEXTURE_PLANAR_CHART_NEIGHBOR_FILL_ENABLED
+        and projection_mode == "direct"
+        and stats["projectedPixelCount"] > 0
+        and stats["fallbackPixelCount"] > 0
+    ):
+        fill_stats = fill_planar_chart_holes_from_neighbors(
+            texture_pixels,
+            mask_pixels,
+            chart,
+            fallback_color(),
+        )
+        neighbor_filled = fill_stats["neighborFilledPixelCount"]
+        stats["neighborFilledPixelCount"] += neighbor_filled
+        stats["fallbackPixelCount"] = fill_stats["unresolvedFallbackPixelCount"]
+
     return stats
+
+
+def fill_planar_chart_holes_from_neighbors(
+    texture_pixels: object,
+    mask_pixels: object,
+    chart: PlanarTextureChart,
+    fallback_color: tuple[int, int, int],
+) -> dict:
+    chart_right = chart.x + chart.width
+    chart_bottom = chart.y + chart.height
+    neighbor_filled_count = 0
+
+    def blend_colors(first: tuple[int, int, int], second: tuple[int, int, int]) -> tuple[int, int, int]:
+        return (
+            clamp_color((first[0] + second[0]) * 0.5),
+            clamp_color((first[1] + second[1]) * 0.5),
+            clamp_color((first[2] + second[2]) * 0.5),
+        )
+
+    for y in range(chart.y, chart_bottom):
+        row_filled_count = 0
+        last_color: tuple[int, int, int] | None = None
+        for x in range(chart.x, chart_right):
+            if mask_pixels[x, y] == 255:
+                pixel = texture_pixels[x, y]
+                last_color = (int(pixel[0]), int(pixel[1]), int(pixel[2]))
+            elif last_color is not None:
+                texture_pixels[x, y] = last_color
+                mask_pixels[x, y] = 64
+                neighbor_filled_count += 1
+                row_filled_count += 1
+
+        if row_filled_count < chart.width:
+            last_color = None
+            for x in range(chart_right - 1, chart.x - 1, -1):
+                if mask_pixels[x, y] == 255:
+                    pixel = texture_pixels[x, y]
+                    last_color = (int(pixel[0]), int(pixel[1]), int(pixel[2]))
+                elif last_color is not None:
+                    if mask_pixels[x, y] == 64:
+                        existing = texture_pixels[x, y]
+                        texture_pixels[x, y] = blend_colors(
+                            (int(existing[0]), int(existing[1]), int(existing[2])),
+                            last_color,
+                        )
+                    else:
+                        texture_pixels[x, y] = last_color
+                        mask_pixels[x, y] = 64
+                        neighbor_filled_count += 1
+
+    for x in range(chart.x, chart_right):
+        last_color = None
+        for y in range(chart.y, chart_bottom):
+            if mask_pixels[x, y] == 255:
+                pixel = texture_pixels[x, y]
+                last_color = (int(pixel[0]), int(pixel[1]), int(pixel[2]))
+            elif last_color is not None:
+                if mask_pixels[x, y] == 64:
+                    existing = texture_pixels[x, y]
+                    texture_pixels[x, y] = blend_colors(
+                        (int(existing[0]), int(existing[1]), int(existing[2])),
+                        last_color,
+                    )
+                else:
+                    texture_pixels[x, y] = last_color
+                    mask_pixels[x, y] = 64
+                    neighbor_filled_count += 1
+
+        last_color = None
+        for y in range(chart_bottom - 1, chart.y - 1, -1):
+            if mask_pixels[x, y] == 255:
+                pixel = texture_pixels[x, y]
+                last_color = (int(pixel[0]), int(pixel[1]), int(pixel[2]))
+            elif last_color is not None:
+                if mask_pixels[x, y] == 64:
+                    existing = texture_pixels[x, y]
+                    texture_pixels[x, y] = blend_colors(
+                        (int(existing[0]), int(existing[1]), int(existing[2])),
+                        last_color,
+                    )
+                else:
+                    texture_pixels[x, y] = last_color
+                    mask_pixels[x, y] = 64
+                    neighbor_filled_count += 1
+
+    unresolved_count = 0
+    for y in range(chart.y, chart_bottom):
+        for x in range(chart.x, chart_right):
+            if mask_pixels[x, y] != 0:
+                continue
+            texture_pixels[x, y] = fallback_color
+            mask_pixels[x, y] = 128
+            unresolved_count += 1
+
+    return {
+        "neighborFilledPixelCount": neighbor_filled_count,
+        "unresolvedFallbackPixelCount": unresolved_count,
+    }
 
 
 def fill_solid_texture_tile(

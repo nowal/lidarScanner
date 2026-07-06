@@ -917,6 +917,69 @@ async def test_fast_planar_chart_uses_single_owner_keyframe(monkeypatch, tmp_pat
     assert {item["keyframe"] for item in contributions} == {"red-owner"}
 
 
+def test_direct_planar_chart_fills_owner_projection_holes():
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    intrinsics = [
+        12, 0, 0,
+        0, 12, 0,
+        12, 12, 1,
+    ]
+    image = Image.new("RGB", (24, 24), (190, 130, 80))
+    keyframe = pipeline.ProjectionKeyframe(
+        image=image,
+        width=image.width,
+        height=image.height,
+        world_to_camera=pipeline.invert_rigid_transform(transform),
+        camera_position=(0, 0, 0),
+        intrinsics=intrinsics,
+        pixels=image.load(),
+        id="owner",
+    )
+    chart = pipeline.PlanarTextureChart(
+        chart_id=0,
+        face_indices=[0],
+        normal=(0, 0, 1),
+        plane_offset=1,
+        axis_u=(1, 0, 0),
+        axis_v=(0, 1, 0),
+        min_u=-2.0,
+        max_u=2.0,
+        min_v=-0.5,
+        max_v=0.5,
+        width=32,
+        height=12,
+        x=0,
+        y=0,
+    )
+    candidates = pipeline.texture_projection_candidates_for_region(
+        pipeline.chart_region_points(chart),
+        chart.normal,
+        [keyframe],
+    )
+    texture = Image.new("RGB", (32, 12), pipeline.FALLBACK_COLOR)
+    mask = Image.new("L", (32, 12), 0)
+
+    stats = pipeline.rasterize_planar_chart_texture(
+        texture.load(),
+        mask.load(),
+        chart,
+        candidates,
+        lambda: pipeline.FALLBACK_COLOR,
+        sample_stride=1,
+        projection_mode="direct",
+    )
+
+    assert stats["projectedPixelCount"] > 0
+    assert stats["neighborFilledPixelCount"] > 0
+    assert stats["fallbackPixelCount"] == 0
+    assert texture.load()[0, 6] != pipeline.FALLBACK_COLOR
+
+
 @pytest.mark.asyncio
 async def test_fast_texture_profile_caps_expensive_fallback_faces(tmp_path):
     transform = [
