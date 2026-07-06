@@ -219,6 +219,8 @@ TEXTURE_TILE_MIN_SIZE = 4
 TEXTURE_RENDER_TARGET_MIN_TILE_SIZE = 12
 TEXTURE_RENDER_TARGET_FACE_COUNT = 120_000
 TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT = 150_000
+FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT = 45_000
+FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT = 50_000
 TEXTURE_RENDER_MIN_CLUSTER_METERS = 0.006
 TEXTURE_RENDER_MAX_CLUSTER_METERS = 0.08
 TEXTURE_RENDER_SMOOTHING_ITERATIONS = 8
@@ -302,10 +304,10 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         max_depth_frames=48,
         max_rgbd_frames=36,
         use_rgbd_geometry=True,
-        write_vertex_colored_debug=True,
+        write_vertex_colored_debug=False,
         write_texture_debug_preview=False,
-        texture_render_target_faces=TEXTURE_RENDER_TARGET_FACE_COUNT,
-        texture_tsdf_render_target_faces=TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
+        texture_render_target_faces=FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT,
+        texture_tsdf_render_target_faces=FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",

@@ -977,8 +977,8 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
         assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
-        assert status["artifacts"]["vertexColoredPlyUrl"].endswith("/colored_mesh.ply")
-        assert status["artifacts"]["previewMeshUrl"].endswith("/colored_mesh.ply")
+        assert status["artifacts"]["vertexColoredPlyUrl"] is None
+        assert status["artifacts"]["previewMeshUrl"].endswith("/rgbd_fused_mesh.obj")
         assert status["artifacts"]["textureDebugPreviewUrl"] is None
         assert status["artifacts"]["stageTimingsUrl"].endswith("/stage_timings.json")
 
@@ -987,7 +987,8 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
         assert rgbd_stats["geometrySource"] in {"rgbd_tsdf_open3d", "rgbd_keyframe_depth_mesh"}
         assert rgbd_stats["profile"]["name"] == "fast_onboarding"
         assert rgbd_stats["profile"]["useRgbdGeometry"] is True
-        assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.TEXTURE_RENDER_TARGET_FACE_COUNT
+        assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
+        assert rgbd_stats["profile"]["textureTsdfRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["sampledDepthFrameCount"] == 36
 
         keyframe_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/keyframe_selection.json", headers=headers)).json()
@@ -1002,7 +1003,13 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
         assert manifest["processingProfile"]["name"] == "fast_onboarding"
         assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is True
-        assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is True
+        assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
+        render_target = manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["targetFaceCount"]
+        assert render_target in {
+            pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT,
+            pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
+        }
+        assert render_target < pipeline.TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
 
         timings = (await client.get(f"/api/v1/jobs/{job_id}/result/stage_timings.json", headers=headers)).json()
