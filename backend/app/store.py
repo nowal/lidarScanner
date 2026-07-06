@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -104,23 +106,25 @@ class JobStore:
         texture_png_url = None
         texture_debug_json_url = None
         texture_debug_preview_url = None
+        stage_timings_url = None
         usdz_url = None
         glb_url = None
         if record.artifact_path:
             result_base = f"{settings.api_prefix}/jobs/{record.job_id}/result"
             result_dir = self.result_dir(record.job_id)
             result_bundle_url = result_base
-            preview_mesh_url = f"{result_base}/colored_mesh.ply"
             manifest_url = f"{result_base}/manifest.json"
             raw_fused_mesh_url = self._artifact_url_if_present(result_dir, result_base, "fused_mesh.obj")
             arkit_fused_mesh_url = self._artifact_url_if_present(result_dir, result_base, "arkit_fused_mesh.obj")
             rgbd_fused_mesh_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_fused_mesh.obj")
             vertex_colored_ply_url = self._artifact_url_if_present(result_dir, result_base, "colored_mesh.ply")
+            preview_mesh_url = vertex_colored_ply_url or raw_fused_mesh_url
             textured_obj_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.obj")
             textured_mtl_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.mtl")
             texture_png_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh_texture.png")
             texture_debug_json_url = self._artifact_url_if_present(result_dir, result_base, "texture_debug.json")
             texture_debug_preview_url = self._artifact_url_if_present(result_dir, result_base, "texture_debug_preview.png")
+            stage_timings_url = self._artifact_url_if_present(result_dir, result_base, "stage_timings.json")
             usdz_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.usdz")
             glb_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.glb")
         return JobStatusResponse(
@@ -145,6 +149,7 @@ class JobStore:
                 texturePngUrl=texture_png_url,
                 textureDebugJsonUrl=texture_debug_json_url,
                 textureDebugPreviewUrl=texture_debug_preview_url,
+                stageTimingsUrl=stage_timings_url,
                 usdzUrl=usdz_url,
                 glbUrl=glb_url,
             ),
@@ -308,6 +313,8 @@ class JobStore:
 
             await self.update(record, status=JobStatus.running, stage=JobStage.preprocessing, progress=1, message="Processing started")
             job_dir = self._job_dir(record.job_id)
+            timings_path = job_dir / "work" / "stage_timings.json"
+            stage_timings: list[dict] = []
 
             try:
                 for stage in DEFAULT_PIPELINE:
@@ -317,13 +324,35 @@ class JobStore:
                     async def report(stage_name: JobStage, progress: float, message: str) -> None:
                         await self.update(record, status=JobStatus.running, stage=stage_name, progress=progress, message=message)
 
+                    started = time.perf_counter()
                     await stage.run(job_dir, report=report, is_cancelled=lambda: record.cancelled)
+                    elapsed = time.perf_counter() - started
+                    stage_timings.append({
+                        "stage": stage.name.value,
+                        "stageClass": stage.__class__.__name__,
+                        "elapsedSeconds": round(elapsed, 3),
+                    })
+                    timings_path.write_text(json.dumps({
+                        "jobId": record.job_id,
+                        "timings": stage_timings,
+                        "totalElapsedSeconds": round(sum(item["elapsedSeconds"] for item in stage_timings), 3),
+                    }, indent=2), encoding="utf-8")
 
                 record.artifact_path = str(self.result_dir(record.job_id))
+                final_timings = self.result_dir(record.job_id) / "stage_timings.json"
+                if timings_path.exists() and final_timings.parent.exists():
+                    shutil.copyfile(timings_path, final_timings)
                 await self.update(record, status=JobStatus.complete, stage=JobStage.complete, progress=100, message="Processing complete")
             except asyncio.CancelledError:
                 await self.update(record, status=JobStatus.cancelled, stage=JobStage.cancelled, message="Processing cancelled")
             except Exception as exc:  # noqa: BLE001
+                if stage_timings:
+                    timings_path.write_text(json.dumps({
+                        "jobId": record.job_id,
+                        "timings": stage_timings,
+                        "totalElapsedSeconds": round(sum(item["elapsedSeconds"] for item in stage_timings), 3),
+                        "failed": True,
+                    }, indent=2), encoding="utf-8")
                 logger.exception("Pipeline failed", extra={"job_id": record.job_id})
                 await self.update(
                     record,

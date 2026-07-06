@@ -13,7 +13,7 @@ import multiprocessing
 import os
 import shutil
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Awaitable, Callable, NamedTuple, Protocol
 
@@ -47,6 +47,32 @@ class FusedMesh:
 
 
 @dataclass
+class ProjectionDepthFrame:
+    id: str | None
+    color_keyframe_id: str | None
+    width: int
+    height: int
+    world_to_camera: list[float]
+    intrinsics: list[float]
+    depth_values: array
+    confidence_values: bytes | None = None
+    world_to_camera_values: tuple[float, ...] = field(init=False, repr=False)
+    fx: float = field(init=False)
+    fy: float = field(init=False)
+    cx: float = field(init=False)
+    cy: float = field(init=False)
+    debug_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.world_to_camera_values = tuple(float(value) for value in self.world_to_camera[:16])
+        self.fx = float(self.intrinsics[0]) if len(self.intrinsics) > 0 else 0.0
+        self.fy = float(self.intrinsics[4]) if len(self.intrinsics) > 4 else 0.0
+        self.cx = float(self.intrinsics[6]) if len(self.intrinsics) > 6 else 0.0
+        self.cy = float(self.intrinsics[7]) if len(self.intrinsics) > 7 else 0.0
+        self.debug_id = self.id or self.color_keyframe_id or "unknown-depth"
+
+
+@dataclass
 class ProjectionKeyframe:
     image: Image.Image
     width: int
@@ -58,6 +84,7 @@ class ProjectionKeyframe:
     id: str | None = None
     path: str | None = None
     color_correction: dict | None = None
+    depth_frame: ProjectionDepthFrame | None = None
     world_to_camera_values: tuple[float, ...] = field(init=False, repr=False)
     fx: float = field(init=False)
     fy: float = field(init=False)
@@ -101,6 +128,9 @@ class TextureBlendResult(NamedTuple):
     rejected_edge_sample_count: int
     rejected_grazing_sample_count: int
     rejected_invalid_projection_sample_count: int
+    rejected_occluded_sample_count: int
+    depth_tested_sample_count: int
+    missing_depth_sample_count: int
 
 
 class TextureFaceResult(NamedTuple):
@@ -118,10 +148,54 @@ class TextureFaceResult(NamedTuple):
     rejected_edge_sample_count: int
     rejected_grazing_sample_count: int
     rejected_invalid_projection_sample_count: int
+    rejected_occluded_sample_count: int
+    depth_tested_sample_count: int
+    missing_depth_sample_count: int
     dilated_pixel_count: int
     keyframe_contribution_keys: tuple[str, ...]
     uv_vertex_sample_colors: tuple[tuple[int, int, int], ...]
     uv_face_interior_sample_colors: tuple[tuple[int, int, int], ...]
+
+
+class DepthVisibilityResult(NamedTuple):
+    status: str
+    weight: float
+    projected_depth: float | None
+    sampled_depth: float | None
+    confidence: int | None
+
+
+@dataclass
+class PlanarTextureChart:
+    chart_id: int
+    face_indices: list[int]
+    normal: tuple[float, float, float]
+    plane_offset: float
+    axis_u: tuple[float, float, float]
+    axis_v: tuple[float, float, float]
+    min_u: float
+    max_u: float
+    min_v: float
+    max_v: float
+    width: int
+    height: int
+    x: int = 0
+    y: int = 0
+    source_plane_index: int | None = None
+
+
+@dataclass
+class TextureAtlasLayout:
+    width: int
+    height: int
+    tile_size: int
+    columns: int
+    tile_start_y: int
+    planar_charts: list[PlanarTextureChart]
+    face_to_chart: dict[int, PlanarTextureChart]
+    face_to_tile_index: dict[int, int]
+    strategy: str
+    stats: dict
 
 
 @dataclass
@@ -153,6 +227,31 @@ TEXTURE_RENDER_SMOOTHING_BOUNDARY_STRENGTH = 0.16
 TEXTURE_RENDER_SMOOTHING_HARD_EDGE_WEIGHT = 0.08
 TEXTURE_RENDER_SMOOTHING_NORMAL_COSINE = 0.72
 TEXTURE_RENDER_SMOOTHING_MAX_TOTAL_DISPLACEMENT_METERS = 0.10
+TEXTURE_RENDER_PLANE_REGULARIZATION_ENABLED = True
+TEXTURE_RENDER_PLANE_MAX_PLANES = 8
+TEXTURE_RENDER_PLANE_DISTANCE_THRESHOLD_METERS = 0.035
+TEXTURE_RENDER_PLANE_NORMAL_ALIGNMENT = 0.68
+TEXTURE_RENDER_PLANE_MIN_VERTEX_RATIO = 0.035
+TEXTURE_RENDER_PLANE_MIN_VERTICES = 1_200
+TEXTURE_RENDER_PLANE_STRENGTH = 0.65
+TEXTURE_RENDER_PLANE_MAX_DISPLACEMENT_METERS = 0.04
+TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_ITERATIONS = 5
+TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_STRENGTH = 0.28
+TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_BOUNDARY_STRENGTH = 0.08
+TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_HARD_EDGE_WEIGHT = 0.18
+TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_NORMAL_COSINE = 0.84
+TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_MAX_TOTAL_DISPLACEMENT_METERS = 0.055
+TEXTURE_PLANAR_CHARTS_ENABLED = True
+TEXTURE_PLANAR_CHART_MAX_COUNT = 6
+TEXTURE_PLANAR_CHART_MIN_FACE_COUNT = 1_200
+TEXTURE_PLANAR_CHART_MIN_AREA_M2 = 0.75
+TEXTURE_PLANAR_CHART_DISTANCE_METERS = 0.055
+TEXTURE_PLANAR_CHART_NORMAL_ALIGNMENT = 0.72
+TEXTURE_PLANAR_CHART_PIXELS_PER_METER = 360
+TEXTURE_PLANAR_CHART_MIN_SIZE = 256
+TEXTURE_PLANAR_CHART_MAX_SIZE = 1792
+TEXTURE_PLANAR_CHART_PADDING_METERS = 0.06
+TEXTURE_PLANAR_CHART_ATLAS_HEIGHT_RATIO = 0.58
 TEXTURE_ISLAND_DILATION_PIXELS = 4
 TEXTURE_COLOR_SATURATION_BOOST = 1.12
 TEXTURE_COLOR_CONTRAST_BOOST = 1.05
@@ -160,6 +259,11 @@ TEXTURE_BLEND_MAX_FACE_CANDIDATES = 6
 TEXTURE_BLEND_MAX_PIXEL_SAMPLES = 5
 TEXTURE_BLEND_MIN_FACING = 0.18
 TEXTURE_BLEND_EDGE_MARGIN_RATIO = 0.018
+TEXTURE_DEPTH_OCCLUSION_BASE_TOLERANCE_METERS = 0.08
+TEXTURE_DEPTH_OCCLUSION_RELATIVE_TOLERANCE = 0.035
+TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT = 0.72
+TEXTURE_DEPTH_MISMATCH_MIN_WEIGHT = 0.35
+TEXTURE_DEPTH_NEIGHBORHOOD_RADIUS = 1
 TEXTURE_REJECT_OVEREXPOSED_LUMINANCE = 245
 TEXTURE_REJECT_UNDEREXPOSED_LUMINANCE = 8
 TEXTURE_REJECT_LOW_DETAIL_RANGE = 10
@@ -178,6 +282,47 @@ RGBD_DEPTH_MESH_TARGET_SAMPLES_PER_FRAME = 16_384
 RGBD_DEPTH_MESH_VERTEX_QUANTIZATION = 0.006
 
 
+@dataclass(frozen=True)
+class ProcessingProfile:
+    name: str
+    max_keyframes: int | None
+    max_depth_frames: int | None
+    max_rgbd_frames: int | None
+    use_rgbd_geometry: bool
+    write_vertex_colored_debug: bool
+    write_texture_debug_preview: bool
+    texture_render_target_faces: int
+    texture_tsdf_render_target_faces: int
+
+
+PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
+    "fast_onboarding": ProcessingProfile(
+        name="fast_onboarding",
+        max_keyframes=28,
+        max_depth_frames=24,
+        max_rgbd_frames=18,
+        use_rgbd_geometry=False,
+        write_vertex_colored_debug=False,
+        write_texture_debug_preview=False,
+        texture_render_target_faces=80_000,
+        texture_tsdf_render_target_faces=90_000,
+    ),
+    "full_quality": ProcessingProfile(
+        name="full_quality",
+        max_keyframes=64,
+        max_depth_frames=48,
+        max_rgbd_frames=36,
+        use_rgbd_geometry=True,
+        write_vertex_colored_debug=True,
+        write_texture_debug_preview=True,
+        texture_render_target_faces=TEXTURE_RENDER_TARGET_FACE_COUNT,
+        texture_tsdf_render_target_faces=TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
+    ),
+}
+
+DEFAULT_PROCESSING_PROFILE = os.getenv("LIDARAI_DEFAULT_PROCESSING_PROFILE", "full_quality")
+
+
 class ValidationStage:
     name = JobStage.preprocessing
 
@@ -186,12 +331,16 @@ class ValidationStage:
         payload_path = job_dir / "upload" / "scan_payload.json"
         raw = payload_path.read_text(encoding="utf-8")
         payload = ScanPayloadEnvelope.model_validate(json.loads(raw))
+        profile = processing_profile_from_payload(payload)
+        write_processing_profile(profile, job_dir / "work" / "processing_profile.json")
         mesh_count = len(payload.meshAnchors)
         keyframe_count = len(payload.images)
         depth_frame_count = len(payload.depthFrames or [])
         summary = {
             "schemaVersion": payload.schemaVersion,
             "createdAt": payload.createdAt.isoformat(),
+            "processingProfile": processing_profile_stats(profile),
+            "clientCaptureSelection": payload.captureSelection,
             "meshAnchorCount": mesh_count,
             "keyframeCount": keyframe_count,
             "depthFrameCount": depth_frame_count,
@@ -240,11 +389,13 @@ class KeyframeDecodeStage:
     async def run(self, job_dir: Path, report: StageReporter, is_cancelled: CancellationCheck) -> None:
         await report(self.name, 58, "Decoding camera keyframes")
         payload = json.loads((job_dir / "upload" / "scan_payload.json").read_text(encoding="utf-8"))
+        profile = read_processing_profile(job_dir / "work")
+        selected_images, selection_stats = select_keyframes_for_profile(payload.get("images", []), profile)
         keyframe_dir = job_dir / "work" / "keyframes"
         keyframe_dir.mkdir(parents=True, exist_ok=True)
 
         manifest = []
-        for index, image in enumerate(payload.get("images", []), start=1):
+        for index, image in enumerate(selected_images, start=1):
             if is_cancelled():
                 raise asyncio.CancelledError
 
@@ -271,8 +422,16 @@ class KeyframeDecodeStage:
             })
 
         (job_dir / "work" / "keyframe_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        (job_dir / "work" / "keyframe_selection.json").write_text(json.dumps({
+            **selection_stats,
+            "decodedKeyframeCount": len(manifest),
+        }, indent=2), encoding="utf-8")
         await asyncio.sleep(0.1)
-        await report(self.name, 66, f"Decoded {len(manifest)} keyframes")
+        await report(
+            self.name,
+            66,
+            f"Decoded {len(manifest)} / {selection_stats['originalKeyframeCount']} keyframes for {profile.name}",
+        )
 
 
 class DepthFrameDecodeStage:
@@ -281,11 +440,18 @@ class DepthFrameDecodeStage:
     async def run(self, job_dir: Path, report: StageReporter, is_cancelled: CancellationCheck) -> None:
         await report(self.name, 68, "Decoding compact LiDAR depth frames")
         payload = json.loads((job_dir / "upload" / "scan_payload.json").read_text(encoding="utf-8"))
+        profile = read_processing_profile(job_dir / "work")
+        keyframes = json.loads((job_dir / "work" / "keyframe_manifest.json").read_text(encoding="utf-8"))
+        selected_depth_frames, selection_stats = select_depth_frames_for_profile(
+            payload.get("depthFrames") or [],
+            keyframes,
+            profile,
+        )
         depth_dir = job_dir / "work" / "depth_frames"
         depth_dir.mkdir(parents=True, exist_ok=True)
 
         manifest = []
-        for index, depth_frame in enumerate(payload.get("depthFrames") or [], start=1):
+        for index, depth_frame in enumerate(selected_depth_frames, start=1):
             if is_cancelled():
                 raise asyncio.CancelledError
 
@@ -340,17 +506,40 @@ class DepthFrameDecodeStage:
             })
 
         (job_dir / "work" / "depth_frame_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        await report(self.name, 70, f"Decoded {len(manifest)} depth frames")
+        (job_dir / "work" / "depth_frame_selection.json").write_text(json.dumps({
+            **selection_stats,
+            "decodedDepthFrameCount": len(manifest),
+        }, indent=2), encoding="utf-8")
+        await report(
+            self.name,
+            70,
+            f"Decoded {len(manifest)} / {selection_stats['originalDepthFrameCount']} depth frames for {profile.name}",
+        )
 
 
 class RGBDGeometryFusionStage:
     name = JobStage.meshing
 
     async def run(self, job_dir: Path, report: StageReporter, is_cancelled: CancellationCheck) -> None:
-        await report(self.name, 72, "Trying RGBD TSDF fusion")
+        profile = read_processing_profile(job_dir / "work")
+        await report(self.name, 72, f"Trying RGBD TSDF fusion for {profile.name}")
         keyframes = json.loads((job_dir / "work" / "keyframe_manifest.json").read_text(encoding="utf-8"))
         depth_frames = json.loads((job_dir / "work" / "depth_frame_manifest.json").read_text(encoding="utf-8"))
         stats_path = job_dir / "work" / "rgbd_fusion_stats.json"
+
+        arkit_mesh = read_fused_mesh_json(job_dir / "work" / "arkit_fused_mesh.json")
+        if not profile.use_rgbd_geometry and arkit_mesh.faces:
+            stats_path.write_text(json.dumps({
+                "available": bool(depth_frames),
+                "used": False,
+                "reason": f"RGBD geometry skipped by {profile.name}; using ARKit mesh for fast first result.",
+                "depthFrameCount": len(depth_frames),
+                "keyframeCount": len(keyframes),
+                "geometrySource": "arkit_mesh_anchor_fusion",
+                "profile": processing_profile_stats(profile),
+            }, indent=2), encoding="utf-8")
+            await report(self.name, 76, "RGBD fusion skipped for fast onboarding")
+            return
 
         if not depth_frames:
             stats_path.write_text(json.dumps({
@@ -369,6 +558,7 @@ class RGBDGeometryFusionStage:
                 work_dir=job_dir / "work",
                 output_obj_path=job_dir / "work" / "rgbd_fused_mesh.obj",
                 output_json_path=job_dir / "work" / "rgbd_fused_mesh.json",
+                profile=profile,
             )
         except RGBDFusionUnavailable as tsdf_exc:
             try:
@@ -379,6 +569,7 @@ class RGBDGeometryFusionStage:
                     output_obj_path=job_dir / "work" / "rgbd_fused_mesh.obj",
                     output_json_path=job_dir / "work" / "rgbd_fused_mesh.json",
                     tsdf_unavailable_reason=str(tsdf_exc),
+                    profile=profile,
                 )
             except RGBDFusionUnavailable as fallback_exc:
                 stats = {
@@ -388,6 +579,7 @@ class RGBDGeometryFusionStage:
                     "tsdfUnavailableReason": str(tsdf_exc),
                     "depthFrameCount": len(depth_frames),
                     "geometrySource": "arkit_mesh_anchor_fusion",
+                    "profile": processing_profile_stats(profile),
                 }
 
         stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
@@ -411,20 +603,38 @@ class TexturedMeshStage:
     name = JobStage.texturing
 
     async def run(self, job_dir: Path, report: StageReporter, is_cancelled: CancellationCheck) -> None:
-        await report(self.name, 72, "Projecting keyframes into a texture atlas")
+        profile = read_processing_profile(job_dir / "work")
+        await report(self.name, 72, f"Projecting keyframes into a texture atlas for {profile.name}")
         keyframes = json.loads((job_dir / "work" / "keyframe_manifest.json").read_text(encoding="utf-8"))
+        depth_manifest_path = job_dir / "work" / "depth_frame_manifest.json"
+        depth_frames = json.loads(depth_manifest_path.read_text(encoding="utf-8")) if depth_manifest_path.exists() else []
         mesh = read_fused_mesh_json(job_dir / "work" / "fused_mesh.json")
-        loaded_keyframes = load_projection_keyframes(keyframes, job_dir / "work" / "keyframes")
-
-        colored_stats = await write_vertex_colored_ply(
-            vertices=mesh.vertices,
-            faces=mesh.faces,
-            keyframes=loaded_keyframes,
-            output_path=job_dir / "work" / "colored_mesh.ply",
-            report_progress=lambda progress, message: report(self.name, progress, message),
-            is_cancelled=is_cancelled,
+        loaded_keyframes = load_projection_keyframes(
+            keyframes,
+            job_dir / "work" / "keyframes",
+            depth_frames=depth_frames,
+            work_dir=job_dir / "work",
         )
-        texture_mesh = make_texture_render_mesh(mesh)
+
+        if profile.write_vertex_colored_debug:
+            colored_stats = await write_vertex_colored_ply(
+                vertices=mesh.vertices,
+                faces=mesh.faces,
+                keyframes=loaded_keyframes,
+                output_path=job_dir / "work" / "colored_mesh.ply",
+                report_progress=lambda progress, message: report(self.name, progress, message),
+                is_cancelled=is_cancelled,
+            )
+        else:
+            colored_stats = {
+                "available": False,
+                "vertexCount": len(mesh.vertices),
+                "faceCount": len(mesh.faces),
+                "coloredVertexCount": 0,
+                "coverage": 0,
+                "reason": f"Vertex-colored debug PLY skipped by {profile.name}.",
+            }
+        texture_mesh = make_texture_render_mesh(mesh, profile=profile)
         render_mesh_stats = texture_mesh.stats.get("textureRenderMesh", {})
         await report(
             self.name,
@@ -438,7 +648,11 @@ class TexturedMeshStage:
             output_mtl_path=job_dir / "work" / "textured_mesh.mtl",
             output_texture_path=job_dir / "work" / "textured_mesh_texture.png",
             output_debug_path=job_dir / "work" / "texture_debug.json",
-            output_debug_preview_path=job_dir / "work" / "texture_debug_preview.png",
+            output_debug_preview_path=(
+                job_dir / "work" / "texture_debug_preview.png"
+                if profile.write_texture_debug_preview
+                else None
+            ),
             report_progress=lambda progress, message: report(self.name, progress, message),
             is_cancelled=is_cancelled,
         )
@@ -451,17 +665,21 @@ class TexturedMeshStage:
             "tilePadding": textured_stats["tilePadding"],
             "uvCoordinateCount": textured_stats["uvCoordinateCount"],
             "renderMesh": render_mesh_stats,
+            "atlasLayout": textured_stats.get("atlasLayout", {}),
             "debugPath": "texture_debug.json",
             "note": "Textured OBJ uses a display render mesh with larger per-face atlas islands, padding, and dilation. Raw fused mesh artifacts remain available separately.",
         }, indent=2), encoding="utf-8")
         (job_dir / "work" / "texture_manifest.json").write_text(json.dumps({
             "sourceKeyframes": len(keyframes),
             "usableProjectionKeyframes": len(loaded_keyframes),
+            "processingProfile": processing_profile_stats(profile),
             "debugVertexColorPreview": {
                 "format": "ply",
                 "path": "colored_mesh.ply",
+                "available": profile.write_vertex_colored_debug and (job_dir / "work" / "colored_mesh.ply").exists(),
                 "coloredVertexCount": colored_stats["coloredVertexCount"],
                 "coverage": colored_stats["coverage"],
+                "reason": colored_stats.get("reason"),
             },
             "texturedMesh": {
                 **textured_stats,
@@ -473,7 +691,7 @@ class TexturedMeshStage:
             "textureDebug": {
                 "format": "json",
                 "path": "texture_debug.json",
-                "previewPath": "texture_debug_preview.png",
+                "previewPath": "texture_debug_preview.png" if profile.write_texture_debug_preview else None,
                 "stats": textured_stats["diagnostics"],
             },
             "usdz": {
@@ -509,6 +727,11 @@ class ExportStage:
         mesh_stats = json.loads((work_dir / "mesh_stats.json").read_text(encoding="utf-8"))
         keyframes = json.loads((work_dir / "keyframe_manifest.json").read_text(encoding="utf-8"))
         texture_manifest = json.loads((work_dir / "texture_manifest.json").read_text(encoding="utf-8"))
+        processing_profile = json.loads((work_dir / "processing_profile.json").read_text(encoding="utf-8")) if (work_dir / "processing_profile.json").exists() else {
+            "name": "full_quality",
+        }
+        keyframe_selection = json.loads((work_dir / "keyframe_selection.json").read_text(encoding="utf-8")) if (work_dir / "keyframe_selection.json").exists() else {}
+        depth_frame_selection = json.loads((work_dir / "depth_frame_selection.json").read_text(encoding="utf-8")) if (work_dir / "depth_frame_selection.json").exists() else {}
 
         for filename in [
             "fused_mesh.obj",
@@ -520,6 +743,10 @@ class ExportStage:
             "textured_mesh_texture.png",
             "texture_debug.json",
             "texture_debug_preview.png",
+            "stage_timings.json",
+            "keyframe_selection.json",
+            "depth_frame_selection.json",
+            "processing_profile.json",
         ]:
             src = work_dir / filename
             if src.exists():
@@ -536,9 +763,34 @@ class ExportStage:
             "reason": "RGBD fusion stage did not run.",
         }
         preferred_photoreal = "textured_obj" if (result_dir / "textured_mesh.obj").exists() else "vertex_colored_ply"
+        coordinate_transforms = {
+            "convention": "column_major_4x4",
+            "sourceCoordinateSpace": "arkit_world",
+            "modelCoordinateSpace": "processed_model",
+            "modelFromARKitWorld": [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            "arkitWorldFromModel": [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            "note": "Current fused and textured artifacts preserve ARKit world coordinates. Non-identity transforms can be emitted here if future processing recenters or rescales models.",
+        }
         artifact_manifest = {
             "version": "v1",
             "preferredPhotorealArtifact": preferred_photoreal,
+            "processingProfile": processing_profile,
+            "captureSelection": {
+                "client": summary.get("clientCaptureSelection"),
+                "backendKeyframes": keyframe_selection,
+                "backendDepthFrames": depth_frame_selection,
+            },
+            "coordinateTransforms": coordinate_transforms,
             "artifacts": {
                 "rawFusedMesh": {
                     "role": "raw_fused_mesh",
@@ -564,6 +816,7 @@ class ExportStage:
                     "role": "vertex_colored_debug_preview",
                     "format": "ply",
                     "path": "colored_mesh.ply",
+                    "available": (result_dir / "colored_mesh.ply").exists(),
                     "stats": texture_manifest["debugVertexColorPreview"],
                 },
                 "texturedObj": {
@@ -578,9 +831,16 @@ class ExportStage:
                     "role": "texture_diagnostics",
                     "format": "json",
                     "path": "texture_debug.json",
-                    "previewPath": "texture_debug_preview.png",
+                    "previewPath": texture_manifest.get("textureDebug", {}).get("previewPath"),
                     "available": (result_dir / "texture_debug.json").exists(),
+                    "previewAvailable": (result_dir / "texture_debug_preview.png").exists(),
                     "stats": texture_manifest.get("textureDebug", {}).get("stats", {}),
+                },
+                "stageTimings": {
+                    "role": "processing_timing_diagnostics",
+                    "format": "json",
+                    "path": "stage_timings.json",
+                    "available": (result_dir / "stage_timings.json").exists(),
                 },
                 "usdz": {
                     "role": "photoreal_textured_mesh",
@@ -606,6 +866,10 @@ class ExportStage:
                 "texture_debug.json",
                 "texture_debug_preview.png",
                 "keyframe_manifest.json",
+                "keyframe_selection.json",
+                "depth_frame_selection.json",
+                "processing_profile.json",
+                "stage_timings.json",
                 "arkit_mesh_stats.json",
                 "depth_frame_manifest.json",
                 "rgbd_fusion_stats.json",
@@ -627,6 +891,9 @@ class ExportStage:
                 "usdz": artifact_manifest["artifacts"]["usdz"],
                 "glb": artifact_manifest["artifacts"]["glb"],
             },
+            "processingProfile": processing_profile,
+            "captureSelection": artifact_manifest["captureSelection"],
+            "coordinateTransforms": coordinate_transforms,
             "keyframes": keyframes,
             "preferredPreview": "textured_mesh.obj" if preferred_photoreal == "textured_obj" else "colored_mesh.ply",
         }, indent=2), encoding="utf-8")
@@ -675,6 +942,178 @@ def pair_rgbd_frames(
     return paired_frames
 
 
+def processing_profile_from_payload(payload: dict | ScanPayloadEnvelope | None) -> ProcessingProfile:
+    raw_profile = None
+    if isinstance(payload, ScanPayloadEnvelope):
+        raw_profile = payload.processingProfile
+    elif isinstance(payload, dict):
+        raw_profile = payload.get("processingProfile")
+    name = str(raw_profile or DEFAULT_PROCESSING_PROFILE).strip().lower()
+    return PROCESSING_PROFILES.get(name) or PROCESSING_PROFILES.get(DEFAULT_PROCESSING_PROFILE) or PROCESSING_PROFILES["full_quality"]
+
+
+def write_processing_profile(profile: ProcessingProfile, output_path: Path) -> None:
+    output_path.write_text(json.dumps(processing_profile_stats(profile), indent=2), encoding="utf-8")
+
+
+def processing_profile_stats(profile: ProcessingProfile) -> dict:
+    return {
+        "name": profile.name,
+        "maxKeyframes": profile.max_keyframes,
+        "maxDepthFrames": profile.max_depth_frames,
+        "maxRgbdFrames": profile.max_rgbd_frames,
+        "useRgbdGeometry": profile.use_rgbd_geometry,
+        "writeVertexColoredDebug": profile.write_vertex_colored_debug,
+        "writeTextureDebugPreview": profile.write_texture_debug_preview,
+        "textureRenderTargetFaces": profile.texture_render_target_faces,
+        "textureTsdfRenderTargetFaces": profile.texture_tsdf_render_target_faces,
+    }
+
+
+def read_processing_profile(work_dir: Path) -> ProcessingProfile:
+    profile_path = work_dir / "processing_profile.json"
+    if not profile_path.exists():
+        return PROCESSING_PROFILES["full_quality"]
+    try:
+        data = json.loads(profile_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return PROCESSING_PROFILES["full_quality"]
+    return PROCESSING_PROFILES.get(str(data.get("name", "")).lower(), PROCESSING_PROFILES["full_quality"])
+
+
+def current_full_quality_profile() -> ProcessingProfile:
+    return replace(
+        PROCESSING_PROFILES["full_quality"],
+        texture_render_target_faces=TEXTURE_RENDER_TARGET_FACE_COUNT,
+        texture_tsdf_render_target_faces=TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
+    )
+
+
+def select_keyframes_for_profile(keyframes: list[dict], profile: ProcessingProfile) -> tuple[list[dict], dict]:
+    selected = pose_diverse_items(
+        keyframes,
+        limit=profile.max_keyframes,
+        transform_getter=lambda item: item.get("cameraTransform") or [],
+        timestamp_getter=lambda item: item.get("timestamp"),
+    )
+    selected_ids = [item.get("id") for item in selected if item.get("id")]
+    return selected, {
+        "strategy": "pose_diverse_backend_subset" if len(selected) < len(keyframes) else "all_uploaded_keyframes",
+        "profile": profile.name,
+        "originalKeyframeCount": len(keyframes),
+        "selectedKeyframeCount": len(selected),
+        "selectedKeyframeIds": selected_ids,
+    }
+
+
+def select_depth_frames_for_profile(
+    depth_frames: list[dict],
+    selected_keyframes: list[dict],
+    profile: ProcessingProfile,
+) -> tuple[list[dict], dict]:
+    selected_keyframe_ids = {str(keyframe.get("id")) for keyframe in selected_keyframes if keyframe.get("id")}
+    paired = [
+        frame for frame in depth_frames
+        if frame.get("colorKeyframeId") and str(frame.get("colorKeyframeId")) in selected_keyframe_ids
+    ]
+    candidates = paired or depth_frames
+    selected = pose_diverse_items(
+        candidates,
+        limit=profile.max_depth_frames,
+        transform_getter=lambda item: item.get("cameraTransform") or [],
+        timestamp_getter=lambda item: item.get("timestamp"),
+    )
+    selected_ids = [item.get("id") for item in selected if item.get("id")]
+    return selected, {
+        "strategy": "paired_pose_diverse_backend_subset" if len(selected) < len(depth_frames) else "all_uploaded_depth_frames",
+        "profile": profile.name,
+        "originalDepthFrameCount": len(depth_frames),
+        "pairedDepthFrameCount": len(paired),
+        "selectedDepthFrameCount": len(selected),
+        "selectedDepthFrameIds": selected_ids,
+    }
+
+
+def select_rgbd_pairs_for_profile(
+    paired_frames: list[tuple[dict, dict, Path, Path]],
+    profile: ProcessingProfile,
+) -> list[tuple[dict, dict, Path, Path]]:
+    return pose_diverse_items(
+        paired_frames,
+        limit=profile.max_rgbd_frames,
+        transform_getter=lambda item: item[1].get("cameraTransform") or item[0].get("cameraTransform") or [],
+        timestamp_getter=lambda item: item[1].get("timestamp") or item[0].get("timestamp"),
+    )
+
+
+def pose_diverse_items(
+    items: list,
+    *,
+    limit: int | None,
+    transform_getter: Callable[[object], list],
+    timestamp_getter: Callable[[object], object],
+) -> list:
+    if limit is None or limit <= 0 or len(items) <= limit:
+        return items
+    if limit == 1:
+        return [items[len(items) // 2]]
+
+    poses = [
+        pose_from_transform(transform_getter(item), timestamp_getter(item))
+        for item in items
+    ]
+    selected_indices: set[int] = {0, len(items) - 1}
+    target_count = min(limit, len(items))
+
+    while len(selected_indices) < target_count:
+        selected_poses = [poses[index] for index in selected_indices]
+        best_index = None
+        best_score = -math.inf
+        for index, pose in enumerate(poses):
+            if index in selected_indices:
+                continue
+            score = pose_novelty_score(pose, selected_poses)
+            if score > best_score:
+                best_index = index
+                best_score = score
+        if best_index is None:
+            break
+        selected_indices.add(best_index)
+
+    return [items[index] for index in sorted(selected_indices)]
+
+
+def pose_from_transform(transform: list, timestamp: object) -> dict:
+    if len(transform) >= 16:
+        position = (float(transform[12]), float(transform[13]), float(transform[14]))
+        forward = normalize((-float(transform[8]), -float(transform[9]), -float(transform[10])))
+        if forward == (0.0, 0.0, 0.0):
+            forward = (0.0, 0.0, -1.0)
+    else:
+        position = (0.0, 0.0, 0.0)
+        forward = (0.0, 0.0, -1.0)
+    try:
+        resolved_timestamp = float(timestamp)
+    except (TypeError, ValueError):
+        resolved_timestamp = 0.0
+    return {"position": position, "forward": forward, "timestamp": resolved_timestamp}
+
+
+def pose_novelty_score(candidate: dict, selected: list[dict]) -> float:
+    if not selected:
+        return math.inf
+    scores = []
+    candidate_position = candidate["position"]
+    candidate_forward = candidate["forward"]
+    for selected_pose in selected:
+        distance = length(subtract(candidate_position, selected_pose["position"]))
+        direction_dot = clamp_float(dot(candidate_forward, selected_pose["forward"]), -1.0, 1.0)
+        angle = math.acos(direction_dot)
+        time_delta = abs(float(candidate["timestamp"]) - float(selected_pose["timestamp"]))
+        scores.append(distance / 0.45 + angle / 0.55 + min(time_delta / 8.0, 1.0) * 0.35)
+    return min(scores)
+
+
 def evenly_sample_items(items: list, limit: int) -> list:
     if limit <= 0 or len(items) <= limit:
         return items
@@ -696,12 +1135,25 @@ def write_rgbd_keyframe_depth_mesh(
     output_obj_path: Path,
     output_json_path: Path,
     tsdf_unavailable_reason: str,
+    profile: ProcessingProfile | None = None,
 ) -> dict:
+    profile = profile or PROCESSING_PROFILES["full_quality"]
     paired_frames = pair_rgbd_frames(keyframes, depth_frames, work_dir)
     if not paired_frames:
         raise RGBDFusionUnavailable("No RGB/depth frames could be paired for fallback depth mesh fusion.")
 
-    selected_frames = evenly_sample_items(paired_frames, RGBD_DEPTH_MESH_MAX_FRAMES)
+    selected_frames = select_rgbd_pairs_for_profile(
+        paired_frames,
+        ProcessingProfile(
+            **{
+                **profile.__dict__,
+                "max_rgbd_frames": min(
+                    RGBD_DEPTH_MESH_MAX_FRAMES,
+                    profile.max_rgbd_frames or RGBD_DEPTH_MESH_MAX_FRAMES,
+                ),
+            }
+        ),
+    )
     vertices: list[tuple[float, float, float]] = []
     faces: list[tuple[int, int, int]] = []
     vertex_lookup: dict[tuple[int, int, int], int] = {}
@@ -830,6 +1282,7 @@ def write_rgbd_keyframe_depth_mesh(
         "targetSamplesPerFrame": RGBD_DEPTH_MESH_TARGET_SAMPLES_PER_FRAME,
         "averagePixelStride": (sum(sample_steps) / len(sample_steps)) if sample_steps else 0,
         "tsdfUnavailableReason": tsdf_unavailable_reason,
+        "profile": processing_profile_stats(profile),
     })
     write_fused_mesh_json(fused_mesh, output_json_path)
     write_obj(fused_mesh, output_obj_path)
@@ -852,6 +1305,7 @@ def write_rgbd_keyframe_depth_mesh(
         "targetSamplesPerFrame": RGBD_DEPTH_MESH_TARGET_SAMPLES_PER_FRAME,
         "averagePixelStride": (sum(sample_steps) / len(sample_steps)) if sample_steps else 0,
         "tsdfUnavailableReason": tsdf_unavailable_reason,
+        "profile": processing_profile_stats(profile),
         "path": "rgbd_fused_mesh.obj",
     }
 
@@ -939,11 +1393,14 @@ def write_rgbd_tsdf_mesh(
     work_dir: Path,
     output_obj_path: Path,
     output_json_path: Path,
+    profile: ProcessingProfile | None = None,
 ) -> dict:
+    profile = profile or PROCESSING_PROFILES["full_quality"]
     np, o3d = load_open3d_modules()
     paired_frames = pair_rgbd_frames(keyframes, depth_frames, work_dir)
     if not paired_frames:
         raise RGBDFusionUnavailable("No RGB/depth frames could be paired for TSDF fusion.")
+    selected_frames = select_rgbd_pairs_for_profile(paired_frames, profile)
 
     volume = o3d.pipelines.integration.ScalableTSDFVolume(
         voxel_length=RGBD_VOXEL_LENGTH_METERS,
@@ -952,7 +1409,7 @@ def write_rgbd_tsdf_mesh(
     )
     integrated_count = 0
 
-    for keyframe, depth_frame, color_path, depth_path in paired_frames:
+    for keyframe, depth_frame, color_path, depth_path in selected_frames:
         width, height = [int(value) for value in depth_frame["depthResolution"]]
         depth_array = np.frombuffer(depth_path.read_bytes(), dtype=np.dtype("<f4")).reshape((height, width))
         depth_array = np.nan_to_num(depth_array, nan=0, posinf=0, neginf=0).astype(np.float32)
@@ -996,11 +1453,14 @@ def write_rgbd_tsdf_mesh(
         "vertexCount": len(vertices),
         "faceCount": len(faces),
         "depthFrameCount": len(depth_frames),
+        "pairedFrameCount": len(paired_frames),
+        "sampledDepthFrameCount": len(selected_frames),
         "integratedDepthFrameCount": integrated_count,
         "voxelLengthMeters": RGBD_VOXEL_LENGTH_METERS,
         "sdfTruncMeters": RGBD_SDF_TRUNC_METERS,
         "depthTruncMeters": RGBD_DEPTH_TRUNC_METERS,
         "postprocess": postprocess_stats,
+        "profile": processing_profile_stats(profile),
     })
     write_fused_mesh_json(fused_mesh, output_json_path)
     write_obj(fused_mesh, output_obj_path)
@@ -1012,11 +1472,13 @@ def write_rgbd_tsdf_mesh(
         "faceCount": len(faces),
         "depthFrameCount": len(depth_frames),
         "pairedFrameCount": len(paired_frames),
+        "sampledDepthFrameCount": len(selected_frames),
         "integratedDepthFrameCount": integrated_count,
         "voxelLengthMeters": RGBD_VOXEL_LENGTH_METERS,
         "sdfTruncMeters": RGBD_SDF_TRUNC_METERS,
         "depthTruncMeters": RGBD_DEPTH_TRUNC_METERS,
         "postprocess": postprocess_stats,
+        "profile": processing_profile_stats(profile),
         "path": "rgbd_fused_mesh.obj",
     }
 
@@ -1365,7 +1827,61 @@ async def write_vertex_colored_ply(
     }
 
 
-def load_projection_keyframes(keyframes: list[dict], keyframe_dir: Path) -> list[ProjectionKeyframe]:
+def load_projection_depth_frames(
+    depth_frames: list[dict] | None,
+    work_dir: Path | None,
+) -> dict[str, ProjectionDepthFrame]:
+    if not depth_frames or work_dir is None:
+        return {}
+
+    loaded: dict[str, ProjectionDepthFrame] = {}
+    for depth_frame in depth_frames:
+        resolution = depth_frame.get("depthResolution") or []
+        transform = depth_frame.get("cameraTransform") or []
+        intrinsics = depth_frame.get("intrinsics") or []
+        depth_path = depth_frame.get("path")
+        if len(resolution) != 2 or len(transform) != 16 or len(intrinsics) != 9 or not depth_path:
+            continue
+
+        width, height = int(resolution[0]), int(resolution[1])
+        depth_file = work_dir / depth_path
+        if width <= 0 or height <= 0 or not depth_file.exists():
+            continue
+
+        try:
+            depth_values = read_float32_depth_values(depth_file, width, height)
+            confidence_values = read_confidence_values(depth_frame, work_dir, width, height)
+        except Exception as exc:
+            logger.warning("Skipping depth frame for texture projection visibility: %s", exc)
+            continue
+
+        color_keyframe_id = str(depth_frame.get("colorKeyframeId")) if depth_frame.get("colorKeyframeId") else None
+        frame = ProjectionDepthFrame(
+            id=str(depth_frame.get("id")) if depth_frame.get("id") else None,
+            color_keyframe_id=color_keyframe_id,
+            width=width,
+            height=height,
+            world_to_camera=invert_rigid_transform(transform),
+            intrinsics=intrinsics,
+            depth_values=depth_values,
+            confidence_values=confidence_values,
+        )
+        if color_keyframe_id:
+            loaded[color_keyframe_id] = frame
+        if frame.id:
+            loaded.setdefault(frame.id, frame)
+
+    return loaded
+
+
+def load_projection_keyframes(
+    keyframes: list[dict],
+    keyframe_dir: Path,
+    *,
+    depth_frames: list[dict] | None = None,
+    work_dir: Path | None = None,
+) -> list[ProjectionKeyframe]:
+    depth_by_keyframe_id = load_projection_depth_frames(depth_frames, work_dir)
     pending = []
     for keyframe in keyframes:
         image_path = keyframe_dir / Path(keyframe.get("path", "")).name
@@ -1392,6 +1908,7 @@ def load_projection_keyframes(keyframes: list[dict], keyframe_dir: Path) -> list
             id=str(keyframe.get("id")) if keyframe.get("id") else None,
             path=str(keyframe.get("path")) if keyframe.get("path") else image_path.name,
             color_correction=color_correction,
+            depth_frame=depth_by_keyframe_id.get(str(keyframe.get("id"))) if keyframe.get("id") else None,
         ))
     return loaded
 
@@ -1576,8 +2093,11 @@ def project_vertex_color(vertex: tuple[float, float, float], keyframes: list[Pro
         u, v, depth = projection
         edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
         center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
+        depth_visibility = depth_visibility_for_world_point(vertex, keyframe)
+        if depth_visibility.status == "occluded":
+            continue
         distance_weight = 1 / max(depth, 0.2)
-        weight = center_bias * distance_weight
+        weight = center_bias * distance_weight * depth_visibility.weight
         samples.append((weight, sample_image_nearest(keyframe, u, v)))
 
     if not samples:
@@ -1590,13 +2110,14 @@ def project_vertex_color(vertex: tuple[float, float, float], keyframes: list[Pro
     return (clamp_color(r), clamp_color(g), clamp_color(b))
 
 
-def make_texture_render_mesh(mesh: FusedMesh) -> FusedMesh:
+def make_texture_render_mesh(mesh: FusedMesh, profile: ProcessingProfile | None = None) -> FusedMesh:
+    profile = profile or current_full_quality_profile()
     source_face_count = len(mesh.faces)
     atlas_max_size = texture_atlas_max_size_for_mesh(mesh)
     preferred_target_face_count = (
-        TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
+        profile.texture_tsdf_render_target_faces
         if is_open3d_tsdf_mesh(mesh)
-        else TEXTURE_RENDER_TARGET_FACE_COUNT
+        else profile.texture_render_target_faces
     )
     target_face_count = texture_render_target_face_count(
         atlas_max_size=atlas_max_size,
@@ -1637,8 +2158,8 @@ def make_texture_render_mesh(mesh: FusedMesh) -> FusedMesh:
                 "renderFaceCount": len(simplified_mesh.faces),
                 "faceReductionRatio": round(1 - (len(simplified_mesh.faces) / source_face_count), 4) if source_face_count else 0,
                 "smoothing": {
-                    "enabled": False,
-                    "reason": "TSDF mesh was already smoothed before render decimation; preserving planar surfaces.",
+                    **simplify_stats.get("renderSmoothing", {"enabled": False}),
+                    "scope": "photoreal render mesh only",
                 },
             }
             return FusedMesh(
@@ -1712,6 +2233,8 @@ def simplify_mesh_by_open3d_quadric_decimation(mesh: FusedMesh, target_face_coun
 
     simplified = triangle_mesh.simplify_quadric_decimation(target_number_of_triangles=max(1, target_face_count))
     clean_open3d_mesh(simplified)
+    render_smoothing_stats = smooth_open3d_tsdf_render_mesh(simplified, np)
+    plane_stats = regularize_open3d_render_planes(simplified, np, o3d)
     simplified.compute_vertex_normals()
     vertices = [tuple(float(component) for component in vertex) for vertex in np.asarray(simplified.vertices)]
     faces = [tuple(int(component) for component in face) for face in np.asarray(simplified.triangles)]
@@ -1729,8 +2252,168 @@ def simplify_mesh_by_open3d_quadric_decimation(mesh: FusedMesh, target_face_coun
         "renderFaceCount": len(faces),
         "simplificationRatio": round(1 - (len(faces) / max(len(mesh.faces), 1)), 4),
         "vertexReductionRatio": round(1 - (len(vertices) / max(len(mesh.vertices), 1)), 4),
+        "renderSmoothing": render_smoothing_stats,
+        "planeRegularization": plane_stats,
     }
     return FusedMesh(vertices=vertices, faces=faces, stats=stats), stats
+
+
+def smooth_open3d_tsdf_render_mesh(triangle_mesh, np) -> dict:
+    if TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_ITERATIONS <= 0:
+        return {"enabled": False, "reason": "disabled"}
+
+    vertex_count = len(triangle_mesh.vertices)
+    face_count = len(triangle_mesh.triangles)
+    if vertex_count == 0 or face_count == 0:
+        return {"enabled": False, "reason": "empty mesh", "vertexCount": vertex_count, "faceCount": face_count}
+
+    before = np.asarray(triangle_mesh.vertices, dtype=np.float64).copy()
+    smoothed = triangle_mesh.filter_smooth_taubin(
+        number_of_iterations=TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_ITERATIONS
+    )
+    triangle_mesh.vertices = smoothed.vertices
+    triangle_mesh.triangles = smoothed.triangles
+    triangle_mesh.compute_vertex_normals()
+    after = np.asarray(triangle_mesh.vertices, dtype=np.float64)
+    if len(before) != len(after):
+        return {
+            "enabled": True,
+            "algorithm": "open3d_taubin_render_mesh",
+            "iterations": TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_ITERATIONS,
+            "vertexCountChanged": True,
+        }
+
+    displacements = np.linalg.norm(after - before, axis=1)
+    moved = displacements[displacements > 1e-5]
+    return {
+        "enabled": True,
+        "algorithm": "open3d_taubin_render_mesh",
+        "iterations": TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_ITERATIONS,
+        "movedVertexCount": int(len(moved)),
+        "meanDisplacementMeters": round(float(np.mean(displacements)) if len(displacements) else 0, 5),
+        "maxDisplacementMeters": round(float(np.max(displacements)) if len(displacements) else 0, 5),
+    }
+
+
+def regularize_open3d_render_planes(triangle_mesh, np, o3d) -> dict:
+    if not TEXTURE_RENDER_PLANE_REGULARIZATION_ENABLED:
+        return {"enabled": False, "reason": "disabled"}
+
+    vertex_count = len(triangle_mesh.vertices)
+    face_count = len(triangle_mesh.triangles)
+    if vertex_count < TEXTURE_RENDER_PLANE_MIN_VERTICES or face_count == 0:
+        return {
+            "enabled": False,
+            "reason": "mesh too small for stable plane detection",
+            "vertexCount": vertex_count,
+            "faceCount": face_count,
+        }
+
+    triangle_mesh.compute_vertex_normals()
+    vertices = np.asarray(triangle_mesh.vertices, dtype=np.float64)
+    normals = np.asarray(triangle_mesh.vertex_normals, dtype=np.float64)
+    min_plane_vertices = max(
+        TEXTURE_RENDER_PLANE_MIN_VERTICES,
+        int(vertex_count * TEXTURE_RENDER_PLANE_MIN_VERTEX_RATIO),
+    )
+    remaining_indices = np.arange(vertex_count)
+    displacement_sum = np.zeros_like(vertices)
+    displacement_count = np.zeros(vertex_count, dtype=np.int32)
+    planes: list[dict] = []
+
+    for plane_index in range(TEXTURE_RENDER_PLANE_MAX_PLANES):
+        if len(remaining_indices) < min_plane_vertices:
+            break
+
+        point_cloud = o3d.geometry.PointCloud()
+        point_cloud.points = o3d.utility.Vector3dVector(vertices[remaining_indices])
+        try:
+            plane_model, local_inliers = point_cloud.segment_plane(
+                distance_threshold=TEXTURE_RENDER_PLANE_DISTANCE_THRESHOLD_METERS,
+                ransac_n=3,
+                num_iterations=700,
+            )
+        except RuntimeError:
+            break
+
+        if len(local_inliers) < min_plane_vertices:
+            break
+
+        global_inliers = remaining_indices[np.asarray(local_inliers, dtype=np.int64)]
+        normal = np.asarray(plane_model[:3], dtype=np.float64)
+        norm = float(np.linalg.norm(normal))
+        if not math.isfinite(norm) or norm <= 1e-8:
+            break
+
+        normal = normal / norm
+        plane_offset = float(plane_model[3]) / norm
+        distances = vertices[global_inliers] @ normal + plane_offset
+        normal_alignment = np.abs(normals[global_inliers] @ normal)
+        selected_mask = (
+            (np.abs(distances) <= TEXTURE_RENDER_PLANE_DISTANCE_THRESHOLD_METERS * 2.25)
+            & (normal_alignment >= TEXTURE_RENDER_PLANE_NORMAL_ALIGNMENT)
+        )
+        selected_indices = global_inliers[selected_mask]
+        if len(selected_indices) >= min_plane_vertices:
+            selected_distances = vertices[selected_indices] @ normal + plane_offset
+            displacements = -selected_distances[:, None] * normal[None, :] * TEXTURE_RENDER_PLANE_STRENGTH
+            displacement_lengths = np.linalg.norm(displacements, axis=1)
+            clamp_mask = displacement_lengths > TEXTURE_RENDER_PLANE_MAX_DISPLACEMENT_METERS
+            if np.any(clamp_mask):
+                displacements[clamp_mask] *= (
+                    TEXTURE_RENDER_PLANE_MAX_DISPLACEMENT_METERS / displacement_lengths[clamp_mask]
+                )[:, None]
+
+            displacement_sum[selected_indices] += displacements
+            displacement_count[selected_indices] += 1
+            normal_abs = np.abs(normal)
+            dominant_axis = ("x", "y", "z")[int(np.argmax(normal_abs))]
+            planes.append({
+                "planeIndex": plane_index,
+                "inlierVertexCount": int(len(global_inliers)),
+                "regularizedVertexCount": int(len(selected_indices)),
+                "dominantAxis": dominant_axis,
+                "normal": [round(float(component), 4) for component in normal],
+                "offset": round(plane_offset, 6),
+                "meanAbsDistanceMeters": round(float(np.mean(np.abs(selected_distances))), 5),
+                "maxAbsDistanceMeters": round(float(np.max(np.abs(selected_distances))), 5),
+            })
+
+        remaining_mask = np.ones(len(remaining_indices), dtype=bool)
+        remaining_mask[np.asarray(local_inliers, dtype=np.int64)] = False
+        remaining_indices = remaining_indices[remaining_mask]
+
+    moved_mask = displacement_count > 0
+    moved_vertex_count = int(np.count_nonzero(moved_mask))
+    if moved_vertex_count == 0:
+        return {
+            "enabled": True,
+            "algorithm": "open3d_ransac_large_plane_vertex_projection",
+            "planeCount": len(planes),
+            "movedVertexCount": 0,
+            "minPlaneVertexCount": int(min_plane_vertices),
+            "planes": planes,
+        }
+
+    adjusted_vertices = vertices.copy()
+    adjusted_vertices[moved_mask] += displacement_sum[moved_mask] / displacement_count[moved_mask, None]
+    displacements = np.linalg.norm(adjusted_vertices[moved_mask] - vertices[moved_mask], axis=1)
+    triangle_mesh.vertices = o3d.utility.Vector3dVector(adjusted_vertices)
+    triangle_mesh.compute_vertex_normals()
+
+    return {
+        "enabled": True,
+        "algorithm": "open3d_ransac_large_plane_vertex_projection",
+        "planeCount": len(planes),
+        "movedVertexCount": moved_vertex_count,
+        "movedVertexRatio": round(moved_vertex_count / max(vertex_count, 1), 4),
+        "minPlaneVertexCount": int(min_plane_vertices),
+        "maxDisplacementMeters": round(float(np.max(displacements)), 5),
+        "meanDisplacementMeters": round(float(np.mean(displacements)), 5),
+        "strength": TEXTURE_RENDER_PLANE_STRENGTH,
+        "distanceThresholdMeters": TEXTURE_RENDER_PLANE_DISTANCE_THRESHOLD_METERS,
+        "planes": planes,
+    }
 
 
 def fused_mesh_to_open3d_triangle_mesh(mesh: FusedMesh, np, o3d):
@@ -2117,6 +2800,35 @@ class ColorStatsAccumulator:
         }
 
 
+def compute_vertex_normals(
+    vertices: list[tuple[float, float, float]],
+    faces: list[tuple[int, int, int]],
+) -> list[tuple[float, float, float]]:
+    accumulators = [(0.0, 0.0, 0.0) for _ in vertices]
+    for face in faces:
+        a, b, c = vertices[face[0]], vertices[face[1]], vertices[face[2]]
+        normal = cross(subtract(b, a), subtract(c, a))
+        for vertex_index in face:
+            accumulators[vertex_index] = add(accumulators[vertex_index], normal)
+
+    normals: list[tuple[float, float, float]] = []
+    for normal in accumulators:
+        normalized = normalize(normal)
+        normals.append(normalized if normalized != (0.0, 0.0, 0.0) else (0.0, 1.0, 0.0))
+    return normals
+
+
+def obj_face_line(face: tuple[int, int, int], uv_start: int, include_normals: bool = True) -> str:
+    if include_normals:
+        return (
+            f"f {face[0] + 1}/{uv_start}/{face[0] + 1} "
+            f"{face[1] + 1}/{uv_start + 1}/{face[1] + 1} "
+            f"{face[2] + 1}/{uv_start + 2}/{face[2] + 1}"
+        )
+
+    return f"f {face[0] + 1}/{uv_start} {face[1] + 1}/{uv_start + 1} {face[2] + 1}/{uv_start + 2}"
+
+
 async def write_textured_obj(
     mesh: FusedMesh,
     keyframes: list[ProjectionKeyframe],
@@ -2130,7 +2842,11 @@ async def write_textured_obj(
 ) -> dict:
     face_count = len(mesh.faces)
     atlas_max_size = texture_atlas_max_size_for_mesh(mesh)
-    atlas_width, atlas_height, tile_size, columns = atlas_layout(face_count, atlas_max_size=atlas_max_size)
+    atlas_layout_spec = build_texture_atlas_layout(mesh, atlas_max_size=atlas_max_size)
+    atlas_width = atlas_layout_spec.width
+    atlas_height = atlas_layout_spec.height
+    tile_size = atlas_layout_spec.tile_size
+    columns = atlas_layout_spec.columns
     tile_padding = atlas_tile_padding(tile_size)
     dilation_pixels = texture_dilation_pixels(tile_size)
     texture = Image.new("RGB", (atlas_width, atlas_height), FALLBACK_COLOR)
@@ -2157,6 +2873,9 @@ async def write_textured_obj(
     rejected_edge_sample_count = 0
     rejected_grazing_sample_count = 0
     rejected_invalid_projection_sample_count = 0
+    rejected_occluded_sample_count = 0
+    depth_tested_sample_count = 0
+    missing_depth_sample_count = 0
     color_correction = texture_color_correction_for_keyframes(keyframes)
     uv_min_u = math.inf
     uv_min_v = math.inf
@@ -2165,7 +2884,7 @@ async def write_textured_obj(
     uv_out_of_range_count = 0
     uv_non_finite_count = 0
     progress_interval = max(1, min(face_count // 50, 1_000))
-    parallel_worker_count = texture_parallel_worker_count(face_count)
+    parallel_worker_count = 1 if atlas_layout_spec.planar_charts else texture_parallel_worker_count(face_count)
     parallel_result = None
     if parallel_worker_count > 1:
         try:
@@ -2208,6 +2927,9 @@ async def write_textured_obj(
         rejected_edge_sample_count = parallel_result["rejected_edge_sample_count"]
         rejected_grazing_sample_count = parallel_result["rejected_grazing_sample_count"]
         rejected_invalid_projection_sample_count = parallel_result["rejected_invalid_projection_sample_count"]
+        rejected_occluded_sample_count = parallel_result["rejected_occluded_sample_count"]
+        depth_tested_sample_count = parallel_result["depth_tested_sample_count"]
+        missing_depth_sample_count = parallel_result["missing_depth_sample_count"]
         uv_min_u = parallel_result["uv_min_u"]
         uv_min_v = parallel_result["uv_min_v"]
         uv_max_u = parallel_result["uv_max_u"]
@@ -2217,12 +2939,39 @@ async def write_textured_obj(
     else:
         parallel_worker_count = 1
 
+    planar_chart_contexts: dict[int, dict] = {}
+    planar_chart_texture_stats: list[dict] = []
+    if parallel_result is None and atlas_layout_spec.planar_charts:
+        if report_progress is not None:
+            await report_progress(82.5, f"Texturing {len(atlas_layout_spec.planar_charts)} planar charts")
+            await asyncio.sleep(0)
+
+        for chart in atlas_layout_spec.planar_charts:
+            if is_cancelled is not None and is_cancelled():
+                raise asyncio.CancelledError
+
+            region_points = chart_region_points(chart)
+            planar_chart_contexts[chart.chart_id] = {
+                "regionPoints": region_points,
+                "fallbackColor": None,
+                "stats": empty_texture_raster_stats(),
+            }
+            planar_chart_texture_stats.append({
+                **planar_chart_stats(chart),
+            })
+
     for face_index, face in enumerate(mesh.faces) if parallel_result is None else []:
         if is_cancelled is not None and is_cancelled():
             raise asyncio.CancelledError
 
-        tile = atlas_tile(face_index, tile_size, columns)
-        atlas_triangle = atlas_triangle_points(tile, tile_size)
+        chart = atlas_layout_spec.face_to_chart.get(face_index)
+        tile = atlas_tile_for_layout(face_index, atlas_layout_spec) if chart is None else (chart.x, chart.y)
+        face_vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
+        atlas_triangle = (
+            atlas_triangle_points(tile, tile_size)
+            if chart is None
+            else [planar_chart_pixel_for_vertex(chart, vertex) for vertex in face_vertices]
+        )
         uv_start = face_index * 3 + 1
         for point in atlas_triangle:
             u = (point[0] + 0.5) / atlas_width
@@ -2238,7 +2987,58 @@ async def write_textured_obj(
                     uv_out_of_range_count += 1
             vt_lines.append(f"vt {u:.8f} {v:.8f}")
 
-        face_vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
+        if chart is not None:
+            context = planar_chart_contexts.get(chart.chart_id, {})
+            candidates = texture_projection_candidates(face_vertices, keyframes)
+            if candidates:
+                selected_key = candidates[0].keyframe_debug_id
+                selected_keyframe_face_counts[selected_key] = selected_keyframe_face_counts.get(selected_key, 0) + 1
+
+            fallback_color: tuple[int, int, int] | None = None
+
+            def resolve_chart_fallback_color() -> tuple[int, int, int]:
+                nonlocal fallback_color
+                if fallback_color is None:
+                    fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
+                return fallback_color
+
+            raster_stats = rasterize_face_texture(
+                texture_pixels,
+                mask_pixels,
+                atlas_triangle,
+                face_vertices,
+                candidates,
+                resolve_chart_fallback_color,
+            )
+            merge_texture_raster_stats(context.setdefault("stats", empty_texture_raster_stats()), raster_stats)
+            for key, value in raster_stats["keyframeContributionCounts"].items():
+                keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + value
+            rasterized_pixel_count += raster_stats["filledPixelCount"]
+            projected_pixel_count += raster_stats["projectedPixelCount"]
+            fallback_pixel_count += raster_stats["fallbackPixelCount"]
+            blended_pixel_count += raster_stats["blendedPixelCount"]
+            single_sample_pixel_count += raster_stats["singleSamplePixelCount"]
+            accepted_projection_sample_count += raster_stats["acceptedProjectionSampleCount"]
+            rejected_overexposed_sample_count += raster_stats["rejectedOverexposedSampleCount"]
+            rejected_underexposed_sample_count += raster_stats["rejectedUnderexposedSampleCount"]
+            rejected_edge_sample_count += raster_stats["rejectedEdgeSampleCount"]
+            rejected_grazing_sample_count += raster_stats["rejectedGrazingSampleCount"]
+            rejected_invalid_projection_sample_count += raster_stats["rejectedInvalidProjectionSampleCount"]
+            rejected_occluded_sample_count += raster_stats["rejectedOccludedSampleCount"]
+            depth_tested_sample_count += raster_stats["depthTestedSampleCount"]
+            missing_depth_sample_count += raster_stats["missingDepthSampleCount"]
+
+            if raster_stats["projectedPixelCount"] > 0:
+                textured_face_count += 1
+            else:
+                fallback_face_count += 1
+            for point in atlas_triangle:
+                uv_vertex_sample_stats.add(sample_texture_at_atlas_point(texture_pixels, atlas_width, atlas_height, point[0], point[1]))
+            for point in atlas_interior_sample_points(atlas_triangle):
+                uv_face_interior_sample_stats.add(sample_texture_at_atlas_point(texture_pixels, atlas_width, atlas_height, point[0], point[1]))
+            face_lines.append(obj_face_line(face, uv_start))
+            continue
+
         candidates = texture_projection_candidates(face_vertices, keyframes)
         if candidates:
             selected_key = candidates[0].keyframe_debug_id
@@ -2279,6 +3079,9 @@ async def write_textured_obj(
         rejected_edge_sample_count += raster_stats["rejectedEdgeSampleCount"]
         rejected_grazing_sample_count += raster_stats["rejectedGrazingSampleCount"]
         rejected_invalid_projection_sample_count += raster_stats["rejectedInvalidProjectionSampleCount"]
+        rejected_occluded_sample_count += raster_stats["rejectedOccludedSampleCount"]
+        depth_tested_sample_count += raster_stats["depthTestedSampleCount"]
+        missing_depth_sample_count += raster_stats["missingDepthSampleCount"]
         if raster_stats["projectedPixelCount"] > 0:
             textured_face_count += 1
         else:
@@ -2289,9 +3092,7 @@ async def write_textured_obj(
         for point in atlas_interior_sample_points(atlas_triangle):
             uv_face_interior_sample_stats.add(sample_texture_at_atlas_point(texture_pixels, atlas_width, atlas_height, point[0], point[1]))
 
-        face_lines.append(
-            f"f {face[0] + 1}/{uv_start} {face[1] + 1}/{uv_start + 1} {face[2] + 1}/{uv_start + 2}"
-        )
+        face_lines.append(obj_face_line(face, uv_start))
         if report_progress is not None and (face_index % progress_interval == 0 or face_index == face_count - 1):
             fraction = ((face_index + 1) / face_count) if face_count else 1
             coverage = int((textured_face_count / (face_index + 1)) * 100) if face_index >= 0 else 0
@@ -2300,6 +3101,20 @@ async def write_textured_obj(
                 f"Texturing atlas faces {face_index + 1} / {face_count} ({coverage}% projected)",
             )
             await asyncio.sleep(0)
+
+    if planar_chart_texture_stats:
+        for chart_stats in planar_chart_texture_stats:
+            context_stats = planar_chart_contexts.get(int(chart_stats["chartId"]), {}).get("stats", {})
+            filled = int(context_stats.get("filledPixelCount", 0))
+            projected = int(context_stats.get("projectedPixelCount", 0))
+            chart_stats["rasterizedPixelCount"] = filled
+            chart_stats["projectedPixelCount"] = projected
+            chart_stats["fallbackPixelCount"] = int(context_stats.get("fallbackPixelCount", 0))
+            chart_stats["projectedPixelRatio"] = round(projected / max(filled, 1), 4)
+    atlas_layout_debug_stats = {
+        **atlas_layout_spec.stats,
+        "charts": planar_chart_texture_stats or atlas_layout_spec.stats.get("charts", []),
+    }
 
     texture_diagnostics = build_texture_diagnostics(
         texture=texture,
@@ -2333,8 +3148,14 @@ async def write_textured_obj(
         rejected_edge_sample_count=rejected_edge_sample_count,
         rejected_grazing_sample_count=rejected_grazing_sample_count,
         rejected_invalid_projection_sample_count=rejected_invalid_projection_sample_count,
+        rejected_occluded_sample_count=rejected_occluded_sample_count,
+        depth_tested_sample_count=depth_tested_sample_count,
+        missing_depth_sample_count=missing_depth_sample_count,
         render_mesh_stats=mesh.stats.get("textureRenderMesh", {}),
         color_correction=color_correction,
+        atlas_layout_stats=atlas_layout_debug_stats,
+        uv_strategy=atlas_layout_spec.strategy,
+        normal_coordinate_count=len(mesh.vertices),
     )
     texture_diagnostics["processing"] = {
         "textureWorkerCount": parallel_worker_count,
@@ -2375,9 +3196,12 @@ async def write_textured_obj(
         "o textured_mesh",
         "usemtl LidarAI_Textured_Material",
     ]
+    vertex_normals = compute_vertex_normals(mesh.vertices, mesh.faces)
     for x, y, z in mesh.vertices:
         lines.append(f"v {x:.6f} {y:.6f} {z:.6f}")
     lines.extend(vt_lines)
+    for x, y, z in vertex_normals:
+        lines.append(f"vn {x:.6f} {y:.6f} {z:.6f}")
     lines.extend(face_lines)
     output_obj_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -2396,7 +3220,7 @@ async def write_textured_obj(
     )
 
     return {
-        "uvStrategy": "render_mesh_per_face_atlas_padded",
+        "uvStrategy": atlas_layout_spec.strategy,
         "atlasWidth": atlas_width,
         "atlasHeight": atlas_height,
         "atlasMaxSize": atlas_max_size,
@@ -2409,6 +3233,7 @@ async def write_textured_obj(
         "fallbackFaceCount": fallback_face_count,
         "projectionCoverage": (textured_face_count / face_count) if face_count else 0,
         "renderMesh": mesh.stats.get("textureRenderMesh", {}),
+        "atlasLayout": atlas_layout_debug_stats,
         "textureWorkerCount": parallel_worker_count,
         "diagnostics": texture_diagnostics,
     }
@@ -2456,6 +3281,9 @@ async def rasterize_texture_atlas_parallel(
     rejected_edge_sample_count = 0
     rejected_grazing_sample_count = 0
     rejected_invalid_projection_sample_count = 0
+    rejected_occluded_sample_count = 0
+    depth_tested_sample_count = 0
+    missing_depth_sample_count = 0
     dilated_pixel_count = 0
     uv_min_u = math.inf
     uv_min_v = math.inf
@@ -2482,9 +3310,7 @@ async def rasterize_texture_atlas_parallel(
                     uv_out_of_range_count += 1
             vt_lines.append(f"vt {u:.8f} {v:.8f}")
 
-        face_lines.append(
-            f"f {face[0] + 1}/{uv_start} {face[1] + 1}/{uv_start + 1} {face[2] + 1}/{uv_start + 2}"
-        )
+        face_lines.append(obj_face_line(face, uv_start))
 
     if face_count == 0:
         return {
@@ -2509,6 +3335,9 @@ async def rasterize_texture_atlas_parallel(
             "rejected_edge_sample_count": rejected_edge_sample_count,
             "rejected_grazing_sample_count": rejected_grazing_sample_count,
             "rejected_invalid_projection_sample_count": rejected_invalid_projection_sample_count,
+            "rejected_occluded_sample_count": rejected_occluded_sample_count,
+            "depth_tested_sample_count": depth_tested_sample_count,
+            "missing_depth_sample_count": missing_depth_sample_count,
             "uv_min_u": uv_min_u,
             "uv_min_v": uv_min_v,
             "uv_max_u": uv_max_u,
@@ -2569,6 +3398,9 @@ async def rasterize_texture_atlas_parallel(
                     rejected_edge_sample_count += result.rejected_edge_sample_count
                     rejected_grazing_sample_count += result.rejected_grazing_sample_count
                     rejected_invalid_projection_sample_count += result.rejected_invalid_projection_sample_count
+                    rejected_occluded_sample_count += result.rejected_occluded_sample_count
+                    depth_tested_sample_count += result.depth_tested_sample_count
+                    missing_depth_sample_count += result.missing_depth_sample_count
                     dilated_pixel_count += result.dilated_pixel_count
                     if result.projected_pixel_count > 0:
                         textured_face_count += 1
@@ -2615,6 +3447,9 @@ async def rasterize_texture_atlas_parallel(
         "rejected_edge_sample_count": rejected_edge_sample_count,
         "rejected_grazing_sample_count": rejected_grazing_sample_count,
         "rejected_invalid_projection_sample_count": rejected_invalid_projection_sample_count,
+        "rejected_occluded_sample_count": rejected_occluded_sample_count,
+        "depth_tested_sample_count": depth_tested_sample_count,
+        "missing_depth_sample_count": missing_depth_sample_count,
         "uv_min_u": uv_min_u,
         "uv_min_v": uv_min_v,
         "uv_max_u": uv_max_u,
@@ -2743,6 +3578,9 @@ def rasterize_texture_face_for_worker(face_index: int) -> TextureFaceResult:
         rejected_edge_sample_count=raster_stats["rejectedEdgeSampleCount"],
         rejected_grazing_sample_count=raster_stats["rejectedGrazingSampleCount"],
         rejected_invalid_projection_sample_count=raster_stats["rejectedInvalidProjectionSampleCount"],
+        rejected_occluded_sample_count=raster_stats["rejectedOccludedSampleCount"],
+        depth_tested_sample_count=raster_stats["depthTestedSampleCount"],
+        missing_depth_sample_count=raster_stats["missingDepthSampleCount"],
         dilated_pixel_count=dilated_pixel_count,
         keyframe_contribution_keys=keyframe_contribution_keys,
         uv_vertex_sample_colors=uv_vertex_sample_colors,
@@ -2760,10 +3598,320 @@ def atlas_layout(face_count: int, atlas_max_size: int = TEXTURE_ATLAS_MAX_SIZE) 
     return columns * tile_size, rows * tile_size, tile_size, columns
 
 
+def build_texture_atlas_layout(mesh: FusedMesh, atlas_max_size: int) -> TextureAtlasLayout:
+    face_count = len(mesh.faces)
+    planar_charts = detect_planar_texture_charts(mesh, atlas_max_size=atlas_max_size)
+    if not planar_charts:
+        atlas_width, atlas_height, tile_size, columns = atlas_layout(face_count, atlas_max_size=atlas_max_size)
+        return TextureAtlasLayout(
+            width=atlas_width,
+            height=atlas_height,
+            tile_size=tile_size,
+            columns=columns,
+            tile_start_y=0,
+            planar_charts=[],
+            face_to_chart={},
+            face_to_tile_index={face_index: face_index for face_index in range(face_count)},
+            strategy="render_mesh_per_face_atlas_padded",
+            stats={"enabled": False, "reason": "no planar charts selected"},
+        )
+
+    selected_charts = list(planar_charts)
+    while selected_charts:
+        packed_charts, chart_height = pack_planar_texture_charts(selected_charts, atlas_max_size)
+        face_to_chart = {
+            face_index: chart
+            for chart in packed_charts
+            for face_index in chart.face_indices
+        }
+        non_chart_face_indices = [
+            face_index for face_index in range(face_count)
+            if face_index not in face_to_chart
+        ]
+        tile_size, columns, tile_rows = fit_per_face_tiles_below_charts(
+            non_chart_face_count=len(non_chart_face_indices),
+            atlas_max_size=atlas_max_size,
+            tile_start_y=chart_height,
+        )
+        if tile_size > 0:
+            atlas_height = max(64, chart_height + tile_rows * tile_size)
+            return TextureAtlasLayout(
+                width=atlas_max_size,
+                height=min(atlas_max_size, atlas_height),
+                tile_size=tile_size,
+                columns=columns,
+                tile_start_y=chart_height,
+                planar_charts=packed_charts,
+                face_to_chart=face_to_chart,
+                face_to_tile_index={face_index: index for index, face_index in enumerate(non_chart_face_indices)},
+                strategy="planar_chart_atlas_with_per_face_fallback",
+                stats={
+                    "enabled": True,
+                    "chartCount": len(packed_charts),
+                    "chartedFaceCount": len(face_to_chart),
+                    "fallbackFaceCount": len(non_chart_face_indices),
+                    "tileStartY": chart_height,
+                    "fallbackTileSize": tile_size,
+                    "fallbackTileRows": tile_rows,
+                    "atlasMaxSize": atlas_max_size,
+                    "charts": [planar_chart_stats(chart) for chart in packed_charts],
+                },
+            )
+
+        selected_charts = selected_charts[:-1]
+
+    atlas_width, atlas_height, tile_size, columns = atlas_layout(face_count, atlas_max_size=atlas_max_size)
+    return TextureAtlasLayout(
+        width=atlas_width,
+        height=atlas_height,
+        tile_size=tile_size,
+        columns=columns,
+        tile_start_y=0,
+        planar_charts=[],
+        face_to_chart={},
+        face_to_tile_index={face_index: face_index for face_index in range(face_count)},
+        strategy="render_mesh_per_face_atlas_padded",
+        stats={"enabled": False, "reason": "planar charts could not fit with fallback tiles"},
+    )
+
+
+def detect_planar_texture_charts(mesh: FusedMesh, atlas_max_size: int) -> list[PlanarTextureChart]:
+    if not TEXTURE_PLANAR_CHARTS_ENABLED or not mesh.faces:
+        return []
+
+    render_stats = mesh.stats.get("textureRenderMesh", {}) if isinstance(mesh.stats, dict) else {}
+    plane_stats = render_stats.get("planeRegularization", {}) if isinstance(render_stats, dict) else {}
+    planes = plane_stats.get("planes") if isinstance(plane_stats, dict) else None
+    if not isinstance(planes, list):
+        return []
+
+    vertices = mesh.vertices
+    face_centers = [
+        triangle_center(vertices[face[0]], vertices[face[1]], vertices[face[2]])
+        for face in mesh.faces
+    ]
+    face_normals = [
+        triangle_normal(vertices[face[0]], vertices[face[1]], vertices[face[2]])
+        for face in mesh.faces
+    ]
+    face_areas = [
+        triangle_area(vertices[face[0]], vertices[face[1]], vertices[face[2]])
+        for face in mesh.faces
+    ]
+    assigned_faces: set[int] = set()
+    charts: list[PlanarTextureChart] = []
+
+    for source_plane_index, plane in enumerate(planes[:TEXTURE_PLANAR_CHART_MAX_COUNT * 2]):
+        normal_values = plane.get("normal") if isinstance(plane, dict) else None
+        if not isinstance(normal_values, list) or len(normal_values) != 3:
+            continue
+
+        normal = normalize((float(normal_values[0]), float(normal_values[1]), float(normal_values[2])))
+        if normal == (0.0, 0.0, 0.0):
+            continue
+
+        offset_value = plane.get("offset") if isinstance(plane, dict) else None
+        if offset_value is None:
+            offset = estimate_plane_offset(face_centers, face_normals, normal)
+        else:
+            offset = float(offset_value)
+
+        candidate_faces: list[int] = []
+        area = 0.0
+        for face_index, center in enumerate(face_centers):
+            if face_index in assigned_faces:
+                continue
+            normal_alignment = abs(dot(face_normals[face_index], normal))
+            if normal_alignment < TEXTURE_PLANAR_CHART_NORMAL_ALIGNMENT:
+                continue
+            distance = abs(dot(center, normal) + offset)
+            if distance > TEXTURE_PLANAR_CHART_DISTANCE_METERS:
+                continue
+            candidate_faces.append(face_index)
+            area += face_areas[face_index]
+
+        if len(candidate_faces) < TEXTURE_PLANAR_CHART_MIN_FACE_COUNT or area < TEXTURE_PLANAR_CHART_MIN_AREA_M2:
+            continue
+
+        axis_u, axis_v = plane_texture_axes(normal)
+        coord_us: list[float] = []
+        coord_vs: list[float] = []
+        for face_index in candidate_faces:
+            face = mesh.faces[face_index]
+            for vertex_index in face:
+                vertex = vertices[vertex_index]
+                coord_us.append(dot(vertex, axis_u))
+                coord_vs.append(dot(vertex, axis_v))
+
+        if not coord_us or not coord_vs:
+            continue
+
+        min_u = min(coord_us) - TEXTURE_PLANAR_CHART_PADDING_METERS
+        max_u = max(coord_us) + TEXTURE_PLANAR_CHART_PADDING_METERS
+        min_v = min(coord_vs) - TEXTURE_PLANAR_CHART_PADDING_METERS
+        max_v = max(coord_vs) + TEXTURE_PLANAR_CHART_PADDING_METERS
+        extent_u = max(max_u - min_u, 0.05)
+        extent_v = max(max_v - min_v, 0.05)
+        width = int(math.ceil(extent_u * TEXTURE_PLANAR_CHART_PIXELS_PER_METER))
+        height = int(math.ceil(extent_v * TEXTURE_PLANAR_CHART_PIXELS_PER_METER))
+        width = min(TEXTURE_PLANAR_CHART_MAX_SIZE, max(TEXTURE_PLANAR_CHART_MIN_SIZE, width))
+        height = min(TEXTURE_PLANAR_CHART_MAX_SIZE, max(TEXTURE_PLANAR_CHART_MIN_SIZE, height))
+        width = min(width, atlas_max_size)
+        height = min(height, atlas_max_size)
+        if width <= 0 or height <= 0:
+            continue
+
+        chart = PlanarTextureChart(
+            chart_id=len(charts),
+            face_indices=candidate_faces,
+            normal=normal,
+            plane_offset=offset,
+            axis_u=axis_u,
+            axis_v=axis_v,
+            min_u=min_u,
+            max_u=max_u,
+            min_v=min_v,
+            max_v=max_v,
+            width=width,
+            height=height,
+            source_plane_index=source_plane_index,
+        )
+        charts.append(chart)
+        assigned_faces.update(candidate_faces)
+        if len(charts) >= TEXTURE_PLANAR_CHART_MAX_COUNT:
+            break
+
+    charts.sort(key=lambda chart: len(chart.face_indices) * chart.width * chart.height, reverse=True)
+    for chart_id, chart in enumerate(charts):
+        chart.chart_id = chart_id
+    return charts
+
+
+def estimate_plane_offset(
+    face_centers: list[tuple[float, float, float]],
+    face_normals: list[tuple[float, float, float]],
+    normal: tuple[float, float, float],
+) -> float:
+    distances = [
+        dot(center, normal)
+        for center, face_normal in zip(face_centers, face_normals)
+        if abs(dot(face_normal, normal)) >= TEXTURE_PLANAR_CHART_NORMAL_ALIGNMENT
+    ]
+    if not distances:
+        return 0.0
+    return -median_float(distances)
+
+
+def plane_texture_axes(normal: tuple[float, float, float]) -> tuple[tuple[float, float, float], tuple[float, float, float]]:
+    reference = (0.0, 1.0, 0.0) if abs(normal[1]) < 0.85 else (1.0, 0.0, 0.0)
+    axis_u = normalize(cross(reference, normal))
+    if axis_u == (0.0, 0.0, 0.0):
+        axis_u = (1.0, 0.0, 0.0)
+    axis_v = normalize(cross(normal, axis_u))
+    return axis_u, axis_v
+
+
+def pack_planar_texture_charts(
+    charts: list[PlanarTextureChart],
+    atlas_max_size: int,
+) -> tuple[list[PlanarTextureChart], int]:
+    packed: list[PlanarTextureChart] = []
+    x = 0
+    y = 0
+    row_height = 0
+    height_cap = int(atlas_max_size * TEXTURE_PLANAR_CHART_ATLAS_HEIGHT_RATIO)
+    for chart in charts:
+        if chart.width > atlas_max_size or chart.height > height_cap:
+            continue
+        if x > 0 and x + chart.width > atlas_max_size:
+            y += row_height
+            x = 0
+            row_height = 0
+        if y + chart.height > height_cap:
+            continue
+        chart.x = x
+        chart.y = y
+        packed.append(chart)
+        x += chart.width
+        row_height = max(row_height, chart.height)
+
+    chart_height = y + row_height if packed else 0
+    return packed, chart_height
+
+
+def fit_per_face_tiles_below_charts(
+    non_chart_face_count: int,
+    atlas_max_size: int,
+    tile_start_y: int,
+) -> tuple[int, int, int]:
+    if non_chart_face_count <= 0:
+        return TEXTURE_TILE_MIN_SIZE, 1, 0
+
+    available_height = atlas_max_size - tile_start_y
+    if available_height < TEXTURE_TILE_MIN_SIZE:
+        return 0, 0, 0
+
+    for tile_size in range(TEXTURE_TILE_MAX_SIZE, TEXTURE_TILE_MIN_SIZE - 1, -1):
+        columns = max(1, atlas_max_size // tile_size)
+        rows = math.ceil(non_chart_face_count / columns)
+        if rows * tile_size <= available_height:
+            return tile_size, columns, rows
+
+    return 0, 0, 0
+
+
+def planar_chart_stats(chart: PlanarTextureChart) -> dict:
+    return {
+        "chartId": chart.chart_id,
+        "sourcePlaneIndex": chart.source_plane_index,
+        "faceCount": len(chart.face_indices),
+        "rect": {"x": chart.x, "y": chart.y, "width": chart.width, "height": chart.height},
+        "normal": [round(component, 4) for component in chart.normal],
+        "planeOffset": round(chart.plane_offset, 6),
+        "extentMeters": [
+            round(chart.max_u - chart.min_u, 4),
+            round(chart.max_v - chart.min_v, 4),
+        ],
+    }
+
+
 def atlas_tile(face_index: int, tile_size: int, columns: int) -> tuple[int, int]:
     column = face_index % columns
     row = face_index // columns
     return column * tile_size, row * tile_size
+
+
+def atlas_tile_for_layout(face_index: int, layout: TextureAtlasLayout) -> tuple[int, int]:
+    tile_index = layout.face_to_tile_index[face_index]
+    column = tile_index % layout.columns
+    row = tile_index // layout.columns
+    return column * layout.tile_size, layout.tile_start_y + row * layout.tile_size
+
+
+def planar_chart_point(
+    chart: PlanarTextureChart,
+    pixel_x: float,
+    pixel_y: float,
+) -> tuple[float, float, float]:
+    u_ratio = 0.0 if chart.width <= 1 else clamp_float((pixel_x - chart.x) / max(chart.width - 1, 1), 0.0, 1.0)
+    v_ratio = 0.0 if chart.height <= 1 else clamp_float((pixel_y - chart.y) / max(chart.height - 1, 1), 0.0, 1.0)
+    coord_u = chart.min_u + u_ratio * (chart.max_u - chart.min_u)
+    coord_v = chart.min_v + v_ratio * (chart.max_v - chart.min_v)
+    return add(add(multiply(chart.axis_u, coord_u), multiply(chart.axis_v, coord_v)), multiply(chart.normal, -chart.plane_offset))
+
+
+def planar_chart_pixel_for_vertex(
+    chart: PlanarTextureChart,
+    vertex: tuple[float, float, float],
+) -> tuple[float, float]:
+    coord_u = dot(vertex, chart.axis_u)
+    coord_v = dot(vertex, chart.axis_v)
+    u_ratio = (coord_u - chart.min_u) / max(chart.max_u - chart.min_u, 1e-6)
+    v_ratio = (coord_v - chart.min_v) / max(chart.max_v - chart.min_v, 1e-6)
+    return (
+        chart.x + clamp_float(u_ratio, 0.0, 1.0) * max(chart.width - 1, 1),
+        chart.y + clamp_float(v_ratio, 0.0, 1.0) * max(chart.height - 1, 1),
+    )
 
 
 def atlas_triangle_points(tile_origin: tuple[int, int], tile_size: int) -> list[tuple[float, float]]:
@@ -2846,8 +3994,14 @@ def build_texture_diagnostics(
     rejected_edge_sample_count: int,
     rejected_grazing_sample_count: int,
     rejected_invalid_projection_sample_count: int,
+    rejected_occluded_sample_count: int,
+    depth_tested_sample_count: int,
+    missing_depth_sample_count: int,
     render_mesh_stats: dict,
     color_correction: dict,
+    atlas_layout_stats: dict,
+    uv_strategy: str,
+    normal_coordinate_count: int,
 ) -> dict:
     uv_bounds = {
         "minU": round(uv_min_u, 8) if math.isfinite(uv_min_u) else None,
@@ -2871,15 +4025,29 @@ def build_texture_diagnostics(
         if projected_pixel_count
         else 0
     )
+    total_projection_decisions = (
+        accepted_projection_sample_count
+        + rejected_overexposed_sample_count
+        + rejected_underexposed_sample_count
+        + rejected_edge_sample_count
+        + rejected_grazing_sample_count
+        + rejected_invalid_projection_sample_count
+        + rejected_occluded_sample_count
+    )
+    depth_visibility_decision_count = depth_tested_sample_count + missing_depth_sample_count + rejected_occluded_sample_count
     diagnostics = {
         "version": "v2",
         "renderMesh": render_mesh_stats,
+        "uvStrategy": uv_strategy,
+        "atlasLayout": atlas_layout_stats,
         "objSyntax": {
             "faceCount": face_count,
             "faceWithUVIndexCount": face_count,
             "faceWithoutUVIndexCount": 0,
             "uvCoordinateCount": uv_coordinate_count,
             "expectedUVCoordinateCount": face_count * 3,
+            "normalCoordinateCount": normal_coordinate_count,
+            "expectedNormalCoordinateCount": normal_coordinate_count,
             "invalidUVReferenceCount": 0,
         },
         "uv": {
@@ -2920,6 +4088,22 @@ def build_texture_diagnostics(
             "rejectedEdgeSampleCount": rejected_edge_sample_count,
             "rejectedGrazingSampleCount": rejected_grazing_sample_count,
             "rejectedInvalidProjectionSampleCount": rejected_invalid_projection_sample_count,
+            "rejectedOccludedSampleCount": rejected_occluded_sample_count,
+            "depthTestedSampleCount": depth_tested_sample_count,
+            "missingDepthSampleCount": missing_depth_sample_count,
+            "depthVisibilityDecisionCount": depth_visibility_decision_count,
+            "depthTestedDecisionRatio": round(
+                (depth_tested_sample_count / depth_visibility_decision_count)
+                if depth_visibility_decision_count
+                else 0,
+                4,
+            ),
+            "occludedDecisionRatio": round(
+                (rejected_occluded_sample_count / total_projection_decisions)
+                if total_projection_decisions
+                else 0,
+                4,
+            ),
             "maxFaceCandidates": TEXTURE_BLEND_MAX_FACE_CANDIDATES,
             "maxPixelSamples": TEXTURE_BLEND_MAX_PIXEL_SAMPLES,
         },
@@ -3044,7 +4228,17 @@ def texture_projection_candidates(
         if facing < TEXTURE_BLEND_MIN_FACING:
             continue
 
-        score = center_bias * (visible_vertex_count / 3) * max(facing, 0.15) / max(depth, 0.2)
+        depth_visibility = depth_visibility_for_world_point(center, keyframe)
+        if depth_visibility.status == "occluded":
+            continue
+
+        score = (
+            center_bias
+            * (visible_vertex_count / 3)
+            * max(facing, 0.15)
+            * depth_visibility.weight
+            / max(depth, 0.2)
+        )
         candidates.append(TextureProjectionCandidate(
             keyframe=keyframe,
             keyframe_debug_id=keyframe.debug_id,
@@ -3057,6 +4251,176 @@ def texture_projection_candidates(
 
     candidates.sort(key=lambda candidate: candidate.score, reverse=True)
     return candidates[:max_candidates]
+
+
+def texture_projection_candidates_for_region(
+    region_points: list[tuple[float, float, float]],
+    normal: tuple[float, float, float],
+    keyframes: list[ProjectionKeyframe],
+    max_candidates: int = TEXTURE_BLEND_MAX_FACE_CANDIDATES,
+) -> list[TextureProjectionCandidate]:
+    if not keyframes or not region_points:
+        return []
+
+    center = (
+        sum(point[0] for point in region_points) / len(region_points),
+        sum(point[1] for point in region_points) / len(region_points),
+        sum(point[2] for point in region_points) / len(region_points),
+    )
+    candidates: list[TextureProjectionCandidate] = []
+    for keyframe in keyframes:
+        projection = project_world_point(center, keyframe)
+        if projection is None:
+            continue
+
+        u, v, depth = projection
+        visible_point_count = sum(1 for point in region_points if project_world_point(point, keyframe) is not None)
+        if visible_point_count == 0:
+            continue
+
+        edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
+        if edge_margin < keyframe.edge_margin_threshold:
+            continue
+
+        center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
+        view_vector = normalize(subtract(keyframe.camera_position, center))
+        facing = abs(dot(normal, view_vector)) if normal != (0.0, 0.0, 0.0) else 0.25
+        if facing < TEXTURE_BLEND_MIN_FACING:
+            continue
+
+        depth_visibility = depth_visibility_for_world_point(center, keyframe)
+        if depth_visibility.status == "occluded":
+            continue
+
+        score = (
+            center_bias
+            * (visible_point_count / len(region_points))
+            * max(facing, 0.15)
+            * depth_visibility.weight
+            / max(depth, 0.2)
+        )
+        candidates.append(TextureProjectionCandidate(
+            keyframe=keyframe,
+            keyframe_debug_id=keyframe.debug_id,
+            score=score,
+            visible_vertex_count=min(3, visible_point_count),
+            center_projection=projection,
+            facing=facing,
+            center_edge_margin=edge_margin,
+        ))
+
+    candidates.sort(key=lambda candidate: candidate.score, reverse=True)
+    return candidates[:max_candidates]
+
+
+def chart_region_points(chart: PlanarTextureChart) -> list[tuple[float, float, float]]:
+    return [
+        planar_chart_point(chart, chart.x + chart.width * 0.5, chart.y + chart.height * 0.5),
+        planar_chart_point(chart, chart.x, chart.y),
+        planar_chart_point(chart, chart.x + chart.width - 1, chart.y),
+        planar_chart_point(chart, chart.x, chart.y + chart.height - 1),
+        planar_chart_point(chart, chart.x + chart.width - 1, chart.y + chart.height - 1),
+    ]
+
+
+def empty_texture_raster_stats() -> dict:
+    return {
+        "filledPixelCount": 0,
+        "projectedPixelCount": 0,
+        "fallbackPixelCount": 0,
+        "blendedPixelCount": 0,
+        "singleSamplePixelCount": 0,
+        "acceptedProjectionSampleCount": 0,
+        "rejectedOverexposedSampleCount": 0,
+        "rejectedUnderexposedSampleCount": 0,
+        "rejectedEdgeSampleCount": 0,
+        "rejectedGrazingSampleCount": 0,
+        "rejectedInvalidProjectionSampleCount": 0,
+        "rejectedOccludedSampleCount": 0,
+        "depthTestedSampleCount": 0,
+        "missingDepthSampleCount": 0,
+        "keyframeContributionCounts": {},
+    }
+
+
+def merge_texture_raster_stats(total: dict, addition: dict) -> None:
+    for key in (
+        "filledPixelCount",
+        "projectedPixelCount",
+        "fallbackPixelCount",
+        "blendedPixelCount",
+        "singleSamplePixelCount",
+        "acceptedProjectionSampleCount",
+        "rejectedOverexposedSampleCount",
+        "rejectedUnderexposedSampleCount",
+        "rejectedEdgeSampleCount",
+        "rejectedGrazingSampleCount",
+        "rejectedInvalidProjectionSampleCount",
+        "rejectedOccludedSampleCount",
+        "depthTestedSampleCount",
+        "missingDepthSampleCount",
+    ):
+        total[key] += addition.get(key, 0)
+
+    for key, value in addition.get("keyframeContributionCounts", {}).items():
+        counts = total.setdefault("keyframeContributionCounts", {})
+        counts[key] = counts.get(key, 0) + value
+
+
+def rasterize_planar_chart_texture(
+    texture_pixels: object,
+    mask_pixels: object,
+    chart: PlanarTextureChart,
+    candidates: list[TextureProjectionCandidate],
+    fallback_color: Callable[[], tuple[int, int, int]],
+) -> dict:
+    stats = empty_texture_raster_stats()
+    for y in range(chart.y, chart.y + chart.height):
+        for x in range(chart.x, chart.x + chart.width):
+            color: tuple[int, int, int] | None = None
+            if candidates:
+                world_point = planar_chart_point(chart, x + 0.5, y + 0.5)
+                blend = blend_projected_texture_sample(world_point, candidates)
+                accepted_count = blend.accepted_sample_count
+                if accepted_count > 0:
+                    color = blend.color
+                    stats["projectedPixelCount"] += 1
+                    stats["acceptedProjectionSampleCount"] += accepted_count
+                    stats["rejectedOverexposedSampleCount"] += blend.rejected_overexposed_sample_count
+                    stats["rejectedUnderexposedSampleCount"] += blend.rejected_underexposed_sample_count
+                    stats["rejectedEdgeSampleCount"] += blend.rejected_edge_sample_count
+                    stats["rejectedGrazingSampleCount"] += blend.rejected_grazing_sample_count
+                    stats["rejectedInvalidProjectionSampleCount"] += blend.rejected_invalid_projection_sample_count
+                    stats["rejectedOccludedSampleCount"] += blend.rejected_occluded_sample_count
+                    stats["depthTestedSampleCount"] += blend.depth_tested_sample_count
+                    stats["missingDepthSampleCount"] += blend.missing_depth_sample_count
+                    if accepted_count > 1:
+                        stats["blendedPixelCount"] += 1
+                    else:
+                        stats["singleSamplePixelCount"] += 1
+                    for key in blend.keyframe_contribution_keys:
+                        counts = stats["keyframeContributionCounts"]
+                        counts[key] = counts.get(key, 0) + 1
+                else:
+                    stats["rejectedOverexposedSampleCount"] += blend.rejected_overexposed_sample_count
+                    stats["rejectedUnderexposedSampleCount"] += blend.rejected_underexposed_sample_count
+                    stats["rejectedEdgeSampleCount"] += blend.rejected_edge_sample_count
+                    stats["rejectedGrazingSampleCount"] += blend.rejected_grazing_sample_count
+                    stats["rejectedInvalidProjectionSampleCount"] += blend.rejected_invalid_projection_sample_count
+                    stats["rejectedOccludedSampleCount"] += blend.rejected_occluded_sample_count
+                    stats["depthTestedSampleCount"] += blend.depth_tested_sample_count
+                    stats["missingDepthSampleCount"] += blend.missing_depth_sample_count
+                    stats["fallbackPixelCount"] += 1
+            else:
+                stats["fallbackPixelCount"] += 1
+
+            if color is None:
+                color = fallback_color()
+            texture_pixels[x, y] = color
+            mask_pixels[x, y] = 255
+            stats["filledPixelCount"] += 1
+
+    return stats
 
 
 def rasterize_face_texture(
@@ -3082,6 +4446,9 @@ def rasterize_face_texture(
     rejected_edge_sample_count = 0
     rejected_grazing_sample_count = 0
     rejected_invalid_projection_sample_count = 0
+    rejected_occluded_sample_count = 0
+    depth_tested_sample_count = 0
+    missing_depth_sample_count = 0
     keyframe_contribution_counts: dict[str, int] = {}
 
     for y in range(min_y, max_y + 1):
@@ -3104,6 +4471,9 @@ def rasterize_face_texture(
                     rejected_edge_sample_count += blend.rejected_edge_sample_count
                     rejected_grazing_sample_count += blend.rejected_grazing_sample_count
                     rejected_invalid_projection_sample_count += blend.rejected_invalid_projection_sample_count
+                    rejected_occluded_sample_count += blend.rejected_occluded_sample_count
+                    depth_tested_sample_count += blend.depth_tested_sample_count
+                    missing_depth_sample_count += blend.missing_depth_sample_count
                     if accepted_count > 1:
                         blended_pixel_count += 1
                     else:
@@ -3116,6 +4486,9 @@ def rasterize_face_texture(
                     rejected_edge_sample_count += blend.rejected_edge_sample_count
                     rejected_grazing_sample_count += blend.rejected_grazing_sample_count
                     rejected_invalid_projection_sample_count += blend.rejected_invalid_projection_sample_count
+                    rejected_occluded_sample_count += blend.rejected_occluded_sample_count
+                    depth_tested_sample_count += blend.depth_tested_sample_count
+                    missing_depth_sample_count += blend.missing_depth_sample_count
                     fallback_pixel_count += 1
             else:
                 fallback_pixel_count += 1
@@ -3137,6 +4510,9 @@ def rasterize_face_texture(
         "rejectedEdgeSampleCount": rejected_edge_sample_count,
         "rejectedGrazingSampleCount": rejected_grazing_sample_count,
         "rejectedInvalidProjectionSampleCount": rejected_invalid_projection_sample_count,
+        "rejectedOccludedSampleCount": rejected_occluded_sample_count,
+        "depthTestedSampleCount": depth_tested_sample_count,
+        "missingDepthSampleCount": missing_depth_sample_count,
         "keyframeContributionCounts": keyframe_contribution_counts,
     }
 
@@ -3151,6 +4527,9 @@ def blend_projected_texture_sample(
     rejected_edge_count = 0
     rejected_grazing_count = 0
     rejected_invalid_projection_count = 0
+    rejected_occluded_count = 0
+    depth_tested_count = 0
+    missing_depth_count = 0
 
     for candidate in candidates[:TEXTURE_BLEND_MAX_PIXEL_SAMPLES]:
         if candidate.facing < TEXTURE_BLEND_MIN_FACING:
@@ -3169,6 +4548,15 @@ def blend_projected_texture_sample(
             rejected_edge_count += 1
             continue
 
+        depth_visibility = depth_visibility_for_world_point(world_point, keyframe)
+        if depth_visibility.status == "occluded":
+            rejected_occluded_count += 1
+            continue
+        if depth_visibility.status == "visible":
+            depth_tested_count += 1
+        else:
+            missing_depth_count += 1
+
         color = sample_image_bilinear(keyframe, u, v)
         luminance = rgb_luminance(color)
         detail_range = max(color) - min(color)
@@ -3180,7 +4568,7 @@ def blend_projected_texture_sample(
             continue
 
         edge_weight = max(0.05, min(edge_margin / keyframe.blend_edge_denominator, 1))
-        weight = max(candidate.score, 1e-6) * edge_weight / max(depth, 0.2)
+        weight = max(candidate.score, 1e-6) * edge_weight * depth_visibility.weight / max(depth, 0.2)
         samples.append((weight, color, candidate.keyframe_debug_id))
 
     if not samples:
@@ -3193,6 +4581,9 @@ def blend_projected_texture_sample(
             rejected_edge_count,
             rejected_grazing_count,
             rejected_invalid_projection_count,
+            rejected_occluded_count,
+            depth_tested_count,
+            missing_depth_count,
         )
 
     if len(samples) == 1:
@@ -3206,6 +4597,9 @@ def blend_projected_texture_sample(
             rejected_edge_count,
             rejected_grazing_count,
             rejected_invalid_projection_count,
+            rejected_occluded_count,
+            depth_tested_count,
+            missing_depth_count,
         )
 
     total_weight = sum(weight for weight, _color, _key in samples)
@@ -3230,6 +4624,9 @@ def blend_projected_texture_sample(
         rejected_edge_count,
         rejected_grazing_count,
         rejected_invalid_projection_count,
+        rejected_occluded_count,
+        depth_tested_count,
+        missing_depth_count,
     )
 
 
@@ -3337,6 +4734,108 @@ def project_world_point(
         return None
 
     return u, v, depth
+
+
+def project_world_point_to_depth(
+    vertex: tuple[float, float, float],
+    depth_frame: ProjectionDepthFrame,
+) -> tuple[float, float, float] | None:
+    matrix = depth_frame.world_to_camera_values
+    vx = float(vertex[0])
+    vy = float(vertex[1])
+    vz = float(vertex[2])
+    x = matrix[0] * vx + matrix[4] * vy + matrix[8] * vz + matrix[12]
+    y = matrix[1] * vx + matrix[5] * vy + matrix[9] * vz + matrix[13]
+    z = matrix[2] * vx + matrix[6] * vy + matrix[10] * vz + matrix[14]
+    depth = -z
+    if depth <= 0.05:
+        return None
+
+    u = depth_frame.fx * x / depth + depth_frame.cx
+    v = depth_frame.cy - depth_frame.fy * y / depth
+    if not (0 <= u < depth_frame.width and 0 <= v < depth_frame.height):
+        return None
+
+    return u, v, depth
+
+
+def depth_visibility_for_world_point(
+    vertex: tuple[float, float, float],
+    keyframe: ProjectionKeyframe,
+) -> DepthVisibilityResult:
+    depth_frame = keyframe.depth_frame
+    if depth_frame is None:
+        return DepthVisibilityResult("unknown", TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT, None, None, None)
+
+    projection = project_world_point_to_depth(vertex, depth_frame)
+    if projection is None:
+        return DepthVisibilityResult("unknown", TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT, None, None, None)
+
+    u, v, projected_depth = projection
+    sampled = sample_depth_frame(depth_frame, u, v)
+    if sampled is None:
+        return DepthVisibilityResult("unknown", TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT, projected_depth, None, None)
+
+    sampled_depth, confidence = sampled
+    tolerance = max(
+        TEXTURE_DEPTH_OCCLUSION_BASE_TOLERANCE_METERS,
+        projected_depth * TEXTURE_DEPTH_OCCLUSION_RELATIVE_TOLERANCE,
+    )
+    if sampled_depth + tolerance < projected_depth:
+        return DepthVisibilityResult("occluded", 0.0, projected_depth, sampled_depth, confidence)
+
+    depth_error = abs(sampled_depth - projected_depth)
+    match_weight = clamp_float(
+        1 - (depth_error / max(tolerance * 4, 1e-6)),
+        TEXTURE_DEPTH_MISMATCH_MIN_WEIGHT,
+        1.0,
+    )
+    confidence_weight = 1.0
+    if confidence is not None:
+        confidence_weight = clamp_float(0.72 + min(max(confidence, 0), 2) * 0.14, 0.72, 1.0)
+
+    return DepthVisibilityResult(
+        "visible",
+        clamp_float(match_weight * confidence_weight, TEXTURE_DEPTH_MISMATCH_MIN_WEIGHT, 1.0),
+        projected_depth,
+        sampled_depth,
+        confidence,
+    )
+
+
+def sample_depth_frame(
+    depth_frame: ProjectionDepthFrame,
+    u: float,
+    v: float,
+) -> tuple[float, int | None] | None:
+    center_x = int(round(u))
+    center_y = int(round(v))
+    radius = TEXTURE_DEPTH_NEIGHBORHOOD_RADIUS
+    values: list[float] = []
+    confidence_values: list[int] = []
+
+    for y in range(center_y - radius, center_y + radius + 1):
+        if y < 0 or y >= depth_frame.height:
+            continue
+        for x in range(center_x - radius, center_x + radius + 1):
+            if x < 0 or x >= depth_frame.width:
+                continue
+            index = y * depth_frame.width + x
+            if depth_frame.confidence_values is not None:
+                confidence = int(depth_frame.confidence_values[index])
+                if confidence == 0:
+                    continue
+                confidence_values.append(confidence)
+            depth = float(depth_frame.depth_values[index])
+            if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+                continue
+            values.append(depth)
+
+    if not values:
+        return None
+
+    confidence = max(confidence_values) if confidence_values else None
+    return median_float(values), confidence
 
 
 def sample_image_nearest(keyframe: ProjectionKeyframe, u: float, v: float) -> tuple[int, int, int]:
@@ -3447,6 +4946,13 @@ def subtract(
     b: tuple[float, float, float],
 ) -> tuple[float, float, float]:
     return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def add(
+    a: tuple[float, float, float],
+    b: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
 
 
 def multiply(

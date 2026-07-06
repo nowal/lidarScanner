@@ -5,11 +5,15 @@ import struct
 from io import BytesIO
 
 import pytest
+from pydantic import ValidationError
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
 
 import app.pipeline as pipeline
 from app.config import settings
+from app.home_ai import HomeAIAttachment, HomeAIChatRequest, HomeAIConversationState, _responses_input
+from app.home_context_builder import build_home_guide_model_context, context_payload_size_chars
+from app.home_guide_prompt import assign_home_guide_prompt_variant
 from app.main import app
 from app.models import JobStage, JobStatus
 from app.store import JobStore
@@ -36,6 +40,49 @@ def encoded_test_jpeg() -> str:
     buffer = BytesIO()
     image.save(buffer, format="JPEG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def test_home_ai_responses_input_includes_uploaded_attachments():
+    request = HomeAIChatRequest(
+        message="Can you use these attachments for paint ideas?",
+        attachments=[
+            HomeAIAttachment(
+                kind="image",
+                fileName="living-room.jpg",
+                mimeType="image/jpeg",
+                byteCount=12,
+                dataBase64="aW1hZ2U=",
+            ),
+            HomeAIAttachment(
+                kind="file",
+                fileName="scope.pdf",
+                mimeType="application/pdf",
+                byteCount=10,
+                dataBase64="cGRm",
+            ),
+        ],
+    )
+
+    user_content = _responses_input(
+        request,
+        image_limit=0,
+        include_history=True,
+        prompt_variant="control",
+    )[2]["content"]
+
+    context_payload = json.loads(user_content[0]["text"])
+    assert context_payload["userAttachments"][0]["fileName"] == "living-room.jpg"
+    assert context_payload["userAttachments"][0]["includedAsModelInput"] is True
+    assert any(
+        item["type"] == "input_image" and item["image_url"].startswith("data:image/jpeg;base64,")
+        for item in user_content
+    )
+    assert any(
+        item["type"] == "input_file"
+        and item["filename"] == "scope.pdf"
+        and item["file_data"].startswith("data:application/pdf;base64,")
+        for item in user_content
+    )
 
 
 def encoded_depth_values(values: list[float]) -> str:
@@ -139,6 +186,222 @@ async def test_health_check_startup():
 
 
 @pytest.mark.asyncio
+async def test_home_ai_chat_returns_quote_draft_without_sending(monkeypatch):
+    monkeypatch.setattr("app.home_ai.settings.openai_api_key", "")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = auth_headers()
+        response = await client.post(
+            "/api/v1/ai/home-chat",
+            headers=headers,
+            json={
+                "message": "What would it cost to paint this room and can you help me get quotes?",
+                "homeContext": {
+                    "roomCount": 1,
+                    "rooms": [
+                        {
+                            "name": "Living Room",
+                            "floorAreaSquareMeters": 18.5,
+                            "wallCount": 4,
+                            "openingCount": 1,
+                            "windowCount": 2,
+                        }
+                    ],
+                    "totals": {"floorAreaSquareMeters": 18.5},
+                    "selectedKeyframes": [
+                        {
+                            "id": "00000000-0000-0000-0000-000000000111",
+                            "imageResolution": [100, 100],
+                            "jpegBase64": encoded_test_jpeg(),
+                        }
+                    ],
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["usedFallback"] is True
+    assert body["state"]["requiresExplicitApproval"] is True
+    assert body["state"]["stage"] == "quote_ready"
+    assert body["state"]["conversionReadiness"] == "high"
+    assert body["state"]["ctaAllowed"] is True
+    assert body["state"]["suggestedServiceType"] == "Painting"
+    assert body["quoteDraft"]["serviceType"] == "Painting"
+    assert body["cta"]["type"] == "quote_request"
+    assert body["cta"]["serviceType"] == "Painting"
+    assert body["cta"]["label"] == "Request a painting quote for this space"
+    assert body["quoteDraft"]["estimatedRangeLow"] > 0
+    assert body["visualFocus"] is None
+    assert "nothing goes to a provider" in body["message"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_home_ai_chat_can_explore_without_quote_draft(monkeypatch):
+    monkeypatch.setattr("app.home_ai.settings.openai_api_key", "")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = auth_headers()
+        response = await client.post(
+            "/api/v1/ai/home-chat",
+            headers=headers,
+            json={
+                "message": "What painting ideas would look good in this room?",
+                "homeContext": {
+                    "roomCount": 1,
+                    "rooms": [{"name": "Bedroom", "floorAreaSquareMeters": 11.0}],
+                    "totals": {"floorAreaSquareMeters": 11.0},
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"]["intent"] == "design_advice"
+    assert body["state"]["requiresExplicitApproval"] is False
+    assert body["state"]["ctaAllowed"] is False
+    assert body["quoteDraft"] is None
+    assert body["cta"] is None
+    assert "RoomPlan" not in body["message"]["content"]
+    assert "keyframe" not in body["message"]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_home_ai_chat_does_not_show_cta_on_first_generic_exploration(monkeypatch):
+    monkeypatch.setattr("app.home_ai.settings.openai_api_key", "")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/ai/home-chat",
+            headers=auth_headers(),
+            json={
+                "message": "I am just looking for ideas for this space.",
+                "homeContext": {
+                    "roomCount": 1,
+                    "rooms": [{"name": "Room 1", "floorAreaSquareMeters": 14.0}],
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"]["ctaAllowed"] is False
+    assert body["quoteDraft"] is None
+    assert body["cta"] is None
+
+
+@pytest.mark.asyncio
+async def test_home_ai_chat_handles_missing_context_gracefully(monkeypatch):
+    monkeypatch.setattr("app.home_ai.settings.openai_api_key", "")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/ai/home-chat",
+            headers=auth_headers(),
+            json={"message": "Hi, can you help me think about my home?"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["state"]["confidence"] == "low"
+    assert body["contextQuality"]["hasMeasurements"] is False
+    assert body["contextQuality"]["recommendedDataImprovements"]
+    assert body["quoteDraft"] is None
+
+
+def test_home_ai_structured_state_rejects_invalid_stage():
+    with pytest.raises(ValidationError):
+        HomeAIConversationState.model_validate(
+            {
+                "intent": "exploring",
+                "stage": "ready_but_not_real",
+                "conversionReadiness": "low",
+            }
+        )
+
+
+def test_home_guide_prompt_variant_assignment_is_stable():
+    first = assign_home_guide_prompt_variant("user-123")
+    second = assign_home_guide_prompt_variant("user-123")
+    other = assign_home_guide_prompt_variant("user-456")
+
+    assert first == second
+    assert first in {"control", "more_direct", "more_design_led"}
+    assert other in {"control", "more_direct", "more_design_led"}
+
+
+@pytest.mark.asyncio
+async def test_home_ai_analytics_events_created_for_cta_and_quote_sent(monkeypatch, tmp_path):
+    monkeypatch.setattr("app.home_ai.settings.openai_api_key", "")
+    monkeypatch.setattr("app.home_ai.settings.storage_dir", str(tmp_path))
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/ai/home-chat",
+            headers=auth_headers(),
+            json={
+                "message": "What would it cost to paint this room?",
+                "homeContext": {
+                    "roomCount": 1,
+                    "rooms": [{"name": "Living Room", "floorAreaSquareMeters": 18.5}],
+                    "totals": {"floorAreaSquareMeters": 18.5},
+                },
+            },
+        )
+        body = response.json()
+        event_response = await client.post(
+            "/api/v1/ai/home-events",
+            headers=auth_headers(),
+            json={
+                "threadId": body["threadId"],
+                "eventType": "quote_request_sent",
+                "payload": {"serviceType": "Painting", "providerId": "provider-1"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert event_response.status_code == 200
+    events_path = tmp_path / "ai_threads" / body["threadId"] / "events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+    event_types = [event["eventType"] for event in events]
+    assert "cta_quote_shown" in event_types
+    assert "quote_request_sent" in event_types
+
+
+def test_home_context_builder_keeps_payload_compact_and_redacts_images():
+    context = {
+        "roomCount": 20,
+        "rooms": [
+            {
+                "id": f"room-{index}",
+                "name": f"Room {index}",
+                "floorAreaSquareMeters": 10 + index,
+                "objects": [
+                    {"category": f"Object {object_index}", "widthMeters": 1.1}
+                    for object_index in range(30)
+                ],
+            }
+            for index in range(20)
+        ],
+        "selectedKeyframes": [
+            {
+                "id": "frame-1",
+                "imageResolution": [100, 100],
+                "jpegBase64": "x" * 50000,
+            }
+        ],
+    }
+
+    model_context = build_home_guide_model_context(context, included_image_ids={"frame-1"})
+    payload = model_context.model_dump(mode="json", exclude_none=True)
+    serialized = json.dumps(payload)
+
+    assert len(payload["rooms"]) == 6
+    assert "x" * 100 not in serialized
+    assert context_payload_size_chars(model_context) < 12000
+
+
+@pytest.mark.asyncio
 async def test_job_lifecycle():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -186,6 +449,13 @@ async def test_job_lifecycle():
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["path"] == "colored_mesh.ply"
         assert manifest["artifacts"]["texturedObj"]["objPath"] == "textured_mesh.obj"
         assert manifest["artifacts"]["textureDebug"]["path"] == "texture_debug.json"
+        assert manifest["coordinateTransforms"]["convention"] == "column_major_4x4"
+        assert manifest["coordinateTransforms"]["modelFromARKitWorld"] == [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ]
 
 
 @pytest.mark.asyncio
@@ -340,7 +610,8 @@ def test_tsdf_texture_render_mesh_prefers_open3d_quadric_decimation(monkeypatch)
     assert render_stats["atlasMaxSize"] == pipeline.TEXTURE_TSDF_ATLAS_MAX_SIZE
     assert render_stats["renderFaceCount"] <= 200
     assert render_stats["renderFaceCount"] < len(mesh.faces)
-    assert render_stats["smoothing"]["enabled"] is False
+    assert render_stats["smoothing"]["enabled"] is True
+    assert render_stats["smoothing"]["scope"] == "photoreal render mesh only"
 
 
 def test_texture_render_smoothing_reduces_spiky_vertices():
@@ -609,6 +880,133 @@ async def test_depth_frames_are_decoded_and_rgbd_fallback_mesh_is_exported(monke
 
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
         assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is True
+
+
+@pytest.mark.asyncio
+async def test_fast_onboarding_profile_skips_rgbd_and_bulk_debug(monkeypatch):
+    def fail_if_open3d_loads():
+        raise AssertionError("fast_onboarding should skip RGBD geometry when ARKit mesh exists")
+
+    monkeypatch.setattr(pipeline, "load_open3d_modules", fail_if_open3d_loads)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = auth_headers()
+        create_resp = await client.post("/api/v1/jobs", headers=headers)
+        assert create_resp.status_code == 200
+        job_id = create_resp.json()["jobId"]
+
+        payload = {
+            "schemaVersion": "v1",
+            "createdAt": "2026-05-18T12:00:00Z",
+            "processingProfile": "fast_onboarding",
+            "meshAnchors": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000021",
+                    "transform": [
+                        1, 0, 0, 0,
+                        0, 1, 0, 0,
+                        0, 0, 1, 0,
+                        0, 0, 0, 1,
+                    ],
+                    "vertices": [
+                        [-0.2, -0.2, -1.0],
+                        [0.2, -0.2, -1.0],
+                        [-0.2, 0.2, -1.0],
+                    ],
+                    "triangleIndices": [0, 1, 2],
+                }
+            ],
+            "roomJSONBase64": None,
+            "images": [
+                {
+                    "id": f"00000000-0000-0000-0000-0000000001{index:02d}",
+                    "capturedAt": "2026-05-18T12:00:01Z",
+                    "timestamp": float(index),
+                    "cameraTransform": [
+                        1, 0, 0, 0,
+                        0, 1, 0, 0,
+                        0, 0, 1, 0,
+                        index * 0.03, 0, 0, 1,
+                    ],
+                    "intrinsics": [
+                        100, 0, 0,
+                        0, 100, 0,
+                        50, 50, 1,
+                    ],
+                    "imageResolution": [100, 100],
+                    "jpegBase64": encoded_test_jpeg(),
+                }
+                for index in range(35)
+            ],
+            "depthFrames": [
+                {
+                    "id": f"00000000-0000-0000-0000-0000000002{index:02d}",
+                    "colorKeyframeId": f"00000000-0000-0000-0000-0000000001{index:02d}",
+                    "capturedAt": "2026-05-18T12:00:01Z",
+                    "timestamp": float(index),
+                    "cameraTransform": [
+                        1, 0, 0, 0,
+                        0, 1, 0, 0,
+                        0, 0, 1, 0,
+                        index * 0.03, 0, 0, 1,
+                    ],
+                    "intrinsics": [
+                        10, 0, 0,
+                        0, 10, 0,
+                        1, 1, 1,
+                    ],
+                    "depthResolution": [2, 2],
+                    "depthFormat": "float32_little_endian_meters",
+                    "depthBase64": encoded_depth_values([1.0, 1.0, 1.0, 1.0]),
+                    "confidenceFormat": "uint8_arkit_confidence",
+                    "confidenceBase64": base64.b64encode(bytes([2, 2, 2, 2])).decode("ascii"),
+                    "metersPerUnit": 1,
+                }
+                for index in range(35)
+            ],
+        }
+        data = json.dumps(payload).encode("utf-8")
+
+        await client.post(
+            f"/api/v1/jobs/{job_id}/upload",
+            headers={**headers, "x-upload-offset": "0", "x-upload-total": str(len(data))},
+            content=data,
+        )
+        await client.post(
+            f"/api/v1/jobs/{job_id}/finalize",
+            headers=headers,
+            json={"totalBytes": len(data), "filename": "scan_payload.json"},
+        )
+
+        status = await wait_for_complete(client, job_id, headers)
+        assert status["status"] == "complete"
+        assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
+        assert status["artifacts"]["vertexColoredPlyUrl"] is None
+        assert status["artifacts"]["textureDebugPreviewUrl"] is None
+        assert status["artifacts"]["stageTimingsUrl"].endswith("/stage_timings.json")
+
+        rgbd_stats = (await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_fusion_stats.json", headers=headers)).json()
+        assert rgbd_stats["used"] is False
+        assert rgbd_stats["geometrySource"] == "arkit_mesh_anchor_fusion"
+        assert rgbd_stats["profile"]["name"] == "fast_onboarding"
+
+        keyframe_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/keyframe_selection.json", headers=headers)).json()
+        assert keyframe_selection["originalKeyframeCount"] == 35
+        assert keyframe_selection["selectedKeyframeCount"] == 28
+
+        depth_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_selection.json", headers=headers)).json()
+        assert depth_selection["originalDepthFrameCount"] == 35
+        assert depth_selection["selectedDepthFrameCount"] == 24
+
+        manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
+        assert manifest["processingProfile"]["name"] == "fast_onboarding"
+        assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
+        assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
+
+        timings = (await client.get(f"/api/v1/jobs/{job_id}/result/stage_timings.json", headers=headers)).json()
+        assert timings["jobId"] == job_id
+        assert any(item["stageClass"] == "TexturedMeshStage" for item in timings["timings"])
 
 
 @pytest.mark.asyncio

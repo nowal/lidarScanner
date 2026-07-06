@@ -64,6 +64,7 @@ class ArtifactLinks(BaseModel):
     texturePngUrl: Optional[str] = None
     textureDebugJsonUrl: Optional[str] = None
     textureDebugPreviewUrl: Optional[str] = None
+    stageTimingsUrl: Optional[str] = None
     usdzUrl: Optional[str] = None
     glbUrl: Optional[str] = None
 
@@ -100,6 +101,8 @@ class HealthResponse(BaseModel):
 class ScanPayloadEnvelope(BaseModel):
     schemaVersion: str
     createdAt: datetime
+    processingProfile: Optional[str] = None
+    captureSelection: Optional[dict[str, Any]] = None
     meshAnchors: list[dict[str, Any]]
     roomJSONBase64: Optional[str] = None
     roomJSONBase64List: list[str] = Field(default_factory=list)
