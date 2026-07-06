@@ -298,14 +298,14 @@ class ProcessingProfile:
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
     "fast_onboarding": ProcessingProfile(
         name="fast_onboarding",
-        max_keyframes=28,
-        max_depth_frames=24,
-        max_rgbd_frames=18,
-        use_rgbd_geometry=False,
-        write_vertex_colored_debug=False,
+        max_keyframes=40,
+        max_depth_frames=48,
+        max_rgbd_frames=36,
+        use_rgbd_geometry=True,
+        write_vertex_colored_debug=True,
         write_texture_debug_preview=False,
-        texture_render_target_faces=80_000,
-        texture_tsdf_render_target_faces=90_000,
+        texture_render_target_faces=TEXTURE_RENDER_TARGET_FACE_COUNT,
+        texture_tsdf_render_target_faces=TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",
@@ -928,7 +928,9 @@ def pair_rgbd_frames(
 
     for depth_frame in depth_frames:
         color_id = depth_frame.get("colorKeyframeId")
-        keyframe = keyframe_by_id.get(str(color_id)) if color_id else closest_keyframe(depth_frame, keyframes)
+        keyframe = keyframe_by_id.get(str(color_id)) if color_id else None
+        if not keyframe:
+            keyframe = closest_keyframe(depth_frame, keyframes)
         if not keyframe:
             continue
         if len(depth_frame.get("cameraTransform") or []) != 16 or len(depth_frame.get("intrinsics") or []) != 9:
@@ -1016,7 +1018,7 @@ def select_depth_frames_for_profile(
         frame for frame in depth_frames
         if frame.get("colorKeyframeId") and str(frame.get("colorKeyframeId")) in selected_keyframe_ids
     ]
-    candidates = paired or depth_frames
+    candidates = depth_frames if profile.use_rgbd_geometry else (paired or depth_frames)
     selected = pose_diverse_items(
         candidates,
         limit=profile.max_depth_frames,
@@ -1024,11 +1026,19 @@ def select_depth_frames_for_profile(
         timestamp_getter=lambda item: item.get("timestamp"),
     )
     selected_ids = [item.get("id") for item in selected if item.get("id")]
+    selected_from_all_depth = candidates is depth_frames
     return selected, {
-        "strategy": "paired_pose_diverse_backend_subset" if len(selected) < len(depth_frames) else "all_uploaded_depth_frames",
+        "strategy": (
+            "depth_pose_diverse_backend_subset"
+            if selected_from_all_depth and len(selected) < len(depth_frames)
+            else "paired_pose_diverse_backend_subset"
+            if len(selected) < len(depth_frames)
+            else "all_uploaded_depth_frames"
+        ),
         "profile": profile.name,
         "originalDepthFrameCount": len(depth_frames),
         "pairedDepthFrameCount": len(paired),
+        "geometryDepthSelection": "all_depth_frames" if selected_from_all_depth else "selected_keyframe_pairs",
         "selectedDepthFrameCount": len(selected),
         "selectedDepthFrameIds": selected_ids,
     }

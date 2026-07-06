@@ -883,12 +883,7 @@ async def test_depth_frames_are_decoded_and_rgbd_fallback_mesh_is_exported(monke
 
 
 @pytest.mark.asyncio
-async def test_fast_onboarding_profile_skips_rgbd_and_bulk_debug(monkeypatch):
-    def fail_if_open3d_loads():
-        raise AssertionError("fast_onboarding should skip RGBD geometry when ARKit mesh exists")
-
-    monkeypatch.setattr(pipeline, "load_open3d_modules", fail_if_open3d_loads)
-
+async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyframes():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = auth_headers()
@@ -937,7 +932,7 @@ async def test_fast_onboarding_profile_skips_rgbd_and_bulk_debug(monkeypatch):
                     "imageResolution": [100, 100],
                     "jpegBase64": encoded_test_jpeg(),
                 }
-                for index in range(35)
+                for index in range(55)
             ],
             "depthFrames": [
                 {
@@ -963,7 +958,7 @@ async def test_fast_onboarding_profile_skips_rgbd_and_bulk_debug(monkeypatch):
                     "confidenceBase64": base64.b64encode(bytes([2, 2, 2, 2])).decode("ascii"),
                     "metersPerUnit": 1,
                 }
-                for index in range(35)
+                for index in range(55)
             ],
         }
         data = json.dumps(payload).encode("utf-8")
@@ -982,26 +977,32 @@ async def test_fast_onboarding_profile_skips_rgbd_and_bulk_debug(monkeypatch):
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
         assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
-        assert status["artifacts"]["vertexColoredPlyUrl"] is None
+        assert status["artifacts"]["vertexColoredPlyUrl"].endswith("/colored_mesh.ply")
+        assert status["artifacts"]["previewMeshUrl"].endswith("/colored_mesh.ply")
         assert status["artifacts"]["textureDebugPreviewUrl"] is None
         assert status["artifacts"]["stageTimingsUrl"].endswith("/stage_timings.json")
 
         rgbd_stats = (await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_fusion_stats.json", headers=headers)).json()
-        assert rgbd_stats["used"] is False
-        assert rgbd_stats["geometrySource"] == "arkit_mesh_anchor_fusion"
+        assert rgbd_stats["used"] is True
+        assert rgbd_stats["geometrySource"] in {"rgbd_tsdf_open3d", "rgbd_keyframe_depth_mesh"}
         assert rgbd_stats["profile"]["name"] == "fast_onboarding"
+        assert rgbd_stats["profile"]["useRgbdGeometry"] is True
+        assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.TEXTURE_RENDER_TARGET_FACE_COUNT
+        assert rgbd_stats["sampledDepthFrameCount"] == 36
 
         keyframe_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/keyframe_selection.json", headers=headers)).json()
-        assert keyframe_selection["originalKeyframeCount"] == 35
-        assert keyframe_selection["selectedKeyframeCount"] == 28
+        assert keyframe_selection["originalKeyframeCount"] == 55
+        assert keyframe_selection["selectedKeyframeCount"] == 40
 
         depth_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_selection.json", headers=headers)).json()
-        assert depth_selection["originalDepthFrameCount"] == 35
-        assert depth_selection["selectedDepthFrameCount"] == 24
+        assert depth_selection["originalDepthFrameCount"] == 55
+        assert depth_selection["geometryDepthSelection"] == "all_depth_frames"
+        assert depth_selection["selectedDepthFrameCount"] == 48
 
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
         assert manifest["processingProfile"]["name"] == "fast_onboarding"
-        assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
+        assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is True
+        assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is True
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
 
         timings = (await client.get(f"/api/v1/jobs/{job_id}/result/stage_timings.json", headers=headers)).json()

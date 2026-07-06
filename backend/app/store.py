@@ -118,7 +118,7 @@ class JobStore:
             arkit_fused_mesh_url = self._artifact_url_if_present(result_dir, result_base, "arkit_fused_mesh.obj")
             rgbd_fused_mesh_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_fused_mesh.obj")
             vertex_colored_ply_url = self._artifact_url_if_present(result_dir, result_base, "colored_mesh.ply")
-            preview_mesh_url = vertex_colored_ply_url or raw_fused_mesh_url
+            preview_mesh_url = vertex_colored_ply_url or rgbd_fused_mesh_url or raw_fused_mesh_url
             textured_obj_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.obj")
             textured_mtl_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.mtl")
             texture_png_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh_texture.png")
