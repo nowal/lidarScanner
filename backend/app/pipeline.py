@@ -221,6 +221,7 @@ TEXTURE_RENDER_TARGET_FACE_COUNT = 120_000
 TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT = 150_000
 FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT = 45_000
 FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT = 50_000
+FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT = 10_000
 TEXTURE_RENDER_MIN_CLUSTER_METERS = 0.006
 TEXTURE_RENDER_MAX_CLUSTER_METERS = 0.08
 TEXTURE_RENDER_SMOOTHING_ITERATIONS = 8
@@ -253,7 +254,9 @@ TEXTURE_PLANAR_CHART_PIXELS_PER_METER = 360
 TEXTURE_PLANAR_CHART_MIN_SIZE = 256
 TEXTURE_PLANAR_CHART_MAX_SIZE = 1792
 TEXTURE_PLANAR_CHART_PADDING_METERS = 0.06
-TEXTURE_PLANAR_CHART_ATLAS_HEIGHT_RATIO = 0.58
+TEXTURE_PLANAR_CHART_ATLAS_HEIGHT_RATIO = 0.68
+TEXTURE_PLANAR_CHART_DIRECT_MAX_CANDIDATES = 3
+TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE = 0.35
 TEXTURE_ISLAND_DILATION_PIXELS = 4
 TEXTURE_COLOR_SATURATION_BOOST = 1.12
 TEXTURE_COLOR_CONTRAST_BOOST = 1.05
@@ -296,6 +299,8 @@ class ProcessingProfile:
     texture_render_target_faces: int
     texture_tsdf_render_target_faces: int
     planar_chart_raster_stride: int
+    planar_chart_projection_mode: str = "blend"
+    fallback_texture_face_limit: int | None = None
 
 
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
@@ -310,6 +315,8 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         texture_render_target_faces=FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT,
         texture_tsdf_render_target_faces=FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
         planar_chart_raster_stride=2,
+        planar_chart_projection_mode="direct",
+        fallback_texture_face_limit=FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT,
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",
@@ -322,6 +329,8 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         texture_render_target_faces=TEXTURE_RENDER_TARGET_FACE_COUNT,
         texture_tsdf_render_target_faces=TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
         planar_chart_raster_stride=1,
+        planar_chart_projection_mode="blend",
+        fallback_texture_face_limit=None,
     ),
 }
 
@@ -976,6 +985,8 @@ def processing_profile_stats(profile: ProcessingProfile) -> dict:
         "textureRenderTargetFaces": profile.texture_render_target_faces,
         "textureTsdfRenderTargetFaces": profile.texture_tsdf_render_target_faces,
         "planarChartRasterStride": profile.planar_chart_raster_stride,
+        "planarChartProjectionMode": profile.planar_chart_projection_mode,
+        "fallbackTextureFaceLimit": profile.fallback_texture_face_limit,
     }
 
 
@@ -2902,8 +2913,8 @@ async def write_textured_obj(
     uv_max_v = -math.inf
     uv_out_of_range_count = 0
     uv_non_finite_count = 0
-    progress_interval = max(1, min(face_count // 50, 1_000))
-    parallel_worker_count = 1 if atlas_layout_spec.planar_charts else texture_parallel_worker_count(face_count)
+    serial_texture_budget_enabled = atlas_layout_spec.planar_charts or profile.fallback_texture_face_limit is not None
+    parallel_worker_count = 1 if serial_texture_budget_enabled else texture_parallel_worker_count(face_count)
     parallel_result = None
     if parallel_worker_count > 1:
         try:
@@ -2958,6 +2969,18 @@ async def write_textured_obj(
     else:
         parallel_worker_count = 1
 
+    fallback_high_quality_faces, fallback_budget_stats = fallback_texture_face_budget(
+        mesh,
+        atlas_layout_spec,
+        profile.fallback_texture_face_limit if parallel_result is None else None,
+    )
+    fallback_total = face_count - len(atlas_layout_spec.face_to_chart)
+    fallback_progress_interval = max(1, min(max(fallback_total, 1) // 50, 1_000))
+    fallback_processed_count = 0
+    fallback_projected_count = 0
+    solid_projected_face_count = 0
+    solid_fallback_face_count = 0
+
     planar_chart_contexts: dict[int, dict] = {}
     planar_chart_texture_stats: list[dict] = []
     if parallel_result is None and atlas_layout_spec.planar_charts:
@@ -2965,8 +2988,8 @@ async def write_textured_obj(
             await report_progress(
                 82.5,
                 (
-                    f"Texturing {len(atlas_layout_spec.planar_charts)} planar wall charts "
-                    f"(stride {max(1, profile.planar_chart_raster_stride)})"
+                    f"Texturing {len(atlas_layout_spec.planar_charts)} planar room charts "
+                    f"({profile.planar_chart_projection_mode}, stride {max(1, profile.planar_chart_raster_stride)})"
                 ),
             )
             await asyncio.sleep(0)
@@ -2988,7 +3011,11 @@ async def write_textured_obj(
             def resolve_chart_fallback_color() -> tuple[int, int, int]:
                 nonlocal fallback_color
                 if fallback_color is None:
-                    fallback_color = average_projected_color(region_points, keyframes) or FALLBACK_COLOR
+                    fallback_color = (
+                        average_direct_projected_color(region_points, keyframes)
+                        if profile.planar_chart_projection_mode == "direct"
+                        else average_projected_color(region_points, keyframes)
+                    ) or FALLBACK_COLOR
                 return fallback_color
 
             raster_stats = rasterize_planar_chart_texture(
@@ -2998,6 +3025,7 @@ async def write_textured_obj(
                 candidates,
                 resolve_chart_fallback_color,
                 sample_stride=max(1, profile.planar_chart_raster_stride),
+                projection_mode=profile.planar_chart_projection_mode,
             )
             planar_chart_contexts[chart.chart_id] = {
                 "regionPoints": region_points,
@@ -3028,6 +3056,7 @@ async def write_textured_obj(
                 **planar_chart_stats(chart),
                 "candidateKeyframeCount": len(candidates),
                 "sampleStride": max(1, profile.planar_chart_raster_stride),
+                "projectionMode": profile.planar_chart_projection_mode,
             })
             if report_progress is not None:
                 await report_progress(
@@ -3071,53 +3100,85 @@ async def write_textured_obj(
             face_lines.append(obj_face_line(face, uv_start))
             continue
 
-        candidates = texture_projection_candidates(face_vertices, keyframes)
-        if candidates:
-            selected_key = candidates[0].keyframe_debug_id
-            selected_keyframe_face_counts[selected_key] = selected_keyframe_face_counts.get(selected_key, 0) + 1
-        fallback_color: tuple[int, int, int] | None = None
+        fallback_processed_count += 1
+        if face_index in fallback_high_quality_faces:
+            candidates = texture_projection_candidates(face_vertices, keyframes)
+            if candidates:
+                selected_key = candidates[0].keyframe_debug_id
+                selected_keyframe_face_counts[selected_key] = selected_keyframe_face_counts.get(selected_key, 0) + 1
+            fallback_color: tuple[int, int, int] | None = None
 
-        def resolve_fallback_color() -> tuple[int, int, int]:
-            nonlocal fallback_color
-            if fallback_color is None:
-                fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
-            return fallback_color
+            def resolve_fallback_color() -> tuple[int, int, int]:
+                nonlocal fallback_color
+                if fallback_color is None:
+                    fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
+                return fallback_color
 
-        raster_stats = rasterize_face_texture(
-            texture_pixels,
-            mask_pixels,
-            atlas_triangle,
-            face_vertices,
-            candidates,
-            resolve_fallback_color,
-        )
-        for key, value in raster_stats["keyframeContributionCounts"].items():
-            keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + value
-        dilated_pixel_count += dilate_texture_tile(
-            texture_pixels,
-            mask_pixels,
-            tile,
-            tile_size,
-            dilation_pixels,
-        )
-        rasterized_pixel_count += raster_stats["filledPixelCount"]
-        projected_pixel_count += raster_stats["projectedPixelCount"]
-        fallback_pixel_count += raster_stats["fallbackPixelCount"]
-        blended_pixel_count += raster_stats["blendedPixelCount"]
-        single_sample_pixel_count += raster_stats["singleSamplePixelCount"]
-        accepted_projection_sample_count += raster_stats["acceptedProjectionSampleCount"]
-        rejected_overexposed_sample_count += raster_stats["rejectedOverexposedSampleCount"]
-        rejected_underexposed_sample_count += raster_stats["rejectedUnderexposedSampleCount"]
-        rejected_edge_sample_count += raster_stats["rejectedEdgeSampleCount"]
-        rejected_grazing_sample_count += raster_stats["rejectedGrazingSampleCount"]
-        rejected_invalid_projection_sample_count += raster_stats["rejectedInvalidProjectionSampleCount"]
-        rejected_occluded_sample_count += raster_stats["rejectedOccludedSampleCount"]
-        depth_tested_sample_count += raster_stats["depthTestedSampleCount"]
-        missing_depth_sample_count += raster_stats["missingDepthSampleCount"]
-        if raster_stats["projectedPixelCount"] > 0:
-            textured_face_count += 1
+            raster_stats = rasterize_face_texture(
+                texture_pixels,
+                mask_pixels,
+                atlas_triangle,
+                face_vertices,
+                candidates,
+                resolve_fallback_color,
+            )
+            for key, value in raster_stats["keyframeContributionCounts"].items():
+                keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + value
+            dilated_pixel_count += dilate_texture_tile(
+                texture_pixels,
+                mask_pixels,
+                tile,
+                tile_size,
+                dilation_pixels,
+            )
+            rasterized_pixel_count += raster_stats["filledPixelCount"]
+            projected_pixel_count += raster_stats["projectedPixelCount"]
+            fallback_pixel_count += raster_stats["fallbackPixelCount"]
+            blended_pixel_count += raster_stats["blendedPixelCount"]
+            single_sample_pixel_count += raster_stats["singleSamplePixelCount"]
+            accepted_projection_sample_count += raster_stats["acceptedProjectionSampleCount"]
+            rejected_overexposed_sample_count += raster_stats["rejectedOverexposedSampleCount"]
+            rejected_underexposed_sample_count += raster_stats["rejectedUnderexposedSampleCount"]
+            rejected_edge_sample_count += raster_stats["rejectedEdgeSampleCount"]
+            rejected_grazing_sample_count += raster_stats["rejectedGrazingSampleCount"]
+            rejected_invalid_projection_sample_count += raster_stats["rejectedInvalidProjectionSampleCount"]
+            rejected_occluded_sample_count += raster_stats["rejectedOccludedSampleCount"]
+            depth_tested_sample_count += raster_stats["depthTestedSampleCount"]
+            missing_depth_sample_count += raster_stats["missingDepthSampleCount"]
+            if raster_stats["projectedPixelCount"] > 0:
+                textured_face_count += 1
+                fallback_projected_count += 1
+            else:
+                fallback_face_count += 1
         else:
-            fallback_face_count += 1
+            solid_color = (
+                average_direct_projected_color(face_vertices, keyframes)
+                if profile.planar_chart_projection_mode == "direct"
+                else average_projected_color(face_vertices, keyframes)
+            )
+            solid_is_projected = solid_color is not None
+            if solid_color is None:
+                solid_color = FALLBACK_COLOR
+            solid_stats = fill_solid_texture_tile(
+                texture_pixels,
+                mask_pixels,
+                tile,
+                tile_size,
+                solid_color,
+            )
+            filled_pixels = solid_stats["filledPixelCount"]
+            rasterized_pixel_count += filled_pixels
+            if solid_is_projected:
+                projected_pixel_count += filled_pixels
+                single_sample_pixel_count += filled_pixels
+                accepted_projection_sample_count += filled_pixels
+                textured_face_count += 1
+                fallback_projected_count += 1
+                solid_projected_face_count += 1
+            else:
+                fallback_pixel_count += filled_pixels
+                fallback_face_count += 1
+                solid_fallback_face_count += 1
 
         for point in atlas_triangle:
             uv_vertex_sample_stats.add(sample_texture_at_atlas_point(texture_pixels, atlas_width, atlas_height, point[0], point[1]))
@@ -3125,12 +3186,19 @@ async def write_textured_obj(
             uv_face_interior_sample_stats.add(sample_texture_at_atlas_point(texture_pixels, atlas_width, atlas_height, point[0], point[1]))
 
         face_lines.append(obj_face_line(face, uv_start))
-        if report_progress is not None and (face_index % progress_interval == 0 or face_index == face_count - 1):
-            fraction = ((face_index + 1) / face_count) if face_count else 1
-            coverage = int((textured_face_count / (face_index + 1)) * 100) if face_index >= 0 else 0
+        if report_progress is not None and (
+            fallback_processed_count % fallback_progress_interval == 0
+            or fallback_processed_count == fallback_total
+        ):
+            fraction = (fallback_processed_count / fallback_total) if fallback_total else 1
+            coverage = int((fallback_projected_count / fallback_processed_count) * 100) if fallback_processed_count else 0
+            solid_count = solid_projected_face_count + solid_fallback_face_count
             await report_progress(
                 83 + fraction * 10,
-                f"Texturing atlas faces {face_index + 1} / {face_count} ({coverage}% projected)",
+                (
+                    f"Texturing fallback faces {fallback_processed_count} / {fallback_total} "
+                    f"({coverage}% projected, {solid_count} solid shaded)"
+                ),
             )
             await asyncio.sleep(0)
 
@@ -3146,6 +3214,7 @@ async def write_textured_obj(
     atlas_layout_debug_stats = {
         **atlas_layout_spec.stats,
         "charts": planar_chart_texture_stats or atlas_layout_spec.stats.get("charts", []),
+        "fallbackBudget": fallback_budget_stats,
     }
 
     texture_diagnostics = build_texture_diagnostics(
@@ -3193,7 +3262,12 @@ async def write_textured_obj(
         "textureWorkerCount": parallel_worker_count,
         "parallelEnabled": parallel_worker_count > 1,
         "planarChartRasterStride": max(1, profile.planar_chart_raster_stride),
+        "planarChartProjectionMode": profile.planar_chart_projection_mode,
         "planarChartCount": len(atlas_layout_spec.planar_charts),
+        "fallbackTextureFaceLimit": profile.fallback_texture_face_limit,
+        "fallbackHighQualityFaceCount": fallback_budget_stats.get("fallbackHighQualityFaceCount", 0),
+        "solidProjectedFaceCount": solid_projected_face_count,
+        "solidFallbackFaceCount": solid_fallback_face_count,
     }
 
     texture.save(output_texture_path)
@@ -4050,6 +4124,38 @@ def atlas_interior_sample_points(atlas_triangle: list[tuple[float, float]]) -> l
     ]
 
 
+def fallback_texture_face_budget(mesh: FusedMesh, layout: TextureAtlasLayout, limit: int | None) -> tuple[set[int], dict]:
+    non_chart_face_indices = [
+        face_index for face_index in range(len(mesh.faces))
+        if face_index not in layout.face_to_chart
+    ]
+    if limit is None or limit <= 0 or len(non_chart_face_indices) <= limit:
+        return set(non_chart_face_indices), {
+            "fallbackTextureFaceLimit": limit,
+            "fallbackHighQualityFaceCount": len(non_chart_face_indices),
+            "fallbackSolidFaceCount": 0,
+            "fallbackPrioritization": "all_non_chart_faces",
+        }
+
+    vertices = mesh.vertices
+    ranked = sorted(
+        non_chart_face_indices,
+        key=lambda face_index: triangle_area(
+            vertices[mesh.faces[face_index][0]],
+            vertices[mesh.faces[face_index][1]],
+            vertices[mesh.faces[face_index][2]],
+        ),
+        reverse=True,
+    )
+    high_quality = set(ranked[:limit])
+    return high_quality, {
+        "fallbackTextureFaceLimit": limit,
+        "fallbackHighQualityFaceCount": len(high_quality),
+        "fallbackSolidFaceCount": max(0, len(non_chart_face_indices) - len(high_quality)),
+        "fallbackPrioritization": "largest_non_chart_triangles",
+    }
+
+
 def sample_texture_at_atlas_point(
     texture_pixels: object,
     width: int,
@@ -4370,29 +4476,44 @@ def texture_projection_candidates_for_region(
     )
     candidates: list[TextureProjectionCandidate] = []
     for keyframe in keyframes:
-        projection = project_world_point(center, keyframe)
-        if projection is None:
+        projected_points = [
+            projection
+            for point in region_points
+            if (projection := project_world_point(point, keyframe)) is not None
+        ]
+        if not projected_points:
             continue
 
+        edge_margins = [
+            min(u, v, keyframe.width - u, keyframe.height - v)
+            for u, v, _depth in projected_points
+        ]
+        best_edge_margin = max(edge_margins)
+        region_edge_threshold = max(
+            1.0,
+            keyframe.edge_margin_threshold * TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE,
+        )
+        if best_edge_margin < region_edge_threshold:
+            continue
+
+        projection = project_world_point(center, keyframe) or projected_points[0]
         u, v, depth = projection
-        visible_point_count = sum(1 for point in region_points if project_world_point(point, keyframe) is not None)
-        if visible_point_count == 0:
-            continue
-
-        edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
-        if edge_margin < keyframe.edge_margin_threshold:
-            continue
-
+        edge_margin = median_float(edge_margins)
         center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
         view_vector = normalize(subtract(keyframe.camera_position, center))
         facing = abs(dot(normal, view_vector)) if normal != (0.0, 0.0, 0.0) else 0.25
         if facing < TEXTURE_BLEND_MIN_FACING:
             continue
 
-        depth_visibility = depth_visibility_for_world_point(center, keyframe)
+        depth_visibility = (
+            depth_visibility_for_world_point(center, keyframe)
+            if project_world_point(center, keyframe) is not None
+            else DepthVisibilityResult("unknown", TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT, None, None, None)
+        )
         if depth_visibility.status == "occluded":
             continue
 
+        visible_point_count = len(projected_points)
         score = (
             center_bias
             * (visible_point_count / len(region_points))
@@ -4421,6 +4542,10 @@ def chart_region_points(chart: PlanarTextureChart) -> list[tuple[float, float, f
         planar_chart_point(chart, chart.x + chart.width - 1, chart.y),
         planar_chart_point(chart, chart.x, chart.y + chart.height - 1),
         planar_chart_point(chart, chart.x + chart.width - 1, chart.y + chart.height - 1),
+        planar_chart_point(chart, chart.x + chart.width * 0.5, chart.y),
+        planar_chart_point(chart, chart.x + chart.width * 0.5, chart.y + chart.height - 1),
+        planar_chart_point(chart, chart.x, chart.y + chart.height * 0.5),
+        planar_chart_point(chart, chart.x + chart.width - 1, chart.y + chart.height * 0.5),
     ]
 
 
@@ -4468,6 +4593,126 @@ def merge_texture_raster_stats(total: dict, addition: dict) -> None:
         counts[key] = counts.get(key, 0) + value
 
 
+def direct_projected_texture_sample(
+    world_point: tuple[float, float, float],
+    candidates: list[TextureProjectionCandidate],
+) -> TextureBlendResult:
+    rejected_overexposed_count = 0
+    rejected_underexposed_count = 0
+    rejected_edge_count = 0
+    rejected_grazing_count = 0
+    rejected_invalid_projection_count = 0
+
+    for candidate in candidates[:TEXTURE_PLANAR_CHART_DIRECT_MAX_CANDIDATES]:
+        if candidate.facing < TEXTURE_BLEND_MIN_FACING:
+            rejected_grazing_count += 1
+            continue
+
+        keyframe = candidate.keyframe
+        projection = project_world_point(world_point, keyframe)
+        if projection is None:
+            rejected_invalid_projection_count += 1
+            continue
+
+        u, v, _depth = projection
+        edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
+        edge_threshold = max(1.0, keyframe.edge_margin_threshold * TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE)
+        if edge_margin < edge_threshold:
+            rejected_edge_count += 1
+            continue
+
+        color = sample_image_bilinear(keyframe, u, v)
+        luminance = rgb_luminance(color)
+        detail_range = max(color) - min(color)
+        if luminance > TEXTURE_REJECT_OVEREXPOSED_LUMINANCE and detail_range <= TEXTURE_REJECT_LOW_DETAIL_RANGE:
+            rejected_overexposed_count += 1
+            continue
+        if luminance < TEXTURE_REJECT_UNDEREXPOSED_LUMINANCE:
+            rejected_underexposed_count += 1
+            continue
+
+        return TextureBlendResult(
+            color,
+            1,
+            (candidate.keyframe_debug_id,),
+            rejected_overexposed_count,
+            rejected_underexposed_count,
+            rejected_edge_count,
+            rejected_grazing_count,
+            rejected_invalid_projection_count,
+            0,
+            0,
+            0,
+        )
+
+    return TextureBlendResult(
+        FALLBACK_COLOR,
+        0,
+        (),
+        rejected_overexposed_count,
+        rejected_underexposed_count,
+        rejected_edge_count,
+        rejected_grazing_count,
+        rejected_invalid_projection_count,
+        0,
+        0,
+        0,
+    )
+
+
+def direct_projected_color_for_point(
+    world_point: tuple[float, float, float],
+    keyframes: list[ProjectionKeyframe],
+) -> tuple[int, int, int] | None:
+    best_score = -math.inf
+    best_color: tuple[int, int, int] | None = None
+    for keyframe in keyframes:
+        projection = project_world_point(world_point, keyframe)
+        if projection is None:
+            continue
+
+        u, v, depth = projection
+        edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
+        edge_threshold = max(1.0, keyframe.edge_margin_threshold * TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE)
+        if edge_margin < edge_threshold:
+            continue
+
+        color = sample_image_bilinear(keyframe, u, v)
+        luminance = rgb_luminance(color)
+        detail_range = max(color) - min(color)
+        if luminance > TEXTURE_REJECT_OVEREXPOSED_LUMINANCE and detail_range <= TEXTURE_REJECT_LOW_DETAIL_RANGE:
+            continue
+        if luminance < TEXTURE_REJECT_UNDEREXPOSED_LUMINANCE:
+            continue
+
+        center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
+        score = center_bias / max(depth, 0.2)
+        if score > best_score:
+            best_score = score
+            best_color = color
+
+    return best_color
+
+
+def average_direct_projected_color(
+    points: list[tuple[float, float, float]],
+    keyframes: list[ProjectionKeyframe],
+) -> tuple[int, int, int] | None:
+    colors = [
+        color for point in points
+        if (color := direct_projected_color_for_point(point, keyframes)) is not None
+    ]
+    if not colors:
+        return None
+
+    count = len(colors)
+    return (
+        clamp_color(sum(color[0] for color in colors) / count),
+        clamp_color(sum(color[1] for color in colors) / count),
+        clamp_color(sum(color[2] for color in colors) / count),
+    )
+
+
 def rasterize_planar_chart_texture(
     texture_pixels: object,
     mask_pixels: object,
@@ -4475,6 +4720,7 @@ def rasterize_planar_chart_texture(
     candidates: list[TextureProjectionCandidate],
     fallback_color: Callable[[], tuple[int, int, int]],
     sample_stride: int = 1,
+    projection_mode: str = "blend",
 ) -> dict:
     stats = empty_texture_raster_stats()
     stride = max(1, sample_stride)
@@ -4483,41 +4729,20 @@ def rasterize_planar_chart_texture(
     for y in range(chart.y, chart_bottom, stride):
         for x in range(chart.x, chart_right, stride):
             color: tuple[int, int, int] | None = None
+            blend: TextureBlendResult | None = None
+            accepted_count = 0
             if candidates:
                 world_point = planar_chart_point(chart, x + 0.5, y + 0.5)
-                blend = blend_projected_texture_sample(world_point, candidates)
+                blend = (
+                    direct_projected_texture_sample(world_point, candidates)
+                    if projection_mode == "direct"
+                    else blend_projected_texture_sample(world_point, candidates)
+                )
                 accepted_count = blend.accepted_sample_count
                 if accepted_count > 0:
                     color = blend.color
-                    stats["projectedPixelCount"] += 1
-                    stats["acceptedProjectionSampleCount"] += accepted_count
-                    stats["rejectedOverexposedSampleCount"] += blend.rejected_overexposed_sample_count
-                    stats["rejectedUnderexposedSampleCount"] += blend.rejected_underexposed_sample_count
-                    stats["rejectedEdgeSampleCount"] += blend.rejected_edge_sample_count
-                    stats["rejectedGrazingSampleCount"] += blend.rejected_grazing_sample_count
-                    stats["rejectedInvalidProjectionSampleCount"] += blend.rejected_invalid_projection_sample_count
-                    stats["rejectedOccludedSampleCount"] += blend.rejected_occluded_sample_count
-                    stats["depthTestedSampleCount"] += blend.depth_tested_sample_count
-                    stats["missingDepthSampleCount"] += blend.missing_depth_sample_count
-                    if accepted_count > 1:
-                        stats["blendedPixelCount"] += 1
-                    else:
-                        stats["singleSamplePixelCount"] += 1
-                    for key in blend.keyframe_contribution_keys:
-                        counts = stats["keyframeContributionCounts"]
-                        counts[key] = counts.get(key, 0) + 1
-                else:
-                    stats["rejectedOverexposedSampleCount"] += blend.rejected_overexposed_sample_count
-                    stats["rejectedUnderexposedSampleCount"] += blend.rejected_underexposed_sample_count
-                    stats["rejectedEdgeSampleCount"] += blend.rejected_edge_sample_count
-                    stats["rejectedGrazingSampleCount"] += blend.rejected_grazing_sample_count
-                    stats["rejectedInvalidProjectionSampleCount"] += blend.rejected_invalid_projection_sample_count
-                    stats["rejectedOccludedSampleCount"] += blend.rejected_occluded_sample_count
-                    stats["depthTestedSampleCount"] += blend.depth_tested_sample_count
-                    stats["missingDepthSampleCount"] += blend.missing_depth_sample_count
-                    stats["fallbackPixelCount"] += 1
             else:
-                stats["fallbackPixelCount"] += 1
+                accepted_count = 0
 
             if color is None:
                 color = fallback_color()
@@ -4529,23 +4754,49 @@ def rasterize_planar_chart_texture(
                     texture_pixels[block_x, block_y] = color
                     mask_pixels[block_x, block_y] = 255
             stats["filledPixelCount"] += block_pixel_count
-            if candidates and color is not None:
-                if accepted_count > 0:
-                    stats["projectedPixelCount"] += block_pixel_count - 1
-                    stats["acceptedProjectionSampleCount"] += accepted_count * (block_pixel_count - 1)
-                    if accepted_count > 1:
-                        stats["blendedPixelCount"] += block_pixel_count - 1
-                    else:
-                        stats["singleSamplePixelCount"] += block_pixel_count - 1
-                    for key in blend.keyframe_contribution_keys:
-                        counts = stats["keyframeContributionCounts"]
-                        counts[key] = counts.get(key, 0) + (block_pixel_count - 1)
+            if blend is not None:
+                stats["rejectedOverexposedSampleCount"] += blend.rejected_overexposed_sample_count
+                stats["rejectedUnderexposedSampleCount"] += blend.rejected_underexposed_sample_count
+                stats["rejectedEdgeSampleCount"] += blend.rejected_edge_sample_count
+                stats["rejectedGrazingSampleCount"] += blend.rejected_grazing_sample_count
+                stats["rejectedInvalidProjectionSampleCount"] += blend.rejected_invalid_projection_sample_count
+                stats["rejectedOccludedSampleCount"] += blend.rejected_occluded_sample_count
+                stats["depthTestedSampleCount"] += blend.depth_tested_sample_count
+                stats["missingDepthSampleCount"] += blend.missing_depth_sample_count
+            if accepted_count > 0 and blend is not None:
+                stats["projectedPixelCount"] += block_pixel_count
+                stats["acceptedProjectionSampleCount"] += accepted_count * block_pixel_count
+                if accepted_count > 1:
+                    stats["blendedPixelCount"] += block_pixel_count
                 else:
-                    stats["fallbackPixelCount"] += block_pixel_count - 1
+                    stats["singleSamplePixelCount"] += block_pixel_count
+                for key in blend.keyframe_contribution_keys:
+                    counts = stats["keyframeContributionCounts"]
+                    counts[key] = counts.get(key, 0) + block_pixel_count
             else:
-                stats["fallbackPixelCount"] += block_pixel_count - 1
+                stats["fallbackPixelCount"] += block_pixel_count
 
     return stats
+
+
+def fill_solid_texture_tile(
+    texture_pixels: object,
+    mask_pixels: object,
+    tile_origin: tuple[int, int],
+    tile_size: int,
+    color: tuple[int, int, int],
+) -> dict:
+    filled_pixel_count = 0
+    left, top = tile_origin
+    for y in range(top, top + tile_size):
+        for x in range(left, left + tile_size):
+            texture_pixels[x, y] = color
+            mask_pixels[x, y] = 255
+            filled_pixel_count += 1
+
+    return {
+        "filledPixelCount": filled_pixel_count,
+    }
 
 
 def rasterize_face_texture(

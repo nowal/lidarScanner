@@ -808,9 +808,87 @@ async def test_textured_obj_uses_planar_chart_for_large_wall(monkeypatch, tmp_pa
     assert atlas["enabled"] is True
     assert atlas["chartedFaceCount"] == stats["faceCount"]
     assert chart["sampleStride"] == 2
+    assert chart["projectionMode"] == "direct"
     assert chart["rasterizedPixelCount"] > 0
     assert stats["diagnostics"]["processing"]["planarChartCount"] == 1
     assert stats["diagnostics"]["processing"]["planarChartRasterStride"] == 2
+    assert stats["diagnostics"]["processing"]["planarChartProjectionMode"] == "direct"
+    assert stats["projectionCoverage"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_fast_texture_profile_caps_expensive_fallback_faces(tmp_path):
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    intrinsics = [
+        100, 0, 0,
+        0, 100, 0,
+        50, 50, 1,
+    ]
+    image = Image.new("RGB", (100, 100), (160, 115, 80))
+    keyframes = [
+        pipeline.ProjectionKeyframe(
+            image=image,
+            width=image.width,
+            height=image.height,
+            world_to_camera=pipeline.invert_rigid_transform(transform),
+            camera_position=(0, 0, 0),
+            intrinsics=intrinsics,
+            pixels=image.load(),
+            id="room",
+        )
+    ]
+    mesh = pipeline.FusedMesh(
+        vertices=[
+            (-0.4, -0.4, -1.0),
+            (-0.1, -0.4, -1.0),
+            (-0.4, -0.1, -1.0),
+            (0.1, -0.4, -1.05),
+            (0.4, -0.4, -1.05),
+            (0.1, -0.1, -1.0),
+            (-0.4, 0.1, -0.9),
+            (-0.1, 0.1, -1.05),
+            (-0.4, 0.4, -1.0),
+            (0.1, 0.1, -0.95),
+            (0.4, 0.1, -1.0),
+            (0.1, 0.4, -1.05),
+        ],
+        faces=[
+            (0, 1, 2),
+            (3, 4, 5),
+            (6, 7, 8),
+            (9, 10, 11),
+        ],
+        stats={"geometrySource": "test_fallback_budget"},
+    )
+    profile = pipeline.replace(
+        pipeline.PROCESSING_PROFILES["fast_onboarding"],
+        fallback_texture_face_limit=1,
+    )
+
+    stats = await pipeline.write_textured_obj(
+        mesh=mesh,
+        keyframes=keyframes,
+        output_obj_path=tmp_path / "textured.obj",
+        output_mtl_path=tmp_path / "textured.mtl",
+        output_texture_path=tmp_path / "texture.png",
+        output_debug_path=tmp_path / "debug.json",
+        profile=profile,
+    )
+
+    processing = stats["diagnostics"]["processing"]
+    budget = stats["atlasLayout"]["fallbackBudget"]
+
+    assert stats["uvStrategy"] == "render_mesh_per_face_atlas_padded"
+    assert processing["fallbackTextureFaceLimit"] == 1
+    assert processing["fallbackHighQualityFaceCount"] == 1
+    assert processing["solidProjectedFaceCount"] == 3
+    assert processing["solidFallbackFaceCount"] == 0
+    assert budget["fallbackPrioritization"] == "largest_non_chart_triangles"
     assert stats["projectionCoverage"] == 1.0
 
 
