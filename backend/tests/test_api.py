@@ -107,6 +107,25 @@ def make_grid_mesh(size: int, spacing: float = 0.01) -> pipeline.FusedMesh:
     return pipeline.FusedMesh(vertices=vertices, faces=faces, stats={"geometrySource": "test_grid"})
 
 
+def make_centered_wall_grid(size: int, spacing: float = 0.04) -> pipeline.FusedMesh:
+    half = size * spacing / 2
+    vertices = [
+        (x * spacing - half, y * spacing - half, -1.0)
+        for y in range(size + 1)
+        for x in range(size + 1)
+    ]
+    faces = []
+    for y in range(size):
+        for x in range(size):
+            top_left = y * (size + 1) + x
+            top_right = top_left + 1
+            bottom_left = top_left + size + 1
+            bottom_right = bottom_left + 1
+            faces.append((top_left, bottom_left, top_right))
+            faces.append((top_right, bottom_left, bottom_right))
+    return pipeline.FusedMesh(vertices=vertices, faces=faces, stats={"geometrySource": "test_wall_grid"})
+
+
 def test_job_store_rehydrates_persisted_job_records(tmp_path):
     store = JobStore(str(tmp_path))
     record = store.create_job()
@@ -732,6 +751,66 @@ async def test_textured_obj_blends_multiple_valid_keyframes(tmp_path):
     assert projection["singleSamplePixelCount"] == 0
     assert projection["meanSamplesPerProjectedPixel"] == pytest.approx(2.0)
     assert {item["keyframe"] for item in projection["keyframeContributionCounts"]} == {"red", "green"}
+    assert stats["projectionCoverage"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_textured_obj_uses_planar_chart_for_large_wall(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MIN_FACE_COUNT", 20)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MIN_AREA_M2", 0.01)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_PIXELS_PER_METER", 72)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MIN_SIZE", 64)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MAX_SIZE", 192)
+
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    intrinsics = [
+        120, 0, 0,
+        0, 120, 0,
+        64, 64, 1,
+    ]
+    image = Image.new("RGB", (128, 128), (180, 140, 95))
+    keyframes = [
+        pipeline.ProjectionKeyframe(
+            image=image,
+            width=image.width,
+            height=image.height,
+            world_to_camera=pipeline.invert_rigid_transform(transform),
+            camera_position=(0, 0, 0),
+            intrinsics=intrinsics,
+            pixels=image.load(),
+            id="wall",
+        )
+    ]
+    profile = pipeline.replace(
+        pipeline.PROCESSING_PROFILES["fast_onboarding"],
+        planar_chart_raster_stride=2,
+    )
+
+    stats = await pipeline.write_textured_obj(
+        mesh=make_centered_wall_grid(size=14, spacing=0.035),
+        keyframes=keyframes,
+        output_obj_path=tmp_path / "textured.obj",
+        output_mtl_path=tmp_path / "textured.mtl",
+        output_texture_path=tmp_path / "texture.png",
+        output_debug_path=tmp_path / "debug.json",
+        profile=profile,
+    )
+
+    atlas = stats["atlasLayout"]
+    chart = atlas["charts"][0]
+
+    assert stats["uvStrategy"] == "planar_chart_atlas_with_per_face_fallback"
+    assert atlas["enabled"] is True
+    assert atlas["chartedFaceCount"] == stats["faceCount"]
+    assert chart["sampleStride"] == 2
+    assert chart["rasterizedPixelCount"] > 0
+    assert stats["diagnostics"]["processing"]["planarChartCount"] == 1
+    assert stats["diagnostics"]["processing"]["planarChartRasterStride"] == 2
     assert stats["projectionCoverage"] == 1.0
 
 

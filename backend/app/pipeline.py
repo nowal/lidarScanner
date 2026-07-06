@@ -244,9 +244,9 @@ TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_HARD_EDGE_WEIGHT = 0.18
 TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_NORMAL_COSINE = 0.84
 TEXTURE_TSDF_RENDER_EXTRA_SMOOTHING_MAX_TOTAL_DISPLACEMENT_METERS = 0.055
 TEXTURE_PLANAR_CHARTS_ENABLED = True
-TEXTURE_PLANAR_CHART_MAX_COUNT = 6
-TEXTURE_PLANAR_CHART_MIN_FACE_COUNT = 1_200
-TEXTURE_PLANAR_CHART_MIN_AREA_M2 = 0.75
+TEXTURE_PLANAR_CHART_MAX_COUNT = 8
+TEXTURE_PLANAR_CHART_MIN_FACE_COUNT = 500
+TEXTURE_PLANAR_CHART_MIN_AREA_M2 = 0.45
 TEXTURE_PLANAR_CHART_DISTANCE_METERS = 0.055
 TEXTURE_PLANAR_CHART_NORMAL_ALIGNMENT = 0.72
 TEXTURE_PLANAR_CHART_PIXELS_PER_METER = 360
@@ -295,6 +295,7 @@ class ProcessingProfile:
     write_texture_debug_preview: bool
     texture_render_target_faces: int
     texture_tsdf_render_target_faces: int
+    planar_chart_raster_stride: int
 
 
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
@@ -308,6 +309,7 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         write_texture_debug_preview=False,
         texture_render_target_faces=FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT,
         texture_tsdf_render_target_faces=FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
+        planar_chart_raster_stride=2,
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",
@@ -319,6 +321,7 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         write_texture_debug_preview=True,
         texture_render_target_faces=TEXTURE_RENDER_TARGET_FACE_COUNT,
         texture_tsdf_render_target_faces=TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
+        planar_chart_raster_stride=1,
     ),
 }
 
@@ -657,6 +660,7 @@ class TexturedMeshStage:
             ),
             report_progress=lambda progress, message: report(self.name, progress, message),
             is_cancelled=is_cancelled,
+            profile=profile,
         )
 
         (job_dir / "work" / "uv_map.json").write_text(json.dumps({
@@ -971,6 +975,7 @@ def processing_profile_stats(profile: ProcessingProfile) -> dict:
         "writeTextureDebugPreview": profile.write_texture_debug_preview,
         "textureRenderTargetFaces": profile.texture_render_target_faces,
         "textureTsdfRenderTargetFaces": profile.texture_tsdf_render_target_faces,
+        "planarChartRasterStride": profile.planar_chart_raster_stride,
     }
 
 
@@ -2851,7 +2856,9 @@ async def write_textured_obj(
     output_debug_preview_path: Path | None = None,
     report_progress: Callable[[float, str], Awaitable[None]] | None = None,
     is_cancelled: CancellationCheck | None = None,
+    profile: ProcessingProfile | None = None,
 ) -> dict:
+    profile = profile or current_full_quality_profile()
     face_count = len(mesh.faces)
     atlas_max_size = texture_atlas_max_size_for_mesh(mesh)
     atlas_layout_spec = build_texture_atlas_layout(mesh, atlas_max_size=atlas_max_size)
@@ -2955,22 +2962,79 @@ async def write_textured_obj(
     planar_chart_texture_stats: list[dict] = []
     if parallel_result is None and atlas_layout_spec.planar_charts:
         if report_progress is not None:
-            await report_progress(82.5, f"Texturing {len(atlas_layout_spec.planar_charts)} planar charts")
+            await report_progress(
+                82.5,
+                (
+                    f"Texturing {len(atlas_layout_spec.planar_charts)} planar wall charts "
+                    f"(stride {max(1, profile.planar_chart_raster_stride)})"
+                ),
+            )
             await asyncio.sleep(0)
 
-        for chart in atlas_layout_spec.planar_charts:
+        for chart_index, chart in enumerate(atlas_layout_spec.planar_charts):
             if is_cancelled is not None and is_cancelled():
                 raise asyncio.CancelledError
 
             region_points = chart_region_points(chart)
+            candidates = texture_projection_candidates_for_region(region_points, chart.normal, keyframes)
+            if candidates:
+                selected_key = candidates[0].keyframe_debug_id
+                selected_keyframe_face_counts[selected_key] = (
+                    selected_keyframe_face_counts.get(selected_key, 0) + len(chart.face_indices)
+                )
+
+            fallback_color: tuple[int, int, int] | None = None
+
+            def resolve_chart_fallback_color() -> tuple[int, int, int]:
+                nonlocal fallback_color
+                if fallback_color is None:
+                    fallback_color = average_projected_color(region_points, keyframes) or FALLBACK_COLOR
+                return fallback_color
+
+            raster_stats = rasterize_planar_chart_texture(
+                texture_pixels,
+                mask_pixels,
+                chart,
+                candidates,
+                resolve_chart_fallback_color,
+                sample_stride=max(1, profile.planar_chart_raster_stride),
+            )
             planar_chart_contexts[chart.chart_id] = {
                 "regionPoints": region_points,
-                "fallbackColor": None,
-                "stats": empty_texture_raster_stats(),
+                "fallbackColor": fallback_color,
+                "stats": raster_stats,
             }
+            for key, value in raster_stats["keyframeContributionCounts"].items():
+                keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + value
+            rasterized_pixel_count += raster_stats["filledPixelCount"]
+            projected_pixel_count += raster_stats["projectedPixelCount"]
+            fallback_pixel_count += raster_stats["fallbackPixelCount"]
+            blended_pixel_count += raster_stats["blendedPixelCount"]
+            single_sample_pixel_count += raster_stats["singleSamplePixelCount"]
+            accepted_projection_sample_count += raster_stats["acceptedProjectionSampleCount"]
+            rejected_overexposed_sample_count += raster_stats["rejectedOverexposedSampleCount"]
+            rejected_underexposed_sample_count += raster_stats["rejectedUnderexposedSampleCount"]
+            rejected_edge_sample_count += raster_stats["rejectedEdgeSampleCount"]
+            rejected_grazing_sample_count += raster_stats["rejectedGrazingSampleCount"]
+            rejected_invalid_projection_sample_count += raster_stats["rejectedInvalidProjectionSampleCount"]
+            rejected_occluded_sample_count += raster_stats["rejectedOccludedSampleCount"]
+            depth_tested_sample_count += raster_stats["depthTestedSampleCount"]
+            missing_depth_sample_count += raster_stats["missingDepthSampleCount"]
+            if raster_stats["projectedPixelCount"] > 0:
+                textured_face_count += len(chart.face_indices)
+            else:
+                fallback_face_count += len(chart.face_indices)
             planar_chart_texture_stats.append({
                 **planar_chart_stats(chart),
+                "candidateKeyframeCount": len(candidates),
+                "sampleStride": max(1, profile.planar_chart_raster_stride),
             })
+            if report_progress is not None:
+                await report_progress(
+                    82.5 + ((chart_index + 1) / len(atlas_layout_spec.planar_charts)) * 0.5,
+                    f"Textured wall chart {chart_index + 1} / {len(atlas_layout_spec.planar_charts)}",
+                )
+                await asyncio.sleep(0)
 
     for face_index, face in enumerate(mesh.faces) if parallel_result is None else []:
         if is_cancelled is not None and is_cancelled():
@@ -3000,50 +3064,6 @@ async def write_textured_obj(
             vt_lines.append(f"vt {u:.8f} {v:.8f}")
 
         if chart is not None:
-            context = planar_chart_contexts.get(chart.chart_id, {})
-            candidates = texture_projection_candidates(face_vertices, keyframes)
-            if candidates:
-                selected_key = candidates[0].keyframe_debug_id
-                selected_keyframe_face_counts[selected_key] = selected_keyframe_face_counts.get(selected_key, 0) + 1
-
-            fallback_color: tuple[int, int, int] | None = None
-
-            def resolve_chart_fallback_color() -> tuple[int, int, int]:
-                nonlocal fallback_color
-                if fallback_color is None:
-                    fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
-                return fallback_color
-
-            raster_stats = rasterize_face_texture(
-                texture_pixels,
-                mask_pixels,
-                atlas_triangle,
-                face_vertices,
-                candidates,
-                resolve_chart_fallback_color,
-            )
-            merge_texture_raster_stats(context.setdefault("stats", empty_texture_raster_stats()), raster_stats)
-            for key, value in raster_stats["keyframeContributionCounts"].items():
-                keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + value
-            rasterized_pixel_count += raster_stats["filledPixelCount"]
-            projected_pixel_count += raster_stats["projectedPixelCount"]
-            fallback_pixel_count += raster_stats["fallbackPixelCount"]
-            blended_pixel_count += raster_stats["blendedPixelCount"]
-            single_sample_pixel_count += raster_stats["singleSamplePixelCount"]
-            accepted_projection_sample_count += raster_stats["acceptedProjectionSampleCount"]
-            rejected_overexposed_sample_count += raster_stats["rejectedOverexposedSampleCount"]
-            rejected_underexposed_sample_count += raster_stats["rejectedUnderexposedSampleCount"]
-            rejected_edge_sample_count += raster_stats["rejectedEdgeSampleCount"]
-            rejected_grazing_sample_count += raster_stats["rejectedGrazingSampleCount"]
-            rejected_invalid_projection_sample_count += raster_stats["rejectedInvalidProjectionSampleCount"]
-            rejected_occluded_sample_count += raster_stats["rejectedOccludedSampleCount"]
-            depth_tested_sample_count += raster_stats["depthTestedSampleCount"]
-            missing_depth_sample_count += raster_stats["missingDepthSampleCount"]
-
-            if raster_stats["projectedPixelCount"] > 0:
-                textured_face_count += 1
-            else:
-                fallback_face_count += 1
             for point in atlas_triangle:
                 uv_vertex_sample_stats.add(sample_texture_at_atlas_point(texture_pixels, atlas_width, atlas_height, point[0], point[1]))
             for point in atlas_interior_sample_points(atlas_triangle):
@@ -3172,6 +3192,8 @@ async def write_textured_obj(
     texture_diagnostics["processing"] = {
         "textureWorkerCount": parallel_worker_count,
         "parallelEnabled": parallel_worker_count > 1,
+        "planarChartRasterStride": max(1, profile.planar_chart_raster_stride),
+        "planarChartCount": len(atlas_layout_spec.planar_charts),
     }
 
     texture.save(output_texture_path)
@@ -3691,12 +3713,6 @@ def detect_planar_texture_charts(mesh: FusedMesh, atlas_max_size: int) -> list[P
     if not TEXTURE_PLANAR_CHARTS_ENABLED or not mesh.faces:
         return []
 
-    render_stats = mesh.stats.get("textureRenderMesh", {}) if isinstance(mesh.stats, dict) else {}
-    plane_stats = render_stats.get("planeRegularization", {}) if isinstance(render_stats, dict) else {}
-    planes = plane_stats.get("planes") if isinstance(plane_stats, dict) else None
-    if not isinstance(planes, list):
-        return []
-
     vertices = mesh.vertices
     face_centers = [
         triangle_center(vertices[face[0]], vertices[face[1]], vertices[face[2]])
@@ -3710,6 +3726,15 @@ def detect_planar_texture_charts(mesh: FusedMesh, atlas_max_size: int) -> list[P
         triangle_area(vertices[face[0]], vertices[face[1]], vertices[face[2]])
         for face in mesh.faces
     ]
+
+    render_stats = mesh.stats.get("textureRenderMesh", {}) if isinstance(mesh.stats, dict) else {}
+    plane_stats = render_stats.get("planeRegularization", {}) if isinstance(render_stats, dict) else {}
+    planes = plane_stats.get("planes") if isinstance(plane_stats, dict) else None
+    if not isinstance(planes, list) or not planes:
+        planes = infer_planar_texture_planes(face_centers, face_normals, face_areas)
+    if not planes:
+        return []
+
     assigned_faces: set[int] = set()
     charts: list[PlanarTextureChart] = []
 
@@ -3797,6 +3822,70 @@ def detect_planar_texture_charts(mesh: FusedMesh, atlas_max_size: int) -> list[P
     for chart_id, chart in enumerate(charts):
         chart.chart_id = chart_id
     return charts
+
+
+def infer_planar_texture_planes(
+    face_centers: list[tuple[float, float, float]],
+    face_normals: list[tuple[float, float, float]],
+    face_areas: list[float],
+) -> list[dict]:
+    if not face_centers:
+        return []
+
+    min_face_count = TEXTURE_PLANAR_CHART_MIN_FACE_COUNT
+    min_area = TEXTURE_PLANAR_CHART_MIN_AREA_M2
+    seed_indices = sorted(range(len(face_centers)), key=lambda index: face_areas[index], reverse=True)
+    assigned_faces: set[int] = set()
+    planes: list[dict] = []
+    max_seed_count = min(len(seed_indices), 128)
+
+    for seed_index in seed_indices[:max_seed_count]:
+        if len(face_centers) - len(assigned_faces) < min_face_count:
+            break
+        if seed_index in assigned_faces:
+            continue
+
+        seed_normal = face_normals[seed_index]
+        if seed_normal == (0.0, 0.0, 0.0):
+            continue
+
+        seed_center = face_centers[seed_index]
+        offset = -dot(seed_center, seed_normal)
+        candidate_faces: list[int] = []
+        area = 0.0
+
+        for face_index, center in enumerate(face_centers):
+            if face_index in assigned_faces:
+                continue
+            if abs(dot(face_normals[face_index], seed_normal)) < TEXTURE_PLANAR_CHART_NORMAL_ALIGNMENT:
+                continue
+            if abs(dot(center, seed_normal) + offset) > TEXTURE_PLANAR_CHART_DISTANCE_METERS:
+                continue
+            candidate_faces.append(face_index)
+            area += face_areas[face_index]
+
+        if len(candidate_faces) < min_face_count or area < min_area:
+            continue
+
+        distances = [dot(face_centers[index], seed_normal) for index in candidate_faces]
+        offset = -median_float(distances)
+        normal_abs = [abs(component) for component in seed_normal]
+        dominant_axis = ("x", "y", "z")[normal_abs.index(max(normal_abs))]
+        planes.append({
+            "planeIndex": len(planes),
+            "algorithm": "face_normal_offset_cluster",
+            "dominantAxis": dominant_axis,
+            "normal": [round(component, 4) for component in seed_normal],
+            "offset": round(offset, 6),
+            "faceCount": len(candidate_faces),
+            "areaM2": round(area, 4),
+        })
+        assigned_faces.update(candidate_faces)
+
+        if len(planes) >= TEXTURE_PLANAR_CHART_MAX_COUNT * 2:
+            break
+
+    return planes
 
 
 def estimate_plane_offset(
@@ -4385,10 +4474,14 @@ def rasterize_planar_chart_texture(
     chart: PlanarTextureChart,
     candidates: list[TextureProjectionCandidate],
     fallback_color: Callable[[], tuple[int, int, int]],
+    sample_stride: int = 1,
 ) -> dict:
     stats = empty_texture_raster_stats()
-    for y in range(chart.y, chart.y + chart.height):
-        for x in range(chart.x, chart.x + chart.width):
+    stride = max(1, sample_stride)
+    chart_right = chart.x + chart.width
+    chart_bottom = chart.y + chart.height
+    for y in range(chart.y, chart_bottom, stride):
+        for x in range(chart.x, chart_right, stride):
             color: tuple[int, int, int] | None = None
             if candidates:
                 world_point = planar_chart_point(chart, x + 0.5, y + 0.5)
@@ -4428,9 +4521,29 @@ def rasterize_planar_chart_texture(
 
             if color is None:
                 color = fallback_color()
-            texture_pixels[x, y] = color
-            mask_pixels[x, y] = 255
-            stats["filledPixelCount"] += 1
+            block_width = min(stride, chart_right - x)
+            block_height = min(stride, chart_bottom - y)
+            block_pixel_count = block_width * block_height
+            for block_y in range(y, y + block_height):
+                for block_x in range(x, x + block_width):
+                    texture_pixels[block_x, block_y] = color
+                    mask_pixels[block_x, block_y] = 255
+            stats["filledPixelCount"] += block_pixel_count
+            if candidates and color is not None:
+                if accepted_count > 0:
+                    stats["projectedPixelCount"] += block_pixel_count - 1
+                    stats["acceptedProjectionSampleCount"] += accepted_count * (block_pixel_count - 1)
+                    if accepted_count > 1:
+                        stats["blendedPixelCount"] += block_pixel_count - 1
+                    else:
+                        stats["singleSamplePixelCount"] += block_pixel_count - 1
+                    for key in blend.keyframe_contribution_keys:
+                        counts = stats["keyframeContributionCounts"]
+                        counts[key] = counts.get(key, 0) + (block_pixel_count - 1)
+                else:
+                    stats["fallbackPixelCount"] += block_pixel_count - 1
+            else:
+                stats["fallbackPixelCount"] += block_pixel_count - 1
 
     return stats
 
