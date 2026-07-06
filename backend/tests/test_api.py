@@ -126,6 +126,28 @@ def make_centered_wall_grid(size: int, spacing: float = 0.04) -> pipeline.FusedM
     return pipeline.FusedMesh(vertices=vertices, faces=faces, stats={"geometrySource": "test_wall_grid"})
 
 
+def make_disconnected_wall_grids(size: int, spacing: float = 0.04, gap: float = 1.0) -> pipeline.FusedMesh:
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+    half = size * spacing / 2
+    for offset_x in (-gap / 2, gap / 2):
+        vertex_offset = len(vertices)
+        vertices.extend([
+            (x * spacing - half + offset_x, y * spacing - half, -1.0)
+            for y in range(size + 1)
+            for x in range(size + 1)
+        ])
+        for y in range(size):
+            for x in range(size):
+                top_left = vertex_offset + y * (size + 1) + x
+                top_right = top_left + 1
+                bottom_left = top_left + size + 1
+                bottom_right = bottom_left + 1
+                faces.append((top_left, bottom_left, top_right))
+                faces.append((top_right, bottom_left, bottom_right))
+    return pipeline.FusedMesh(vertices=vertices, faces=faces, stats={"geometrySource": "test_disconnected_wall_grids"})
+
+
 def test_job_store_rehydrates_persisted_job_records(tmp_path):
     store = JobStore(str(tmp_path))
     record = store.create_job()
@@ -816,6 +838,85 @@ async def test_textured_obj_uses_planar_chart_for_large_wall(monkeypatch, tmp_pa
     assert stats["projectionCoverage"] == 1.0
 
 
+def test_planar_texture_charts_split_disconnected_surfaces(monkeypatch):
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MIN_FACE_COUNT", 20)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MIN_AREA_M2", 0.01)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_PIXELS_PER_METER", 72)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MIN_SIZE", 64)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MAX_SIZE", 256)
+
+    charts = pipeline.detect_planar_texture_charts(
+        make_disconnected_wall_grids(size=7, spacing=0.04, gap=1.0),
+        atlas_max_size=1024,
+    )
+
+    assert len(charts) == 2
+    assert all(len(chart.face_indices) == 98 for chart in charts)
+
+
+@pytest.mark.asyncio
+async def test_fast_planar_chart_uses_single_owner_keyframe(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MIN_FACE_COUNT", 20)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MIN_AREA_M2", 0.01)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_PIXELS_PER_METER", 72)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MIN_SIZE", 64)
+    monkeypatch.setattr(pipeline, "TEXTURE_PLANAR_CHART_MAX_SIZE", 192)
+
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    intrinsics = [
+        120, 0, 0,
+        0, 120, 0,
+        64, 64, 1,
+    ]
+    red = Image.new("RGB", (128, 128), (210, 60, 60))
+    green = Image.new("RGB", (128, 128), (60, 210, 60))
+    keyframes = [
+        pipeline.ProjectionKeyframe(
+            image=red,
+            width=red.width,
+            height=red.height,
+            world_to_camera=pipeline.invert_rigid_transform(transform),
+            camera_position=(0, 0, 0),
+            intrinsics=intrinsics,
+            pixels=red.load(),
+            id="red-owner",
+        ),
+        pipeline.ProjectionKeyframe(
+            image=green,
+            width=green.width,
+            height=green.height,
+            world_to_camera=pipeline.invert_rigid_transform(transform),
+            camera_position=(0, 0, 0),
+            intrinsics=intrinsics,
+            pixels=green.load(),
+            id="green-secondary",
+        ),
+    ]
+
+    stats = await pipeline.write_textured_obj(
+        mesh=make_centered_wall_grid(size=14, spacing=0.035),
+        keyframes=keyframes,
+        output_obj_path=tmp_path / "textured.obj",
+        output_mtl_path=tmp_path / "textured.mtl",
+        output_texture_path=tmp_path / "texture.png",
+        output_debug_path=tmp_path / "debug.json",
+        profile=pipeline.PROCESSING_PROFILES["fast_onboarding"],
+    )
+
+    chart = stats["atlasLayout"]["charts"][0]
+    contributions = stats["diagnostics"]["projection"]["keyframeContributionCounts"]
+
+    assert chart["candidateKeyframeCount"] == 2
+    assert chart["rasterCandidateKeyframeCount"] == 1
+    assert chart["ownerKeyframeId"] == "red-owner"
+    assert {item["keyframe"] for item in contributions} == {"red-owner"}
+
+
 @pytest.mark.asyncio
 async def test_fast_texture_profile_caps_expensive_fallback_faces(tmp_path):
     transform = [
@@ -888,6 +989,7 @@ async def test_fast_texture_profile_caps_expensive_fallback_faces(tmp_path):
     assert processing["fallbackHighQualityFaceCount"] == 1
     assert processing["solidProjectedFaceCount"] == 3
     assert processing["solidFallbackFaceCount"] == 0
+    assert processing["solidSceneColorProjected"] is True
     assert budget["fallbackPrioritization"] == "largest_non_chart_triangles"
     assert stats["projectionCoverage"] == 1.0
 

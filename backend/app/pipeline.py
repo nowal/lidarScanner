@@ -2980,6 +2980,14 @@ async def write_textured_obj(
     fallback_projected_count = 0
     solid_projected_face_count = 0
     solid_fallback_face_count = 0
+    solid_scene_color = (
+        average_direct_projected_color(mesh_surface_sample_points(mesh), keyframes)
+        if profile.planar_chart_projection_mode == "direct"
+        else None
+    )
+    solid_scene_color_projected = solid_scene_color is not None
+    if solid_scene_color is None:
+        solid_scene_color = FALLBACK_COLOR
 
     planar_chart_contexts: dict[int, dict] = {}
     planar_chart_texture_stats: list[dict] = []
@@ -2999,7 +3007,13 @@ async def write_textured_obj(
                 raise asyncio.CancelledError
 
             region_points = chart_region_points(chart)
-            candidates = texture_projection_candidates_for_region(region_points, chart.normal, keyframes)
+            all_candidates = texture_projection_candidates_for_region(region_points, chart.normal, keyframes)
+            owner_candidate = (
+                all_candidates[0]
+                if profile.planar_chart_projection_mode == "direct" and all_candidates
+                else None
+            )
+            candidates = [owner_candidate] if owner_candidate is not None else all_candidates
             if candidates:
                 selected_key = candidates[0].keyframe_debug_id
                 selected_keyframe_face_counts[selected_key] = (
@@ -3011,10 +3025,11 @@ async def write_textured_obj(
             def resolve_chart_fallback_color() -> tuple[int, int, int]:
                 nonlocal fallback_color
                 if fallback_color is None:
+                    fallback_keyframes = [owner_candidate.keyframe] if owner_candidate is not None else keyframes
                     fallback_color = (
-                        average_direct_projected_color(region_points, keyframes)
+                        average_direct_projected_color(region_points, fallback_keyframes)
                         if profile.planar_chart_projection_mode == "direct"
-                        else average_projected_color(region_points, keyframes)
+                        else average_projected_color(region_points, fallback_keyframes)
                     ) or FALLBACK_COLOR
                 return fallback_color
 
@@ -3054,7 +3069,9 @@ async def write_textured_obj(
                 fallback_face_count += len(chart.face_indices)
             planar_chart_texture_stats.append({
                 **planar_chart_stats(chart),
-                "candidateKeyframeCount": len(candidates),
+                "candidateKeyframeCount": len(all_candidates),
+                "rasterCandidateKeyframeCount": len(candidates),
+                "ownerKeyframeId": owner_candidate.keyframe_debug_id if owner_candidate is not None else None,
                 "sampleStride": max(1, profile.planar_chart_raster_stride),
                 "projectionMode": profile.planar_chart_projection_mode,
             })
@@ -3151,14 +3168,8 @@ async def write_textured_obj(
             else:
                 fallback_face_count += 1
         else:
-            solid_color = (
-                average_direct_projected_color(face_vertices, keyframes)
-                if profile.planar_chart_projection_mode == "direct"
-                else average_projected_color(face_vertices, keyframes)
-            )
-            solid_is_projected = solid_color is not None
-            if solid_color is None:
-                solid_color = FALLBACK_COLOR
+            solid_color = solid_scene_color
+            solid_is_projected = solid_scene_color_projected
             solid_stats = fill_solid_texture_tile(
                 texture_pixels,
                 mask_pixels,
@@ -3268,6 +3279,8 @@ async def write_textured_obj(
         "fallbackHighQualityFaceCount": fallback_budget_stats.get("fallbackHighQualityFaceCount", 0),
         "solidProjectedFaceCount": solid_projected_face_count,
         "solidFallbackFaceCount": solid_fallback_face_count,
+        "solidSceneColor": list(solid_scene_color),
+        "solidSceneColorProjected": solid_scene_color_projected,
     }
 
     texture.save(output_texture_path)
@@ -3828,7 +3841,6 @@ def detect_planar_texture_charts(mesh: FusedMesh, atlas_max_size: int) -> list[P
             offset = float(offset_value)
 
         candidate_faces: list[int] = []
-        area = 0.0
         for face_index, center in enumerate(face_centers):
             if face_index in assigned_faces:
                 continue
@@ -3839,63 +3851,147 @@ def detect_planar_texture_charts(mesh: FusedMesh, atlas_max_size: int) -> list[P
             if distance > TEXTURE_PLANAR_CHART_DISTANCE_METERS:
                 continue
             candidate_faces.append(face_index)
-            area += face_areas[face_index]
 
-        if len(candidate_faces) < TEXTURE_PLANAR_CHART_MIN_FACE_COUNT or area < TEXTURE_PLANAR_CHART_MIN_AREA_M2:
+        if len(candidate_faces) < TEXTURE_PLANAR_CHART_MIN_FACE_COUNT:
             continue
 
         axis_u, axis_v = plane_texture_axes(normal)
-        coord_us: list[float] = []
-        coord_vs: list[float] = []
-        for face_index in candidate_faces:
-            face = mesh.faces[face_index]
-            for vertex_index in face:
-                vertex = vertices[vertex_index]
-                coord_us.append(dot(vertex, axis_u))
-                coord_vs.append(dot(vertex, axis_v))
+        components = connected_planar_face_components(candidate_faces, mesh.faces, face_areas)
+        for component_faces, component_area in components:
+            if (
+                len(component_faces) < TEXTURE_PLANAR_CHART_MIN_FACE_COUNT
+                or component_area < TEXTURE_PLANAR_CHART_MIN_AREA_M2
+            ):
+                continue
 
-        if not coord_us or not coord_vs:
-            continue
+            chart = build_planar_texture_chart(
+                mesh=mesh,
+                face_indices=component_faces,
+                normal=normal,
+                offset=offset,
+                axis_u=axis_u,
+                axis_v=axis_v,
+                atlas_max_size=atlas_max_size,
+                source_plane_index=source_plane_index,
+                chart_id=len(charts),
+            )
+            if chart is None:
+                continue
 
-        min_u = min(coord_us) - TEXTURE_PLANAR_CHART_PADDING_METERS
-        max_u = max(coord_us) + TEXTURE_PLANAR_CHART_PADDING_METERS
-        min_v = min(coord_vs) - TEXTURE_PLANAR_CHART_PADDING_METERS
-        max_v = max(coord_vs) + TEXTURE_PLANAR_CHART_PADDING_METERS
-        extent_u = max(max_u - min_u, 0.05)
-        extent_v = max(max_v - min_v, 0.05)
-        width = int(math.ceil(extent_u * TEXTURE_PLANAR_CHART_PIXELS_PER_METER))
-        height = int(math.ceil(extent_v * TEXTURE_PLANAR_CHART_PIXELS_PER_METER))
-        width = min(TEXTURE_PLANAR_CHART_MAX_SIZE, max(TEXTURE_PLANAR_CHART_MIN_SIZE, width))
-        height = min(TEXTURE_PLANAR_CHART_MAX_SIZE, max(TEXTURE_PLANAR_CHART_MIN_SIZE, height))
-        width = min(width, atlas_max_size)
-        height = min(height, atlas_max_size)
-        if width <= 0 or height <= 0:
-            continue
+            charts.append(chart)
+            assigned_faces.update(component_faces)
+            if len(charts) >= TEXTURE_PLANAR_CHART_MAX_COUNT:
+                break
 
-        chart = PlanarTextureChart(
-            chart_id=len(charts),
-            face_indices=candidate_faces,
-            normal=normal,
-            plane_offset=offset,
-            axis_u=axis_u,
-            axis_v=axis_v,
-            min_u=min_u,
-            max_u=max_u,
-            min_v=min_v,
-            max_v=max_v,
-            width=width,
-            height=height,
-            source_plane_index=source_plane_index,
-        )
-        charts.append(chart)
-        assigned_faces.update(candidate_faces)
         if len(charts) >= TEXTURE_PLANAR_CHART_MAX_COUNT:
             break
 
-    charts.sort(key=lambda chart: len(chart.face_indices) * chart.width * chart.height, reverse=True)
+    charts.sort(
+        key=lambda chart: (
+            len(chart.face_indices) * chart.width * chart.height,
+            chart.max_u - chart.min_u,
+            chart.max_v - chart.min_v,
+        ),
+        reverse=True,
+    )
     for chart_id, chart in enumerate(charts):
         chart.chart_id = chart_id
     return charts
+
+
+def connected_planar_face_components(
+    face_indices: list[int],
+    faces: list[tuple[int, int, int]],
+    face_areas: list[float],
+) -> list[tuple[list[int], float]]:
+    if not face_indices:
+        return []
+
+    face_index_set = set(face_indices)
+    vertex_to_faces: dict[int, list[int]] = {}
+    for face_index in face_indices:
+        for vertex_index in faces[face_index]:
+            vertex_to_faces.setdefault(vertex_index, []).append(face_index)
+
+    components: list[tuple[list[int], float]] = []
+    unvisited = set(face_indices)
+    while unvisited:
+        start = unvisited.pop()
+        stack = [start]
+        component = [start]
+        area = face_areas[start]
+
+        while stack:
+            face_index = stack.pop()
+            for vertex_index in faces[face_index]:
+                for neighbor_index in vertex_to_faces.get(vertex_index, []):
+                    if neighbor_index not in unvisited or neighbor_index not in face_index_set:
+                        continue
+                    unvisited.remove(neighbor_index)
+                    stack.append(neighbor_index)
+                    component.append(neighbor_index)
+                    area += face_areas[neighbor_index]
+
+        components.append((component, area))
+
+    components.sort(key=lambda item: item[1], reverse=True)
+    return components
+
+
+def build_planar_texture_chart(
+    *,
+    mesh: FusedMesh,
+    face_indices: list[int],
+    normal: tuple[float, float, float],
+    offset: float,
+    axis_u: tuple[float, float, float],
+    axis_v: tuple[float, float, float],
+    atlas_max_size: int,
+    source_plane_index: int,
+    chart_id: int,
+) -> PlanarTextureChart | None:
+    coord_us: list[float] = []
+    coord_vs: list[float] = []
+    for face_index in face_indices:
+        face = mesh.faces[face_index]
+        for vertex_index in face:
+            vertex = mesh.vertices[vertex_index]
+            coord_us.append(dot(vertex, axis_u))
+            coord_vs.append(dot(vertex, axis_v))
+
+    if not coord_us or not coord_vs:
+        return None
+
+    min_u = min(coord_us) - TEXTURE_PLANAR_CHART_PADDING_METERS
+    max_u = max(coord_us) + TEXTURE_PLANAR_CHART_PADDING_METERS
+    min_v = min(coord_vs) - TEXTURE_PLANAR_CHART_PADDING_METERS
+    max_v = max(coord_vs) + TEXTURE_PLANAR_CHART_PADDING_METERS
+    extent_u = max(max_u - min_u, 0.05)
+    extent_v = max(max_v - min_v, 0.05)
+    width = int(math.ceil(extent_u * TEXTURE_PLANAR_CHART_PIXELS_PER_METER))
+    height = int(math.ceil(extent_v * TEXTURE_PLANAR_CHART_PIXELS_PER_METER))
+    width = min(TEXTURE_PLANAR_CHART_MAX_SIZE, max(TEXTURE_PLANAR_CHART_MIN_SIZE, width))
+    height = min(TEXTURE_PLANAR_CHART_MAX_SIZE, max(TEXTURE_PLANAR_CHART_MIN_SIZE, height))
+    width = min(width, atlas_max_size)
+    height = min(height, atlas_max_size)
+    if width <= 0 or height <= 0:
+        return None
+
+    return PlanarTextureChart(
+        chart_id=chart_id,
+        face_indices=face_indices,
+        normal=normal,
+        plane_offset=offset,
+        axis_u=axis_u,
+        axis_v=axis_v,
+        min_u=min_u,
+        max_u=max_u,
+        min_v=min_v,
+        max_v=max_v,
+        width=width,
+        height=height,
+        source_plane_index=source_plane_index,
+    )
 
 
 def infer_planar_texture_planes(
@@ -4154,6 +4250,22 @@ def fallback_texture_face_budget(mesh: FusedMesh, layout: TextureAtlasLayout, li
         "fallbackSolidFaceCount": max(0, len(non_chart_face_indices) - len(high_quality)),
         "fallbackPrioritization": "largest_non_chart_triangles",
     }
+
+
+def mesh_surface_sample_points(mesh: FusedMesh, max_points: int = 256) -> list[tuple[float, float, float]]:
+    if not mesh.faces:
+        return mesh.vertices[:max_points]
+
+    step = max(1, math.ceil(len(mesh.faces) / max_points))
+    points = [
+        triangle_center(
+            mesh.vertices[face[0]],
+            mesh.vertices[face[1]],
+            mesh.vertices[face[2]],
+        )
+        for face in mesh.faces[::step]
+    ]
+    return points[:max_points]
 
 
 def sample_texture_at_atlas_point(
