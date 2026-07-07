@@ -851,6 +851,7 @@ async def test_textured_obj_uses_planar_chart_for_large_wall(monkeypatch, tmp_pa
     assert chart["sampleStride"] == 2
     assert chart["projectionMode"] == "direct"
     assert chart["rasterizedPixelCount"] > 0
+    assert stats["diagnostics"]["textureAtlas"]["unobservedColor"] == list(pipeline.TEXTURE_UNOBSERVED_COLOR)
     assert stats["diagnostics"]["processing"]["planarChartCount"] == 1
     assert stats["diagnostics"]["processing"]["planarChartRasterStride"] == 2
     assert stats["diagnostics"]["processing"]["planarChartProjectionMode"] == "direct"
@@ -973,7 +974,7 @@ def test_planar_chart_local_fill_does_not_smear_across_large_holes():
     mask = Image.new("L", (48, 9), 0)
     texture_pixels = texture.load()
     mask_pixels = mask.load()
-    fallback_color = (88, 92, 96)
+    fallback_color = pipeline.TEXTURE_UNOBSERVED_COLOR
 
     for y in range(chart.height):
         for x in range(22, 26):
@@ -998,7 +999,7 @@ def test_planar_chart_local_fill_does_not_smear_across_large_holes():
     assert texture_pixels[47, 4] == fallback_color
 
 
-def test_direct_planar_chart_uses_smooth_color_for_far_owner_projection_holes():
+def test_direct_planar_chart_leaves_far_owner_projection_holes_blank():
     transform = [
         1, 0, 0, 0,
         0, 1, 0, 0,
@@ -1050,7 +1051,7 @@ def test_direct_planar_chart_uses_smooth_color_for_far_owner_projection_holes():
         mask.load(),
         chart,
         candidates,
-        lambda: pipeline.FALLBACK_COLOR,
+        lambda: pipeline.TEXTURE_UNOBSERVED_COLOR,
         sample_stride=1,
         projection_mode="direct",
     )
@@ -1061,7 +1062,7 @@ def test_direct_planar_chart_uses_smooth_color_for_far_owner_projection_holes():
     assert stats["unresolvedFallbackPixelCount"] > 0
     assert stats["fallbackPixelCount"] == stats["unresolvedFallbackPixelCount"]
     assert stats["maxFillRadius"] == pipeline.TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS
-    assert texture.load()[0, 6] == (190, 130, 80)
+    assert texture.load()[0, 6] == pipeline.TEXTURE_UNOBSERVED_COLOR
 
 
 @pytest.mark.asyncio

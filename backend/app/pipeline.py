@@ -213,6 +213,7 @@ class DecodedDepthFrame:
 
 
 FALLBACK_COLOR = (148, 148, 144)
+TEXTURE_UNOBSERVED_COLOR = (255, 255, 255)
 TEXTURE_ATLAS_MAX_SIZE = 4096
 TEXTURE_TSDF_ATLAS_MAX_SIZE = 6144
 TEXTURE_TILE_MAX_SIZE = 96
@@ -259,7 +260,7 @@ TEXTURE_PLANAR_CHART_ATLAS_HEIGHT_RATIO = 0.68
 TEXTURE_PLANAR_CHART_DIRECT_MAX_CANDIDATES = 3
 TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE = 0.35
 TEXTURE_PLANAR_CHART_NEIGHBOR_FILL_ENABLED = True
-TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS = 8
+TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS = 2
 TEXTURE_ISLAND_DILATION_PIXELS = 4
 TEXTURE_COLOR_SATURATION_BOOST = 1.12
 TEXTURE_COLOR_CONTRAST_BOOST = 1.05
@@ -3030,12 +3031,10 @@ async def write_textured_obj(
             def resolve_chart_fallback_color() -> tuple[int, int, int]:
                 nonlocal fallback_color
                 if fallback_color is None:
-                    fallback_keyframes = [owner_candidate.keyframe] if owner_candidate is not None else keyframes
-                    fallback_color = (
-                        average_direct_projected_color(region_points, fallback_keyframes)
-                        if profile.planar_chart_projection_mode == "direct"
-                        else average_projected_color(region_points, fallback_keyframes)
-                    ) or FALLBACK_COLOR
+                    if profile.planar_chart_projection_mode == "direct":
+                        fallback_color = TEXTURE_UNOBSERVED_COLOR
+                    else:
+                        fallback_color = average_projected_color(region_points, keyframes) or FALLBACK_COLOR
                 return fallback_color
 
             raster_stats = rasterize_planar_chart_texture(
@@ -4404,6 +4403,7 @@ def build_texture_diagnostics(
             "tilePadding": tile_padding,
             "dilationPixels": dilation_pixels,
             "fallbackColor": list(FALLBACK_COLOR),
+            "unobservedColor": list(TEXTURE_UNOBSERVED_COLOR),
             "rasterizedPixelCount": rasterized_pixel_count,
             "projectedPixelCount": projected_pixel_count,
             "fallbackPixelCount": fallback_pixel_count,
@@ -4868,7 +4868,6 @@ def rasterize_planar_chart_texture(
     stride = max(1, sample_stride)
     chart_right = chart.x + chart.width
     chart_bottom = chart.y + chart.height
-    projected_color_sum = [0, 0, 0]
     for y in range(chart.y, chart_bottom, stride):
         for x in range(chart.x, chart_right, stride):
             color: tuple[int, int, int] | None = None
@@ -4909,9 +4908,6 @@ def rasterize_planar_chart_texture(
                 stats["missingDepthSampleCount"] += blend.missing_depth_sample_count
             if accepted_count > 0 and blend is not None:
                 stats["projectedPixelCount"] += block_pixel_count
-                projected_color_sum[0] += color[0] * block_pixel_count
-                projected_color_sum[1] += color[1] * block_pixel_count
-                projected_color_sum[2] += color[2] * block_pixel_count
                 stats["acceptedProjectionSampleCount"] += accepted_count * block_pixel_count
                 if accepted_count > 1:
                     stats["blendedPixelCount"] += block_pixel_count
@@ -4930,16 +4926,11 @@ def rasterize_planar_chart_texture(
         and stats["projectedPixelCount"] > 0
         and stats["fallbackPixelCount"] > 0
     ):
-        projected_average_color = (
-            clamp_color(projected_color_sum[0] / stats["projectedPixelCount"]),
-            clamp_color(projected_color_sum[1] / stats["projectedPixelCount"]),
-            clamp_color(projected_color_sum[2] / stats["projectedPixelCount"]),
-        )
         fill_stats = fill_planar_chart_holes_from_neighbors(
             texture_pixels,
             mask_pixels,
             chart,
-            projected_average_color or fallback_color(),
+            fallback_color(),
             max_radius=TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS,
         )
         local_filled = fill_stats["localFilledPixelCount"]
