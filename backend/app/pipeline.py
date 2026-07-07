@@ -4,6 +4,7 @@ import asyncio
 from array import array
 import base64
 import binascii
+from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 import importlib
 import json
@@ -258,6 +259,7 @@ TEXTURE_PLANAR_CHART_ATLAS_HEIGHT_RATIO = 0.68
 TEXTURE_PLANAR_CHART_DIRECT_MAX_CANDIDATES = 3
 TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE = 0.35
 TEXTURE_PLANAR_CHART_NEIGHBOR_FILL_ENABLED = True
+TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS = 8
 TEXTURE_ISLAND_DILATION_PIXELS = 4
 TEXTURE_COLOR_SATURATION_BOOST = 1.12
 TEXTURE_COLOR_CONTRAST_BOOST = 1.05
@@ -3055,7 +3057,10 @@ async def write_textured_obj(
             rasterized_pixel_count += raster_stats["filledPixelCount"]
             projected_pixel_count += raster_stats["projectedPixelCount"]
             fallback_pixel_count += raster_stats["fallbackPixelCount"]
-            neighbor_filled_pixel_count += raster_stats.get("neighborFilledPixelCount", 0)
+            neighbor_filled_pixel_count += raster_stats.get(
+                "localFilledPixelCount",
+                raster_stats.get("neighborFilledPixelCount", 0),
+            )
             blended_pixel_count += raster_stats["blendedPixelCount"]
             single_sample_pixel_count += raster_stats["singleSamplePixelCount"]
             accepted_projection_sample_count += raster_stats["acceptedProjectionSampleCount"]
@@ -3222,10 +3227,19 @@ async def write_textured_obj(
             context_stats = planar_chart_contexts.get(int(chart_stats["chartId"]), {}).get("stats", {})
             filled = int(context_stats.get("filledPixelCount", 0))
             projected = int(context_stats.get("projectedPixelCount", 0))
+            local_filled = int(context_stats.get(
+                "localFilledPixelCount",
+                context_stats.get("neighborFilledPixelCount", 0),
+            ))
             chart_stats["rasterizedPixelCount"] = filled
             chart_stats["projectedPixelCount"] = projected
             chart_stats["fallbackPixelCount"] = int(context_stats.get("fallbackPixelCount", 0))
-            chart_stats["neighborFilledPixelCount"] = int(context_stats.get("neighborFilledPixelCount", 0))
+            chart_stats["localFilledPixelCount"] = local_filled
+            chart_stats["neighborFilledPixelCount"] = local_filled
+            chart_stats["unresolvedFallbackPixelCount"] = int(
+                context_stats.get("unresolvedFallbackPixelCount", context_stats.get("fallbackPixelCount", 0))
+            )
+            chart_stats["maxFillRadius"] = int(context_stats.get("maxFillRadius", 0))
             chart_stats["projectedPixelRatio"] = round(projected / max(filled, 1), 4)
     atlas_layout_debug_stats = {
         **atlas_layout_spec.stats,
@@ -4393,6 +4407,7 @@ def build_texture_diagnostics(
             "rasterizedPixelCount": rasterized_pixel_count,
             "projectedPixelCount": projected_pixel_count,
             "fallbackPixelCount": fallback_pixel_count,
+            "localFilledPixelCount": neighbor_filled_pixel_count,
             "neighborFilledPixelCount": neighbor_filled_pixel_count,
             "fallbackRasterPixelRatio": round(fallback_raster_ratio, 4),
             "dilatedPixelCount": dilated_pixel_count,
@@ -4674,7 +4689,10 @@ def empty_texture_raster_stats() -> dict:
         "filledPixelCount": 0,
         "projectedPixelCount": 0,
         "fallbackPixelCount": 0,
+        "localFilledPixelCount": 0,
         "neighborFilledPixelCount": 0,
+        "unresolvedFallbackPixelCount": 0,
+        "maxFillRadius": 0,
         "blendedPixelCount": 0,
         "singleSamplePixelCount": 0,
         "acceptedProjectionSampleCount": 0,
@@ -4695,7 +4713,9 @@ def merge_texture_raster_stats(total: dict, addition: dict) -> None:
         "filledPixelCount",
         "projectedPixelCount",
         "fallbackPixelCount",
+        "localFilledPixelCount",
         "neighborFilledPixelCount",
+        "unresolvedFallbackPixelCount",
         "blendedPixelCount",
         "singleSamplePixelCount",
         "acceptedProjectionSampleCount",
@@ -4848,6 +4868,7 @@ def rasterize_planar_chart_texture(
     stride = max(1, sample_stride)
     chart_right = chart.x + chart.width
     chart_bottom = chart.y + chart.height
+    projected_color_sum = [0, 0, 0]
     for y in range(chart.y, chart_bottom, stride):
         for x in range(chart.x, chart_right, stride):
             color: tuple[int, int, int] | None = None
@@ -4888,6 +4909,9 @@ def rasterize_planar_chart_texture(
                 stats["missingDepthSampleCount"] += blend.missing_depth_sample_count
             if accepted_count > 0 and blend is not None:
                 stats["projectedPixelCount"] += block_pixel_count
+                projected_color_sum[0] += color[0] * block_pixel_count
+                projected_color_sum[1] += color[1] * block_pixel_count
+                projected_color_sum[2] += color[2] * block_pixel_count
                 stats["acceptedProjectionSampleCount"] += accepted_count * block_pixel_count
                 if accepted_count > 1:
                     stats["blendedPixelCount"] += block_pixel_count
@@ -4899,21 +4923,31 @@ def rasterize_planar_chart_texture(
             else:
                 stats["fallbackPixelCount"] += block_pixel_count
 
+    stats["unresolvedFallbackPixelCount"] = stats["fallbackPixelCount"]
     if (
         TEXTURE_PLANAR_CHART_NEIGHBOR_FILL_ENABLED
         and projection_mode == "direct"
         and stats["projectedPixelCount"] > 0
         and stats["fallbackPixelCount"] > 0
     ):
+        projected_average_color = (
+            clamp_color(projected_color_sum[0] / stats["projectedPixelCount"]),
+            clamp_color(projected_color_sum[1] / stats["projectedPixelCount"]),
+            clamp_color(projected_color_sum[2] / stats["projectedPixelCount"]),
+        )
         fill_stats = fill_planar_chart_holes_from_neighbors(
             texture_pixels,
             mask_pixels,
             chart,
-            fallback_color(),
+            projected_average_color or fallback_color(),
+            max_radius=TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS,
         )
-        neighbor_filled = fill_stats["neighborFilledPixelCount"]
-        stats["neighborFilledPixelCount"] += neighbor_filled
+        local_filled = fill_stats["localFilledPixelCount"]
+        stats["localFilledPixelCount"] += local_filled
+        stats["neighborFilledPixelCount"] += local_filled
         stats["fallbackPixelCount"] = fill_stats["unresolvedFallbackPixelCount"]
+        stats["unresolvedFallbackPixelCount"] = fill_stats["unresolvedFallbackPixelCount"]
+        stats["maxFillRadius"] = fill_stats["maxFillRadius"]
 
     return stats
 
@@ -4923,83 +4957,98 @@ def fill_planar_chart_holes_from_neighbors(
     mask_pixels: object,
     chart: PlanarTextureChart,
     fallback_color: tuple[int, int, int],
+    max_radius: int = TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS,
 ) -> dict:
     chart_right = chart.x + chart.width
     chart_bottom = chart.y + chart.height
-    neighbor_filled_count = 0
+    max_radius = max(0, int(max_radius))
+    local_filled_count = 0
 
-    def blend_colors(first: tuple[int, int, int], second: tuple[int, int, int]) -> tuple[int, int, int]:
-        return (
-            clamp_color((first[0] + second[0]) * 0.5),
-            clamp_color((first[1] + second[1]) * 0.5),
-            clamp_color((first[2] + second[2]) * 0.5),
-        )
+    neighbor_offsets = (
+        (-1, -1), (0, -1), (1, -1),
+        (-1, 0), (1, 0),
+        (-1, 1), (0, 1), (1, 1),
+    )
+    width = chart.width
+    height = chart.height
+    visited = bytearray(width * height)
+    queue: deque[int] = deque()
 
-    for y in range(chart.y, chart_bottom):
-        row_filled_count = 0
-        last_color: tuple[int, int, int] | None = None
-        for x in range(chart.x, chart_right):
-            if mask_pixels[x, y] == 255:
-                pixel = texture_pixels[x, y]
-                last_color = (int(pixel[0]), int(pixel[1]), int(pixel[2]))
-            elif last_color is not None:
-                texture_pixels[x, y] = last_color
-                mask_pixels[x, y] = 64
-                neighbor_filled_count += 1
-                row_filled_count += 1
+    if max_radius > 0:
+        for local_y, y in enumerate(range(chart.y, chart_bottom)):
+            for local_x, x in enumerate(range(chart.x, chart_right)):
+                if mask_pixels[x, y] != 255:
+                    continue
 
-        if row_filled_count < chart.width:
-            last_color = None
-            for x in range(chart_right - 1, chart.x - 1, -1):
-                if mask_pixels[x, y] == 255:
-                    pixel = texture_pixels[x, y]
-                    last_color = (int(pixel[0]), int(pixel[1]), int(pixel[2]))
-                elif last_color is not None:
-                    if mask_pixels[x, y] == 64:
-                        existing = texture_pixels[x, y]
-                        texture_pixels[x, y] = blend_colors(
-                            (int(existing[0]), int(existing[1]), int(existing[2])),
-                            last_color,
-                        )
-                    else:
-                        texture_pixels[x, y] = last_color
-                        mask_pixels[x, y] = 64
-                        neighbor_filled_count += 1
+                touches_hole = False
+                for offset_x, offset_y in neighbor_offsets:
+                    neighbor_x = x + offset_x
+                    neighbor_y = y + offset_y
+                    if not (chart.x <= neighbor_x < chart_right and chart.y <= neighbor_y < chart_bottom):
+                        continue
+                    if mask_pixels[neighbor_x, neighbor_y] == 0:
+                        touches_hole = True
+                        break
 
-    for x in range(chart.x, chart_right):
-        last_color = None
-        for y in range(chart.y, chart_bottom):
-            if mask_pixels[x, y] == 255:
-                pixel = texture_pixels[x, y]
-                last_color = (int(pixel[0]), int(pixel[1]), int(pixel[2]))
-            elif last_color is not None:
-                if mask_pixels[x, y] == 64:
-                    existing = texture_pixels[x, y]
-                    texture_pixels[x, y] = blend_colors(
-                        (int(existing[0]), int(existing[1]), int(existing[2])),
-                        last_color,
-                    )
-                else:
-                    texture_pixels[x, y] = last_color
-                    mask_pixels[x, y] = 64
-                    neighbor_filled_count += 1
+                if touches_hole:
+                    index = local_y * width + local_x
+                    visited[index] = 1
+                    queue.append(index)
 
-        last_color = None
-        for y in range(chart_bottom - 1, chart.y - 1, -1):
-            if mask_pixels[x, y] == 255:
-                pixel = texture_pixels[x, y]
-                last_color = (int(pixel[0]), int(pixel[1]), int(pixel[2]))
-            elif last_color is not None:
-                if mask_pixels[x, y] == 64:
-                    existing = texture_pixels[x, y]
-                    texture_pixels[x, y] = blend_colors(
-                        (int(existing[0]), int(existing[1]), int(existing[2])),
-                        last_color,
-                    )
-                else:
-                    texture_pixels[x, y] = last_color
-                    mask_pixels[x, y] = 64
-                    neighbor_filled_count += 1
+    while queue:
+        index = queue.popleft()
+        distance = visited[index] - 1
+        if distance >= max_radius:
+            continue
+
+        local_x = index % width
+        local_y = index // width
+        x = chart.x + local_x
+        y = chart.y + local_y
+        next_distance = distance + 1
+
+        for offset_x, offset_y in neighbor_offsets:
+            neighbor_local_x = local_x + offset_x
+            neighbor_local_y = local_y + offset_y
+            if not (0 <= neighbor_local_x < width and 0 <= neighbor_local_y < height):
+                continue
+
+            neighbor_x = x + offset_x
+            neighbor_y = y + offset_y
+            if mask_pixels[neighbor_x, neighbor_y] != 0:
+                continue
+
+            neighbor_index = neighbor_local_y * width + neighbor_local_x
+            if visited[neighbor_index] != 0:
+                continue
+
+            colors: list[tuple[int, int, int]] = []
+            for sample_offset_x, sample_offset_y in neighbor_offsets:
+                sample_local_x = neighbor_local_x + sample_offset_x
+                sample_local_y = neighbor_local_y + sample_offset_y
+                if not (0 <= sample_local_x < width and 0 <= sample_local_y < height):
+                    continue
+
+                sample_x = chart.x + sample_local_x
+                sample_y = chart.y + sample_local_y
+                if mask_pixels[sample_x, sample_y] not in (64, 255):
+                    continue
+
+                sample = texture_pixels[sample_x, sample_y]
+                colors.append((int(sample[0]), int(sample[1]), int(sample[2])))
+
+            if not colors:
+                continue
+
+            texture_pixels[neighbor_x, neighbor_y] = (
+                clamp_color(sum(color[0] for color in colors) / len(colors)),
+                clamp_color(sum(color[1] for color in colors) / len(colors)),
+                clamp_color(sum(color[2] for color in colors) / len(colors)),
+            )
+            mask_pixels[neighbor_x, neighbor_y] = 64
+            visited[neighbor_index] = next_distance + 1
+            queue.append(neighbor_index)
+            local_filled_count += 1
 
     unresolved_count = 0
     for y in range(chart.y, chart_bottom):
@@ -5011,8 +5060,10 @@ def fill_planar_chart_holes_from_neighbors(
             unresolved_count += 1
 
     return {
-        "neighborFilledPixelCount": neighbor_filled_count,
+        "localFilledPixelCount": local_filled_count,
+        "neighborFilledPixelCount": local_filled_count,
         "unresolvedFallbackPixelCount": unresolved_count,
+        "maxFillRadius": max_radius,
     }
 
 

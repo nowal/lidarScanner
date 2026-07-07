@@ -148,6 +148,25 @@ def make_disconnected_wall_grids(size: int, spacing: float = 0.04, gap: float = 
     return pipeline.FusedMesh(vertices=vertices, faces=faces, stats={"geometrySource": "test_disconnected_wall_grids"})
 
 
+def make_test_planar_chart(width: int, height: int) -> pipeline.PlanarTextureChart:
+    return pipeline.PlanarTextureChart(
+        chart_id=0,
+        face_indices=[0],
+        normal=(0, 0, 1),
+        plane_offset=1,
+        axis_u=(1, 0, 0),
+        axis_v=(0, 1, 0),
+        min_u=-1.0,
+        max_u=1.0,
+        min_v=-1.0,
+        max_v=1.0,
+        width=width,
+        height=height,
+        x=0,
+        y=0,
+    )
+
+
 def test_job_store_rehydrates_persisted_job_records(tmp_path):
     store = JobStore(str(tmp_path))
     record = store.create_job()
@@ -917,7 +936,69 @@ async def test_fast_planar_chart_uses_single_owner_keyframe(monkeypatch, tmp_pat
     assert {item["keyframe"] for item in contributions} == {"red-owner"}
 
 
-def test_direct_planar_chart_fills_owner_projection_holes():
+def test_planar_chart_local_fill_repairs_small_holes():
+    chart = make_test_planar_chart(width=7, height=5)
+    texture = Image.new("RGB", (7, 5), pipeline.FALLBACK_COLOR)
+    mask = Image.new("L", (7, 5), 0)
+    texture_pixels = texture.load()
+    mask_pixels = mask.load()
+    trusted_color = (40, 120, 210)
+    fallback_color = (90, 95, 100)
+
+    for y in range(chart.height):
+        for x in range(chart.width):
+            texture_pixels[x, y] = trusted_color
+            mask_pixels[x, y] = 255
+
+    texture_pixels[3, 2] = fallback_color
+    mask_pixels[3, 2] = 0
+
+    stats = pipeline.fill_planar_chart_holes_from_neighbors(
+        texture_pixels,
+        mask_pixels,
+        chart,
+        fallback_color,
+        max_radius=2,
+    )
+
+    assert stats["localFilledPixelCount"] == 1
+    assert stats["unresolvedFallbackPixelCount"] == 0
+    assert mask_pixels[3, 2] == 64
+    assert texture_pixels[3, 2] == trusted_color
+
+
+def test_planar_chart_local_fill_does_not_smear_across_large_holes():
+    chart = make_test_planar_chart(width=48, height=9)
+    texture = Image.new("RGB", (48, 9), pipeline.FALLBACK_COLOR)
+    mask = Image.new("L", (48, 9), 0)
+    texture_pixels = texture.load()
+    mask_pixels = mask.load()
+    fallback_color = (88, 92, 96)
+
+    for y in range(chart.height):
+        for x in range(22, 26):
+            texture_pixels[x, y] = (180, 40 + y, 35)
+            mask_pixels[x, y] = 255
+
+    stats = pipeline.fill_planar_chart_holes_from_neighbors(
+        texture_pixels,
+        mask_pixels,
+        chart,
+        fallback_color,
+        max_radius=3,
+    )
+
+    assert stats["localFilledPixelCount"] > 0
+    assert stats["unresolvedFallbackPixelCount"] > 0
+    assert mask_pixels[21, 4] == 64
+    assert texture_pixels[21, 4] != fallback_color
+    assert mask_pixels[0, 4] == 128
+    assert texture_pixels[0, 4] == fallback_color
+    assert mask_pixels[47, 4] == 128
+    assert texture_pixels[47, 4] == fallback_color
+
+
+def test_direct_planar_chart_uses_smooth_color_for_far_owner_projection_holes():
     transform = [
         1, 0, 0, 0,
         0, 1, 0, 0,
@@ -975,9 +1056,12 @@ def test_direct_planar_chart_fills_owner_projection_holes():
     )
 
     assert stats["projectedPixelCount"] > 0
-    assert stats["neighborFilledPixelCount"] > 0
-    assert stats["fallbackPixelCount"] == 0
-    assert texture.load()[0, 6] != pipeline.FALLBACK_COLOR
+    assert stats["localFilledPixelCount"] > 0
+    assert stats["neighborFilledPixelCount"] == stats["localFilledPixelCount"]
+    assert stats["unresolvedFallbackPixelCount"] > 0
+    assert stats["fallbackPixelCount"] == stats["unresolvedFallbackPixelCount"]
+    assert stats["maxFillRadius"] == pipeline.TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS
+    assert texture.load()[0, 6] == (190, 130, 80)
 
 
 @pytest.mark.asyncio
