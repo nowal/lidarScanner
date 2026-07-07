@@ -3035,7 +3035,10 @@ async def write_textured_obj(
                 nonlocal fallback_color
                 if fallback_color is None:
                     if profile.planar_chart_projection_mode == "direct":
-                        fallback_color = TEXTURE_UNOBSERVED_COLOR
+                        fallback_color = (
+                            average_direct_projected_surface_color(region_points, chart.normal, keyframes)
+                            or TEXTURE_UNOBSERVED_COLOR
+                        )
                     else:
                         fallback_color = average_projected_color(region_points, keyframes) or FALLBACK_COLOR
                 return fallback_color
@@ -3140,8 +3143,18 @@ async def write_textured_obj(
             def resolve_fallback_color() -> tuple[int, int, int]:
                 nonlocal fallback_color
                 if fallback_color is None:
+                    face_normal = triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2])
                     fallback_color = (
-                        TEXTURE_UNOBSERVED_COLOR
+                        average_direct_projected_surface_color(
+                            [
+                                face_vertices[0],
+                                face_vertices[1],
+                                face_vertices[2],
+                                triangle_center(face_vertices[0], face_vertices[1], face_vertices[2]),
+                            ],
+                            face_normal,
+                            keyframes,
+                        ) or TEXTURE_UNOBSERVED_COLOR
                         if profile.planar_chart_projection_mode == "direct"
                         else average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
                     )
@@ -3186,6 +3199,15 @@ async def write_textured_obj(
         else:
             solid_color = solid_scene_color
             solid_is_projected = solid_scene_color_projected
+            if profile.planar_chart_projection_mode == "direct":
+                direct_sample = direct_projected_surface_color(
+                    triangle_center(face_vertices[0], face_vertices[1], face_vertices[2]),
+                    triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2]),
+                    keyframes,
+                )
+                if direct_sample is not None:
+                    solid_color = direct_sample[0]
+                    solid_is_projected = True
             solid_stats = fill_solid_texture_tile(
                 texture_pixels,
                 mask_pixels,
@@ -4861,6 +4883,77 @@ def direct_projected_color_for_point(
             best_color = color
 
     return best_color
+
+
+def direct_projected_surface_color(
+    world_point: tuple[float, float, float],
+    normal: tuple[float, float, float],
+    keyframes: list[ProjectionKeyframe],
+) -> tuple[tuple[int, int, int], str] | None:
+    best_score = -math.inf
+    best_color: tuple[int, int, int] | None = None
+    best_key: str | None = None
+    surface_normal = normalize(normal)
+    for keyframe in keyframes:
+        projection = project_world_point(world_point, keyframe)
+        if projection is None:
+            continue
+
+        u, v, depth = projection
+        edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
+        edge_threshold = max(1.0, keyframe.edge_margin_threshold * TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE)
+        if edge_margin < edge_threshold:
+            continue
+
+        facing = 0.25
+        if surface_normal != (0.0, 0.0, 0.0):
+            view_vector = normalize(subtract(keyframe.camera_position, world_point))
+            facing = abs(dot(surface_normal, view_vector))
+            if facing < TEXTURE_BLEND_MIN_FACING:
+                continue
+
+        depth_visibility = depth_visibility_for_world_point(world_point, keyframe)
+        if depth_visibility.status == "occluded":
+            continue
+
+        color = sample_image_bilinear(keyframe, u, v)
+        luminance = rgb_luminance(color)
+        detail_range = max(color) - min(color)
+        if luminance > TEXTURE_REJECT_OVEREXPOSED_LUMINANCE and detail_range <= TEXTURE_REJECT_LOW_DETAIL_RANGE:
+            continue
+        if luminance < TEXTURE_REJECT_UNDEREXPOSED_LUMINANCE:
+            continue
+
+        center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
+        score = center_bias * max(facing, 0.15) * depth_visibility.weight / max(depth, 0.2)
+        if score > best_score:
+            best_score = score
+            best_color = color
+            best_key = keyframe.debug_id
+
+    if best_color is None or best_key is None:
+        return None
+    return best_color, best_key
+
+
+def average_direct_projected_surface_color(
+    points: list[tuple[float, float, float]],
+    normal: tuple[float, float, float],
+    keyframes: list[ProjectionKeyframe],
+) -> tuple[int, int, int] | None:
+    colors = [
+        sample[0] for point in points
+        if (sample := direct_projected_surface_color(point, normal, keyframes)) is not None
+    ]
+    if not colors:
+        return None
+
+    count = len(colors)
+    return (
+        clamp_color(sum(color[0] for color in colors) / count),
+        clamp_color(sum(color[1] for color in colors) / count),
+        clamp_color(sum(color[2] for color in colors) / count),
+    )
 
 
 def average_direct_projected_color(

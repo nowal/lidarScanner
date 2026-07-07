@@ -999,7 +999,7 @@ def test_planar_chart_local_fill_does_not_smear_across_large_holes():
     assert texture_pixels[47, 4] == fallback_color
 
 
-def test_direct_planar_chart_leaves_far_owner_projection_holes_blank():
+def test_direct_planar_chart_fills_far_owner_projection_holes_with_chart_color():
     transform = [
         1, 0, 0, 0,
         0, 1, 0, 0,
@@ -1051,7 +1051,11 @@ def test_direct_planar_chart_leaves_far_owner_projection_holes_blank():
         mask.load(),
         chart,
         candidates,
-        lambda: pipeline.TEXTURE_UNOBSERVED_COLOR,
+        lambda: pipeline.average_direct_projected_surface_color(
+            pipeline.chart_region_points(chart),
+            chart.normal,
+            [keyframe],
+        ) or pipeline.TEXTURE_UNOBSERVED_COLOR,
         sample_stride=1,
         projection_mode="direct",
     )
@@ -1062,7 +1066,7 @@ def test_direct_planar_chart_leaves_far_owner_projection_holes_blank():
     assert stats["unresolvedFallbackPixelCount"] > 0
     assert stats["fallbackPixelCount"] == stats["unresolvedFallbackPixelCount"]
     assert stats["maxFillRadius"] == pipeline.TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS
-    assert texture.load()[0, 6] == pipeline.TEXTURE_UNOBSERVED_COLOR
+    assert texture.load()[0, 6] == (190, 130, 80)
 
 
 def test_direct_planar_chart_secondary_keyframe_fills_large_owned_hole():
@@ -1230,11 +1234,11 @@ async def test_fast_texture_profile_caps_expensive_fallback_faces(tmp_path):
     assert stats["uvStrategy"] == "render_mesh_per_face_atlas_padded"
     assert processing["fallbackTextureFaceLimit"] == 1
     assert processing["fallbackHighQualityFaceCount"] == 1
-    assert processing["solidProjectedFaceCount"] == 0
-    assert processing["solidFallbackFaceCount"] == 3
+    assert processing["solidProjectedFaceCount"] == 3
+    assert processing["solidFallbackFaceCount"] == 0
     assert processing["solidSceneColorProjected"] is False
     assert budget["fallbackPrioritization"] == "largest_non_chart_triangles"
-    assert stats["projectionCoverage"] == pytest.approx(0.25)
+    assert stats["projectionCoverage"] == 1.0
 
 
 def test_open3d_tsdf_postprocess_removes_small_components_when_available():
