@@ -1065,6 +1065,101 @@ def test_direct_planar_chart_leaves_far_owner_projection_holes_blank():
     assert texture.load()[0, 6] == pipeline.TEXTURE_UNOBSERVED_COLOR
 
 
+def test_direct_planar_chart_secondary_keyframe_fills_large_owned_hole():
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    owner_intrinsics = [
+        12, 0, 0,
+        0, 12, 0,
+        12, 12, 1,
+    ]
+    secondary_intrinsics = [
+        12, 0, 0,
+        0, 12, 0,
+        24, 12, 1,
+    ]
+    owner_image = Image.new("RGB", (24, 24), (190, 130, 80))
+    secondary_image = Image.new("RGB", (24, 24), (40, 180, 90))
+    owner = pipeline.ProjectionKeyframe(
+        image=owner_image,
+        width=owner_image.width,
+        height=owner_image.height,
+        world_to_camera=pipeline.invert_rigid_transform(transform),
+        camera_position=(0, 0, 0),
+        intrinsics=owner_intrinsics,
+        pixels=owner_image.load(),
+        id="owner",
+    )
+    secondary = pipeline.ProjectionKeyframe(
+        image=secondary_image,
+        width=secondary_image.width,
+        height=secondary_image.height,
+        world_to_camera=pipeline.invert_rigid_transform(transform),
+        camera_position=(0, 0, 0),
+        intrinsics=secondary_intrinsics,
+        pixels=secondary_image.load(),
+        id="left-secondary",
+    )
+    chart = pipeline.PlanarTextureChart(
+        chart_id=0,
+        face_indices=[0],
+        normal=(0, 0, 1),
+        plane_offset=1,
+        axis_u=(1, 0, 0),
+        axis_v=(0, 1, 0),
+        min_u=-2.5,
+        max_u=2.5,
+        min_v=-0.5,
+        max_v=0.5,
+        width=96,
+        height=16,
+        x=0,
+        y=0,
+    )
+    owner_candidate = pipeline.TextureProjectionCandidate(
+        keyframe=owner,
+        keyframe_debug_id=owner.debug_id,
+        score=1,
+        visible_vertex_count=3,
+        center_projection=(12, 12, 1),
+        facing=1,
+        center_edge_margin=12,
+    )
+    secondary_candidate = pipeline.TextureProjectionCandidate(
+        keyframe=secondary,
+        keyframe_debug_id=secondary.debug_id,
+        score=1,
+        visible_vertex_count=3,
+        center_projection=(12, 12, 1),
+        facing=1,
+        center_edge_margin=12,
+    )
+    texture = Image.new("RGB", (96, 16), pipeline.FALLBACK_COLOR)
+    mask = Image.new("L", (96, 16), 0)
+
+    stats = pipeline.rasterize_planar_chart_texture(
+        texture.load(),
+        mask.load(),
+        chart,
+        [owner_candidate],
+        lambda: pipeline.TEXTURE_UNOBSERVED_COLOR,
+        secondary_candidates=[secondary_candidate],
+        sample_stride=1,
+        projection_mode="direct",
+    )
+
+    pixels = texture.load()
+    assert stats["secondaryFilledPixelCount"] > 0
+    assert stats["secondaryAcceptedRegionCount"] == 1
+    assert stats["secondaryKeyframeIds"] == ["left-secondary"]
+    assert pixels[12, 8] == (40, 180, 90)
+    assert pixels[90, 8] == pipeline.TEXTURE_UNOBSERVED_COLOR
+
+
 @pytest.mark.asyncio
 async def test_fast_texture_profile_caps_expensive_fallback_faces(tmp_path):
     transform = [
@@ -1135,11 +1230,11 @@ async def test_fast_texture_profile_caps_expensive_fallback_faces(tmp_path):
     assert stats["uvStrategy"] == "render_mesh_per_face_atlas_padded"
     assert processing["fallbackTextureFaceLimit"] == 1
     assert processing["fallbackHighQualityFaceCount"] == 1
-    assert processing["solidProjectedFaceCount"] == 3
-    assert processing["solidFallbackFaceCount"] == 0
-    assert processing["solidSceneColorProjected"] is True
+    assert processing["solidProjectedFaceCount"] == 0
+    assert processing["solidFallbackFaceCount"] == 3
+    assert processing["solidSceneColorProjected"] is False
     assert budget["fallbackPrioritization"] == "largest_non_chart_triangles"
-    assert stats["projectionCoverage"] == 1.0
+    assert stats["projectionCoverage"] == pytest.approx(0.25)
 
 
 def test_open3d_tsdf_postprocess_removes_small_components_when_available():

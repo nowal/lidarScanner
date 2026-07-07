@@ -261,6 +261,11 @@ TEXTURE_PLANAR_CHART_DIRECT_MAX_CANDIDATES = 3
 TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE = 0.35
 TEXTURE_PLANAR_CHART_NEIGHBOR_FILL_ENABLED = True
 TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS = 2
+TEXTURE_PLANAR_CHART_SECONDARY_FILL_ENABLED = True
+TEXTURE_PLANAR_CHART_SECONDARY_MIN_REGION_PIXELS = 256
+TEXTURE_PLANAR_CHART_SECONDARY_MIN_COVERAGE_RATIO = 0.55
+TEXTURE_PLANAR_CHART_SECONDARY_MAX_REGIONS = 12
+TEXTURE_PLANAR_CHART_SECONDARY_MAX_SAMPLE_POINTS = 512
 TEXTURE_ISLAND_DILATION_PIXELS = 4
 TEXTURE_COLOR_SATURATION_BOOST = 1.12
 TEXTURE_COLOR_CONTRAST_BOOST = 1.05
@@ -2986,14 +2991,12 @@ async def write_textured_obj(
     fallback_projected_count = 0
     solid_projected_face_count = 0
     solid_fallback_face_count = 0
-    solid_scene_color = (
-        average_direct_projected_color(mesh_surface_sample_points(mesh), keyframes)
-        if profile.planar_chart_projection_mode == "direct"
-        else None
-    )
-    solid_scene_color_projected = solid_scene_color is not None
-    if solid_scene_color is None:
+    if profile.planar_chart_projection_mode == "direct":
+        solid_scene_color = TEXTURE_UNOBSERVED_COLOR
+        solid_scene_color_projected = False
+    else:
         solid_scene_color = FALLBACK_COLOR
+        solid_scene_color_projected = False
 
     planar_chart_contexts: dict[int, dict] = {}
     planar_chart_texture_stats: list[dict] = []
@@ -3043,6 +3046,7 @@ async def write_textured_obj(
                 chart,
                 candidates,
                 resolve_chart_fallback_color,
+                secondary_candidates=all_candidates[1:] if owner_candidate is not None else [],
                 sample_stride=max(1, profile.planar_chart_raster_stride),
                 projection_mode=profile.planar_chart_projection_mode,
             )
@@ -3136,7 +3140,11 @@ async def write_textured_obj(
             def resolve_fallback_color() -> tuple[int, int, int]:
                 nonlocal fallback_color
                 if fallback_color is None:
-                    fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
+                    fallback_color = (
+                        TEXTURE_UNOBSERVED_COLOR
+                        if profile.planar_chart_projection_mode == "direct"
+                        else average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
+                    )
                 return fallback_color
 
             raster_stats = rasterize_face_texture(
@@ -3235,6 +3243,11 @@ async def write_textured_obj(
             chart_stats["fallbackPixelCount"] = int(context_stats.get("fallbackPixelCount", 0))
             chart_stats["localFilledPixelCount"] = local_filled
             chart_stats["neighborFilledPixelCount"] = local_filled
+            chart_stats["secondaryFilledPixelCount"] = int(context_stats.get("secondaryFilledPixelCount", 0))
+            chart_stats["secondaryRegionCount"] = int(context_stats.get("secondaryRegionCount", 0))
+            chart_stats["secondaryAcceptedRegionCount"] = int(context_stats.get("secondaryAcceptedRegionCount", 0))
+            chart_stats["secondaryRejectedRegionCount"] = int(context_stats.get("secondaryRejectedRegionCount", 0))
+            chart_stats["secondaryKeyframeIds"] = list(context_stats.get("secondaryKeyframeIds", []))
             chart_stats["unresolvedFallbackPixelCount"] = int(
                 context_stats.get("unresolvedFallbackPixelCount", context_stats.get("fallbackPixelCount", 0))
             )
@@ -4691,6 +4704,11 @@ def empty_texture_raster_stats() -> dict:
         "fallbackPixelCount": 0,
         "localFilledPixelCount": 0,
         "neighborFilledPixelCount": 0,
+        "secondaryFilledPixelCount": 0,
+        "secondaryRegionCount": 0,
+        "secondaryAcceptedRegionCount": 0,
+        "secondaryRejectedRegionCount": 0,
+        "secondaryKeyframeIds": [],
         "unresolvedFallbackPixelCount": 0,
         "maxFillRadius": 0,
         "blendedPixelCount": 0,
@@ -4715,6 +4733,10 @@ def merge_texture_raster_stats(total: dict, addition: dict) -> None:
         "fallbackPixelCount",
         "localFilledPixelCount",
         "neighborFilledPixelCount",
+        "secondaryFilledPixelCount",
+        "secondaryRegionCount",
+        "secondaryAcceptedRegionCount",
+        "secondaryRejectedRegionCount",
         "unresolvedFallbackPixelCount",
         "blendedPixelCount",
         "singleSamplePixelCount",
@@ -4733,6 +4755,11 @@ def merge_texture_raster_stats(total: dict, addition: dict) -> None:
     for key, value in addition.get("keyframeContributionCounts", {}).items():
         counts = total.setdefault("keyframeContributionCounts", {})
         counts[key] = counts.get(key, 0) + value
+
+    secondary_ids = total.setdefault("secondaryKeyframeIds", [])
+    for key in addition.get("secondaryKeyframeIds", []):
+        if key not in secondary_ids:
+            secondary_ids.append(key)
 
 
 def direct_projected_texture_sample(
@@ -4861,6 +4888,7 @@ def rasterize_planar_chart_texture(
     chart: PlanarTextureChart,
     candidates: list[TextureProjectionCandidate],
     fallback_color: Callable[[], tuple[int, int, int]],
+    secondary_candidates: list[TextureProjectionCandidate] | None = None,
     sample_stride: int = 1,
     projection_mode: str = "blend",
 ) -> dict:
@@ -4921,6 +4949,35 @@ def rasterize_planar_chart_texture(
 
     stats["unresolvedFallbackPixelCount"] = stats["fallbackPixelCount"]
     if (
+        TEXTURE_PLANAR_CHART_SECONDARY_FILL_ENABLED
+        and projection_mode == "direct"
+        and secondary_candidates
+        and stats["fallbackPixelCount"] >= TEXTURE_PLANAR_CHART_SECONDARY_MIN_REGION_PIXELS
+    ):
+        secondary_stats = fill_planar_chart_holes_from_secondary_keyframes(
+            texture_pixels,
+            mask_pixels,
+            chart,
+            secondary_candidates,
+        )
+        secondary_filled = int(secondary_stats["secondaryFilledPixelCount"])
+        stats["secondaryFilledPixelCount"] += secondary_filled
+        stats["secondaryRegionCount"] += int(secondary_stats["secondaryRegionCount"])
+        stats["secondaryAcceptedRegionCount"] += int(secondary_stats["secondaryAcceptedRegionCount"])
+        stats["secondaryRejectedRegionCount"] += int(secondary_stats["secondaryRejectedRegionCount"])
+        stats["fallbackPixelCount"] = max(0, stats["fallbackPixelCount"] - secondary_filled)
+        stats["unresolvedFallbackPixelCount"] = stats["fallbackPixelCount"]
+        stats["projectedPixelCount"] += secondary_filled
+        stats["acceptedProjectionSampleCount"] += secondary_filled
+        stats["singleSamplePixelCount"] += secondary_filled
+        for key in secondary_stats.get("secondaryKeyframeIds", []):
+            if key not in stats["secondaryKeyframeIds"]:
+                stats["secondaryKeyframeIds"].append(key)
+        for key, value in secondary_stats.get("keyframeContributionCounts", {}).items():
+            counts = stats["keyframeContributionCounts"]
+            counts[key] = counts.get(key, 0) + value
+
+    if (
         TEXTURE_PLANAR_CHART_NEIGHBOR_FILL_ENABLED
         and projection_mode == "direct"
         and stats["projectedPixelCount"] > 0
@@ -4941,6 +4998,144 @@ def rasterize_planar_chart_texture(
         stats["maxFillRadius"] = fill_stats["maxFillRadius"]
 
     return stats
+
+
+def fill_planar_chart_holes_from_secondary_keyframes(
+    texture_pixels: object,
+    mask_pixels: object,
+    chart: PlanarTextureChart,
+    secondary_candidates: list[TextureProjectionCandidate],
+) -> dict:
+    chart_right = chart.x + chart.width
+    chart_bottom = chart.y + chart.height
+    width = chart.width
+    height = chart.height
+    visited = bytearray(width * height)
+    neighbor_offsets = ((-1, 0), (1, 0), (0, -1), (0, 1))
+    secondary_filled_count = 0
+    region_count = 0
+    accepted_region_count = 0
+    rejected_region_count = 0
+    contribution_counts: dict[str, int] = {}
+    secondary_keyframe_ids: list[str] = []
+
+    def choose_candidate(component: array) -> TextureProjectionCandidate | None:
+        sample_skip = max(1, len(component) // TEXTURE_PLANAR_CHART_SECONDARY_MAX_SAMPLE_POINTS)
+        sampled_indices = range(0, len(component), sample_skip)
+        sample_points = [component[index] for index in sampled_indices]
+        if not sample_points:
+            return None
+
+        best_candidate: TextureProjectionCandidate | None = None
+        best_coverage = 0.0
+        for candidate in secondary_candidates[:TEXTURE_PLANAR_CHART_DIRECT_MAX_CANDIDATES]:
+            accepted = 0
+            for packed_index in sample_points:
+                local_x = int(packed_index % width)
+                local_y = int(packed_index // width)
+                world_point = planar_chart_point(chart, chart.x + local_x + 0.5, chart.y + local_y + 0.5)
+                blend = direct_projected_texture_sample(world_point, [candidate])
+                if blend.accepted_sample_count > 0:
+                    accepted += 1
+
+            coverage = accepted / len(sample_points)
+            if coverage > best_coverage:
+                best_coverage = coverage
+                best_candidate = candidate
+
+        if best_coverage < TEXTURE_PLANAR_CHART_SECONDARY_MIN_COVERAGE_RATIO:
+            return None
+        return best_candidate
+
+    for local_y in range(height):
+        for local_x in range(width):
+            start_index = local_y * width + local_x
+            if visited[start_index] != 0:
+                continue
+
+            x = chart.x + local_x
+            y = chart.y + local_y
+            if mask_pixels[x, y] != 0:
+                visited[start_index] = 1
+                continue
+
+            queue: deque[int] = deque([start_index])
+            visited[start_index] = 1
+            component = array("I")
+            while queue:
+                index = queue.popleft()
+                component.append(index)
+                component_local_x = index % width
+                component_local_y = index // width
+                for offset_x, offset_y in neighbor_offsets:
+                    neighbor_local_x = component_local_x + offset_x
+                    neighbor_local_y = component_local_y + offset_y
+                    if not (0 <= neighbor_local_x < width and 0 <= neighbor_local_y < height):
+                        continue
+
+                    neighbor_index = neighbor_local_y * width + neighbor_local_x
+                    if visited[neighbor_index] != 0:
+                        continue
+
+                    neighbor_x = chart.x + neighbor_local_x
+                    neighbor_y = chart.y + neighbor_local_y
+                    if mask_pixels[neighbor_x, neighbor_y] != 0:
+                        visited[neighbor_index] = 1
+                        continue
+
+                    visited[neighbor_index] = 1
+                    queue.append(neighbor_index)
+
+            if len(component) < TEXTURE_PLANAR_CHART_SECONDARY_MIN_REGION_PIXELS:
+                continue
+
+            region_count += 1
+            if region_count > TEXTURE_PLANAR_CHART_SECONDARY_MAX_REGIONS:
+                rejected_region_count += 1
+                continue
+
+            candidate = choose_candidate(component)
+            if candidate is None:
+                rejected_region_count += 1
+                continue
+
+            region_filled_count = 0
+            for packed_index in component:
+                local_x = int(packed_index % width)
+                local_y = int(packed_index // width)
+                x = chart.x + local_x
+                y = chart.y + local_y
+                if mask_pixels[x, y] != 0:
+                    continue
+
+                world_point = planar_chart_point(chart, x + 0.5, y + 0.5)
+                blend = direct_projected_texture_sample(world_point, [candidate])
+                if blend.accepted_sample_count <= 0:
+                    continue
+
+                texture_pixels[x, y] = blend.color
+                mask_pixels[x, y] = 255
+                region_filled_count += 1
+
+            if region_filled_count > 0:
+                accepted_region_count += 1
+                secondary_filled_count += region_filled_count
+                contribution_counts[candidate.keyframe_debug_id] = (
+                    contribution_counts.get(candidate.keyframe_debug_id, 0) + region_filled_count
+                )
+                if candidate.keyframe_debug_id not in secondary_keyframe_ids:
+                    secondary_keyframe_ids.append(candidate.keyframe_debug_id)
+            else:
+                rejected_region_count += 1
+
+    return {
+        "secondaryFilledPixelCount": secondary_filled_count,
+        "secondaryRegionCount": region_count,
+        "secondaryAcceptedRegionCount": accepted_region_count,
+        "secondaryRejectedRegionCount": rejected_region_count,
+        "secondaryKeyframeIds": secondary_keyframe_ids,
+        "keyframeContributionCounts": contribution_counts,
+    }
 
 
 def fill_planar_chart_holes_from_neighbors(
