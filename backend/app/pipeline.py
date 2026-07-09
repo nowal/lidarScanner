@@ -688,17 +688,27 @@ class TexturedMeshStage:
 
     async def run(self, job_dir: Path, report: StageReporter, is_cancelled: CancellationCheck) -> None:
         profile = read_processing_profile(job_dir / "work")
+        if profile.single_frame_diagnostic:
+            return
+
         await report(self.name, 72, f"Projecting keyframes into a texture atlas for {profile.name}")
         keyframes = json.loads((job_dir / "work" / "keyframe_manifest.json").read_text(encoding="utf-8"))
         depth_manifest_path = job_dir / "work" / "depth_frame_manifest.json"
         depth_frames = json.loads(depth_manifest_path.read_text(encoding="utf-8")) if depth_manifest_path.exists() else []
         mesh = read_fused_mesh_json(job_dir / "work" / "fused_mesh.json")
+        if not mesh.faces or not keyframes:
+            await report(self.name, 72, "Texture projection skipped because mesh faces or keyframes are missing")
+            return
+
         loaded_keyframes = load_projection_keyframes(
             keyframes,
             job_dir / "work" / "keyframes",
             depth_frames=depth_frames,
             work_dir=job_dir / "work",
         )
+        if not loaded_keyframes:
+            await report(self.name, 72, "Texture projection skipped because no keyframes decoded successfully")
+            return
 
         if profile.write_vertex_colored_debug:
             colored_stats = await write_vertex_colored_ply(
@@ -1060,7 +1070,7 @@ DEFAULT_PIPELINE: list[PipelineStage] = [
     DepthFrameDecodeStage(),
     RGBDSingleFrameDiagnosticStage(),
     RGBDGeometryFusionStage(),
-    # TexturedMeshStage(),  # Temporarily disabled for raw relocalization/update-scan testing.
+    TexturedMeshStage(),
     ExportStage(),
 ]
 

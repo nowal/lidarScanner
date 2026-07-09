@@ -592,9 +592,9 @@ async def test_raw_mesh_artifacts_are_exported_when_texturing_is_disabled():
 
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
-        assert status["artifacts"]["previewMeshUrl"].endswith("/fused_mesh.obj")
-        assert status["artifacts"]["texturedObjUrl"] is None
-        assert status["artifacts"]["texturePngUrl"] is None
+        assert status["artifacts"]["previewMeshUrl"].endswith("/colored_mesh.ply")
+        assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
+        assert status["artifacts"]["texturePngUrl"].endswith("/textured_mesh_texture.png")
         assert status["artifacts"]["usdzUrl"] is None
 
         obj_resp = await client.get(f"/api/v1/jobs/{job_id}/result/fused_mesh.obj", headers=headers)
@@ -603,9 +603,9 @@ async def test_raw_mesh_artifacts_are_exported_when_texturing_is_disabled():
         assert "f " in obj_resp.text
 
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
-        assert manifest["preferredPhotorealArtifact"] == "vertex_colored_ply"
-        assert manifest["artifacts"]["texturedObj"]["stats"]["available"] is False
-        assert manifest["artifacts"]["textureDebug"]["available"] is False
+        assert manifest["preferredPhotorealArtifact"] == "textured_obj"
+        assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
+        assert manifest["artifacts"]["textureDebug"]["available"] is True
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["invalidFaceCount"] == 1
 
 
@@ -1596,7 +1596,7 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
 
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
-        assert status["artifacts"]["texturedObjUrl"] is None
+        assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
         assert status["artifacts"]["vertexColoredPlyUrl"] is None
         assert status["artifacts"]["previewMeshUrl"].endswith("/rgbd_fused_mesh.obj")
         assert status["artifacts"]["textureDebugPreviewUrl"] is None
@@ -1624,12 +1624,12 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
         assert manifest["processingProfile"]["name"] == "fast_onboarding"
         assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is True
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
-        assert manifest["artifacts"]["texturedObj"]["stats"]["available"] is False
+        assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
 
         timings = (await client.get(f"/api/v1/jobs/{job_id}/result/stage_timings.json", headers=headers)).json()
         assert timings["jobId"] == job_id
-        assert not any(item["stageClass"] == "TexturedMeshStage" for item in timings["timings"])
+        assert any(item["stageClass"] == "TexturedMeshStage" for item in timings["timings"])
 
 
 @pytest.mark.asyncio
