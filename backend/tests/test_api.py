@@ -496,9 +496,10 @@ async def test_job_lifecycle():
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
         assert status["artifacts"]["manifestUrl"] == f"/api/v1/jobs/{job_id}/result/manifest.json"
-        assert status["artifacts"]["vertexColoredPlyUrl"] == f"/api/v1/jobs/{job_id}/result/colored_mesh.ply"
-        assert status["artifacts"]["texturedObjUrl"] == f"/api/v1/jobs/{job_id}/result/textured_mesh.obj"
-        assert status["artifacts"]["textureDebugJsonUrl"] == f"/api/v1/jobs/{job_id}/result/texture_debug.json"
+        assert status["artifacts"]["previewMeshUrl"] == f"/api/v1/jobs/{job_id}/result/fused_mesh.obj"
+        assert status["artifacts"]["vertexColoredPlyUrl"] is None
+        assert status["artifacts"]["texturedObjUrl"] is None
+        assert status["artifacts"]["textureDebugJsonUrl"] is None
 
         result_resp = await client.get(f"/api/v1/jobs/{job_id}/result", headers=headers)
         assert result_resp.status_code == 200
@@ -507,8 +508,11 @@ async def test_job_lifecycle():
         manifest = manifest_resp.json()
         assert manifest["artifacts"]["rawFusedMesh"]["path"] == "fused_mesh.obj"
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["path"] == "colored_mesh.ply"
+        assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
         assert manifest["artifacts"]["texturedObj"]["objPath"] == "textured_mesh.obj"
+        assert manifest["artifacts"]["texturedObj"]["stats"]["available"] is False
         assert manifest["artifacts"]["textureDebug"]["path"] == "texture_debug.json"
+        assert manifest["artifacts"]["textureDebug"]["available"] is False
         assert manifest["coordinateTransforms"]["convention"] == "column_major_4x4"
         assert manifest["coordinateTransforms"]["modelFromARKitWorld"] == [
             1.0, 0.0, 0.0, 0.0,
@@ -519,7 +523,7 @@ async def test_job_lifecycle():
 
 
 @pytest.mark.asyncio
-async def test_textured_obj_artifacts_are_exported():
+async def test_raw_mesh_artifacts_are_exported_when_texturing_is_disabled():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = auth_headers()
@@ -588,48 +592,20 @@ async def test_textured_obj_artifacts_are_exported():
 
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
-        assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
-        assert status["artifacts"]["texturePngUrl"].endswith("/textured_mesh_texture.png")
+        assert status["artifacts"]["previewMeshUrl"].endswith("/fused_mesh.obj")
+        assert status["artifacts"]["texturedObjUrl"] is None
+        assert status["artifacts"]["texturePngUrl"] is None
         assert status["artifacts"]["usdzUrl"] is None
 
-        obj_resp = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.obj", headers=headers)
+        obj_resp = await client.get(f"/api/v1/jobs/{job_id}/result/fused_mesh.obj", headers=headers)
         assert obj_resp.status_code == 200
-        assert "mtllib textured_mesh.mtl" in obj_resp.text
-        assert "vt " in obj_resp.text
-
-        mtl_resp = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.mtl", headers=headers)
-        assert mtl_resp.status_code == 200
-        assert "map_Kd textured_mesh_texture.png" in mtl_resp.text
-
-        png_resp = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh_texture.png", headers=headers)
-        assert png_resp.status_code == 200
-        assert png_resp.headers["content-type"].startswith("image/png")
-
-        debug_resp = await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug.json", headers=headers)
-        assert debug_resp.status_code == 200
-        debug = debug_resp.json()
-        assert debug["version"] == "v2"
-        assert debug["objSyntax"]["faceWithUVIndexCount"] == 1
-        assert debug["uv"]["outOfRangeCoordinateCount"] == 0
-        assert debug["textureAtlas"]["fallbackColor"] == list(pipeline.FALLBACK_COLOR)
-        assert debug["textureAtlas"]["tilePadding"] >= 1
-        assert debug["textureAtlas"]["dilatedPixelCount"] > 0
-        assert debug["textureAtlas"]["sampledPixels"]["sampleCount"] > 0
-        assert debug["uvFaceInteriorSamples"]["nonWhiteRatio"] > 0
-        assert debug["colorCorrection"]["enabled"] is True
-        assert "meanSaturation" in debug["uvFaceInteriorSamples"]
-
-        preview_resp = await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug_preview.png", headers=headers)
-        assert preview_resp.status_code == 200
-        assert preview_resp.headers["content-type"].startswith("image/png")
+        assert "v " in obj_resp.text
+        assert "f " in obj_resp.text
 
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
-        assert manifest["preferredPhotorealArtifact"] == "textured_obj"
-        assert manifest["artifacts"]["texturedObj"]["stats"]["texturedFaceCount"] == 1
-        assert manifest["artifacts"]["texturedObj"]["stats"]["uvStrategy"] == "render_mesh_per_face_atlas_padded"
-        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["used"] is False
-        assert manifest["artifacts"]["textureDebug"]["available"] is True
-        assert manifest["artifacts"]["textureDebug"]["stats"]["objSyntax"]["faceWithUVIndexCount"] == 1
+        assert manifest["preferredPhotorealArtifact"] == "vertex_colored_ply"
+        assert manifest["artifacts"]["texturedObj"]["stats"]["available"] is False
+        assert manifest["artifacts"]["textureDebug"]["available"] is False
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["invalidFaceCount"] == 1
 
 
@@ -1389,6 +1365,144 @@ async def test_depth_frames_are_decoded_and_rgbd_fallback_mesh_is_exported(monke
 
 
 @pytest.mark.asyncio
+async def test_rgbd_one_keyframe_diagnostic_exports_alignment_artifacts():
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    rgb_intrinsics = [
+        100, 0, 0,
+        0, 100, 0,
+        50, 50, 1,
+    ]
+    depth_intrinsics = [
+        4, 0, 0,
+        0, 4, 0,
+        2, 2, 1,
+    ]
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        headers = auth_headers()
+        create_resp = await client.post("/api/v1/jobs", headers=headers)
+        assert create_resp.status_code == 200
+        job_id = create_resp.json()["jobId"]
+
+        payload = {
+            "schemaVersion": "v1",
+            "createdAt": "2026-05-18T12:00:00Z",
+            "processingProfile": "rgbd_one_keyframe_diagnostic",
+            "meshAnchors": [],
+            "roomJSONBase64": None,
+            "images": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000301",
+                    "capturedAt": "2026-05-18T12:00:00Z",
+                    "timestamp": 0.0,
+                    "cameraTransform": transform,
+                    "intrinsics": rgb_intrinsics,
+                    "imageResolution": [100, 100],
+                    "jpegBase64": encoded_test_jpeg(),
+                },
+                {
+                    "id": "00000000-0000-0000-0000-000000000302",
+                    "capturedAt": "2026-05-18T12:00:02Z",
+                    "timestamp": 2.0,
+                    "cameraTransform": transform,
+                    "intrinsics": rgb_intrinsics,
+                    "imageResolution": [100, 100],
+                    "jpegBase64": encoded_test_jpeg(),
+                },
+            ],
+            "depthFrames": [
+                {
+                    "id": "00000000-0000-0000-0000-000000000401",
+                    "colorKeyframeId": "00000000-0000-0000-0000-000000000301",
+                    "capturedAt": "2026-05-18T12:00:00Z",
+                    "timestamp": 0.0,
+                    "cameraTransform": transform,
+                    "intrinsics": depth_intrinsics,
+                    "depthResolution": [4, 4],
+                    "depthFormat": "float32_little_endian_meters",
+                    "depthBase64": encoded_depth_values([0.0] * 16),
+                    "confidenceFormat": "uint8_arkit_confidence",
+                    "confidenceBase64": base64.b64encode(bytes([0] * 16)).decode("ascii"),
+                    "metersPerUnit": 1,
+                },
+                {
+                    "id": "00000000-0000-0000-0000-000000000402",
+                    "colorKeyframeId": "00000000-0000-0000-0000-000000000302",
+                    "capturedAt": "2026-05-18T12:00:02Z",
+                    "timestamp": 2.0,
+                    "cameraTransform": transform,
+                    "intrinsics": depth_intrinsics,
+                    "depthResolution": [4, 4],
+                    "depthFormat": "float32_little_endian_meters",
+                    "depthBase64": encoded_depth_values([1.0] * 16),
+                    "confidenceFormat": "uint8_arkit_confidence",
+                    "confidenceBase64": base64.b64encode(bytes([2] * 16)).decode("ascii"),
+                    "metersPerUnit": 1,
+                },
+            ],
+        }
+        data = json.dumps(payload).encode("utf-8")
+
+        await client.post(
+            f"/api/v1/jobs/{job_id}/upload",
+            headers={**headers, "x-upload-offset": "0", "x-upload-total": str(len(data))},
+            content=data,
+        )
+        await client.post(
+            f"/api/v1/jobs/{job_id}/finalize",
+            headers=headers,
+            json={"totalBytes": len(data), "filename": "scan_payload.json"},
+        )
+
+        status = await wait_for_complete(client, job_id, headers)
+        assert status["status"] == "complete"
+        assert status["artifacts"]["rgbdSingleFrameMeshUrl"].endswith("/rgbd_single_frame_mesh.obj")
+        assert status["artifacts"]["rgbdSingleFrameOverlayUrl"].endswith("/rgbd_single_frame_overlay.png")
+        assert status["artifacts"]["previewMeshUrl"].endswith("/rgbd_single_frame_mesh.obj")
+
+        diagnostics = (await client.get(
+            f"/api/v1/jobs/{job_id}/result/rgbd_single_frame_diagnostics.json",
+            headers=headers,
+        )).json()
+        assert diagnostics["available"] is True
+        assert diagnostics["selectedKeyframeId"] == "00000000-0000-0000-0000-000000000302"
+        assert diagnostics["selectedDepthFrameId"] == "00000000-0000-0000-0000-000000000402"
+        assert diagnostics["depth"]["validDepthRatio"] == 1
+        assert diagnostics["confidence"]["histogram"]["2"] == 16
+        assert diagnostics["artifacts"]["pointsPly"]["pointCount"] == 16
+        assert diagnostics["artifacts"]["meshObj"]["faceCount"] > 0
+        assert diagnostics["reprojection"]["inBoundsRatio"] == pytest.approx(1)
+        assert diagnostics["reprojection"]["medianExpectedPixelError"] == pytest.approx(0)
+
+        overlay = await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_single_frame_overlay.png", headers=headers)
+        assert overlay.status_code == 200
+        assert overlay.headers["content-type"] == "image/png"
+
+        points = await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_single_frame_points.ply", headers=headers)
+        assert points.status_code == 200
+        assert points.text.startswith("ply\n")
+
+        mesh = await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_single_frame_mesh.obj", headers=headers)
+        assert mesh.status_code == 200
+        assert "o rgbd_single_frame_mesh" in mesh.text
+
+        manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
+        assert manifest["processingProfile"]["name"] == "rgbd_one_keyframe_diagnostic"
+        assert manifest["preferredPhotorealArtifact"] == "rgbd_single_frame_mesh"
+        assert manifest["artifacts"]["rgbdSingleFrameDiagnostic"]["available"] is True
+
+        rgbd_stats = (await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_fusion_stats.json", headers=headers)).json()
+        assert rgbd_stats["used"] is False
+        assert rgbd_stats["geometrySource"] == "single_frame_rgbd_diagnostic"
+
+
+@pytest.mark.asyncio
 async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyframes():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -1482,7 +1596,7 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
 
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
-        assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
+        assert status["artifacts"]["texturedObjUrl"] is None
         assert status["artifacts"]["vertexColoredPlyUrl"] is None
         assert status["artifacts"]["previewMeshUrl"].endswith("/rgbd_fused_mesh.obj")
         assert status["artifacts"]["textureDebugPreviewUrl"] is None
@@ -1510,17 +1624,12 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
         assert manifest["processingProfile"]["name"] == "fast_onboarding"
         assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is True
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
-        render_target = manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["targetFaceCount"]
-        assert render_target in {
-            pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT,
-            pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
-        }
-        assert render_target < pipeline.TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
+        assert manifest["artifacts"]["texturedObj"]["stats"]["available"] is False
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
 
         timings = (await client.get(f"/api/v1/jobs/{job_id}/result/stage_timings.json", headers=headers)).json()
         assert timings["jobId"] == job_id
-        assert any(item["stageClass"] == "TexturedMeshStage" for item in timings["timings"])
+        assert not any(item["stageClass"] == "TexturedMeshStage" for item in timings["timings"])
 
 
 @pytest.mark.asyncio

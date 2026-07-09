@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Awaitable, Callable, NamedTuple, Protocol
 
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageDraw, ImageEnhance
 
 from .models import JobStage, ScanPayloadEnvelope
 
@@ -294,6 +294,9 @@ RGBD_TSDF_MIN_COMPONENT_AREA_M2 = 0.015
 RGBD_DEPTH_MESH_MAX_FRAMES = 36
 RGBD_DEPTH_MESH_TARGET_SAMPLES_PER_FRAME = 16_384
 RGBD_DEPTH_MESH_VERTEX_QUANTIZATION = 0.006
+RGBD_DIAGNOSTIC_MAX_POINT_SAMPLES = 180_000
+RGBD_DIAGNOSTIC_OVERLAY_MAX_SAMPLES = 16_000
+RGBD_DIAGNOSTIC_MESH_TARGET_SAMPLES = 40_000
 
 
 @dataclass(frozen=True)
@@ -310,6 +313,7 @@ class ProcessingProfile:
     planar_chart_raster_stride: int
     planar_chart_projection_mode: str = "blend"
     fallback_texture_face_limit: int | None = None
+    single_frame_diagnostic: bool = False
 
 
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
@@ -341,6 +345,21 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         planar_chart_projection_mode="blend",
         fallback_texture_face_limit=None,
     ),
+    "rgbd_one_keyframe_diagnostic": ProcessingProfile(
+        name="rgbd_one_keyframe_diagnostic",
+        max_keyframes=None,
+        max_depth_frames=None,
+        max_rgbd_frames=1,
+        use_rgbd_geometry=False,
+        write_vertex_colored_debug=False,
+        write_texture_debug_preview=False,
+        texture_render_target_faces=FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT,
+        texture_tsdf_render_target_faces=FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
+        planar_chart_raster_stride=2,
+        planar_chart_projection_mode="direct",
+        fallback_texture_face_limit=None,
+        single_frame_diagnostic=True,
+    ),
 }
 
 DEFAULT_PROCESSING_PROFILE = os.getenv("LIDARAI_DEFAULT_PROCESSING_PROFILE", "full_quality")
@@ -363,6 +382,8 @@ class ValidationStage:
             "schemaVersion": payload.schemaVersion,
             "createdAt": payload.createdAt.isoformat(),
             "processingProfile": processing_profile_stats(profile),
+            "scanPurpose": payload.scanPurpose,
+            "alignmentContext": payload.alignmentContext,
             "clientCaptureSelection": payload.captureSelection,
             "meshAnchorCount": mesh_count,
             "keyframeCount": keyframe_count,
@@ -540,6 +561,33 @@ class DepthFrameDecodeStage:
         )
 
 
+class RGBDSingleFrameDiagnosticStage:
+    name = JobStage.texturing
+
+    async def run(self, job_dir: Path, report: StageReporter, is_cancelled: CancellationCheck) -> None:
+        profile = read_processing_profile(job_dir / "work")
+        if not profile.single_frame_diagnostic:
+            return
+
+        await report(self.name, 71, "Writing one-keyframe RGB-D diagnostic artifacts")
+        keyframes = json.loads((job_dir / "work" / "keyframe_manifest.json").read_text(encoding="utf-8"))
+        depth_frames = json.loads((job_dir / "work" / "depth_frame_manifest.json").read_text(encoding="utf-8"))
+        stats = write_rgbd_single_frame_artifacts(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            work_dir=job_dir / "work",
+        )
+        if is_cancelled():
+            raise asyncio.CancelledError
+
+        message = (
+            f"RGB-D diagnostic selected {stats.get('selectedDepthFrameId')}"
+            if stats.get("available")
+            else f"RGB-D diagnostic unavailable: {', '.join(stats.get('warnings') or ['no paired frame'])}"
+        )
+        await report(self.name, 74, message)
+
+
 class RGBDGeometryFusionStage:
     name = JobStage.meshing
 
@@ -551,6 +599,19 @@ class RGBDGeometryFusionStage:
         stats_path = job_dir / "work" / "rgbd_fusion_stats.json"
 
         arkit_mesh = read_fused_mesh_json(job_dir / "work" / "arkit_fused_mesh.json")
+        if profile.single_frame_diagnostic:
+            stats_path.write_text(json.dumps({
+                "available": bool(depth_frames),
+                "used": False,
+                "reason": "Full multi-frame RGB-D fusion skipped by rgbd_one_keyframe_diagnostic profile.",
+                "depthFrameCount": len(depth_frames),
+                "keyframeCount": len(keyframes),
+                "geometrySource": "single_frame_rgbd_diagnostic",
+                "profile": processing_profile_stats(profile),
+            }, indent=2), encoding="utf-8")
+            await report(self.name, 76, "Full RGB-D fusion skipped for one-keyframe diagnostic")
+            return
+
         if not profile.use_rgbd_geometry and arkit_mesh.faces:
             stats_path.write_text(json.dumps({
                 "available": bool(depth_frames),
@@ -750,7 +811,28 @@ class ExportStage:
         summary = json.loads((work_dir / "payload_summary.json").read_text(encoding="utf-8"))
         mesh_stats = json.loads((work_dir / "mesh_stats.json").read_text(encoding="utf-8"))
         keyframes = json.loads((work_dir / "keyframe_manifest.json").read_text(encoding="utf-8"))
-        texture_manifest = json.loads((work_dir / "texture_manifest.json").read_text(encoding="utf-8"))
+        texture_manifest = json.loads((work_dir / "texture_manifest.json").read_text(encoding="utf-8")) if (work_dir / "texture_manifest.json").exists() else {
+            "debugVertexColorPreview": {
+                "available": False,
+                "reason": "TexturedMeshStage disabled for raw relocalization testing.",
+            },
+            "texturedMesh": {
+                "available": False,
+                "reason": "TexturedMeshStage disabled for raw relocalization testing.",
+            },
+            "textureDebug": {
+                "previewPath": None,
+                "stats": {},
+            },
+            "usdz": {
+                "available": False,
+                "reason": "TexturedMeshStage disabled for raw relocalization testing.",
+            },
+            "glb": {
+                "available": False,
+                "reason": "TexturedMeshStage disabled for raw relocalization testing.",
+            },
+        }
         processing_profile = json.loads((work_dir / "processing_profile.json").read_text(encoding="utf-8")) if (work_dir / "processing_profile.json").exists() else {
             "name": "full_quality",
         }
@@ -761,6 +843,12 @@ class ExportStage:
             "fused_mesh.obj",
             "arkit_fused_mesh.obj",
             "rgbd_fused_mesh.obj",
+            "rgbd_single_frame_points.ply",
+            "rgbd_single_frame_mesh.obj",
+            "rgbd_single_frame_overlay.png",
+            "rgbd_single_frame_depth.png",
+            "rgbd_single_frame_confidence.png",
+            "rgbd_single_frame_diagnostics.json",
             "colored_mesh.ply",
             "textured_mesh.obj",
             "textured_mesh.mtl",
@@ -786,7 +874,16 @@ class ExportStage:
             "used": False,
             "reason": "RGBD fusion stage did not run.",
         }
-        preferred_photoreal = "textured_obj" if (result_dir / "textured_mesh.obj").exists() else "vertex_colored_ply"
+        rgbd_diagnostic = json.loads((work_dir / "rgbd_single_frame_diagnostics.json").read_text(encoding="utf-8")) if (work_dir / "rgbd_single_frame_diagnostics.json").exists() else {
+            "available": False,
+            "reason": "RGB-D single-frame diagnostic did not run.",
+        }
+        if (result_dir / "textured_mesh.obj").exists():
+            preferred_photoreal = "textured_obj"
+        elif (result_dir / "rgbd_single_frame_mesh.obj").exists():
+            preferred_photoreal = "rgbd_single_frame_mesh"
+        else:
+            preferred_photoreal = "vertex_colored_ply"
         coordinate_transforms = {
             "convention": "column_major_4x4",
             "sourceCoordinateSpace": "arkit_world",
@@ -836,6 +933,18 @@ class ExportStage:
                     "stats": rgbd_stats,
                     "available": (result_dir / "rgbd_fused_mesh.obj").exists(),
                 },
+                "rgbdSingleFrameDiagnostic": {
+                    "role": "single_frame_rgbd_alignment_diagnostic",
+                    "format": "mixed",
+                    "pointsPath": "rgbd_single_frame_points.ply",
+                    "meshPath": "rgbd_single_frame_mesh.obj",
+                    "overlayPath": "rgbd_single_frame_overlay.png",
+                    "depthPath": "rgbd_single_frame_depth.png",
+                    "confidencePath": "rgbd_single_frame_confidence.png",
+                    "diagnosticsPath": "rgbd_single_frame_diagnostics.json",
+                    "available": bool(rgbd_diagnostic.get("available")),
+                    "stats": rgbd_diagnostic,
+                },
                 "vertexColoredPlyDebugPreview": {
                     "role": "vertex_colored_debug_preview",
                     "format": "ply",
@@ -883,6 +992,12 @@ class ExportStage:
                 "fused_mesh.obj",
                 "arkit_fused_mesh.obj",
                 "rgbd_fused_mesh.obj",
+                "rgbd_single_frame_points.ply",
+                "rgbd_single_frame_mesh.obj",
+                "rgbd_single_frame_overlay.png",
+                "rgbd_single_frame_depth.png",
+                "rgbd_single_frame_confidence.png",
+                "rgbd_single_frame_diagnostics.json",
                 "colored_mesh.ply",
                 "textured_mesh.obj",
                 "textured_mesh.mtl",
@@ -906,6 +1021,7 @@ class ExportStage:
                 "rawFusedMesh": artifact_manifest["artifacts"]["rawFusedMesh"],
                 "arkitFusedMeshDebug": artifact_manifest["artifacts"]["arkitFusedMeshDebug"],
                 "rgbdFusedMesh": artifact_manifest["artifacts"]["rgbdFusedMesh"],
+                "rgbdSingleFrameDiagnostic": artifact_manifest["artifacts"]["rgbdSingleFrameDiagnostic"],
             },
             "debugPreview": artifact_manifest["artifacts"]["vertexColoredPlyDebugPreview"],
             "photoreal": {
@@ -919,7 +1035,17 @@ class ExportStage:
             "captureSelection": artifact_manifest["captureSelection"],
             "coordinateTransforms": coordinate_transforms,
             "keyframes": keyframes,
-            "preferredPreview": "textured_mesh.obj" if preferred_photoreal == "textured_obj" else "colored_mesh.ply",
+            "preferredPreview": (
+                "textured_mesh.obj"
+                if preferred_photoreal == "textured_obj"
+                else "rgbd_single_frame_mesh.obj"
+                if preferred_photoreal == "rgbd_single_frame_mesh"
+                else "rgbd_fused_mesh.obj"
+                if preferred_photoreal == "rgbd_fused_mesh"
+                else "colored_mesh.ply"
+                if preferred_photoreal == "vertex_colored_ply"
+                else "fused_mesh.obj"
+            ),
         }, indent=2), encoding="utf-8")
         (result_dir / "manifest.json").write_text(json.dumps(artifact_manifest, indent=2), encoding="utf-8")
         if is_cancelled():
@@ -932,8 +1058,9 @@ DEFAULT_PIPELINE: list[PipelineStage] = [
     GeometryFusionStage(),
     KeyframeDecodeStage(),
     DepthFrameDecodeStage(),
+    RGBDSingleFrameDiagnosticStage(),
     RGBDGeometryFusionStage(),
-    TexturedMeshStage(),
+    # TexturedMeshStage(),  # Temporarily disabled for raw relocalization/update-scan testing.
     ExportStage(),
 ]
 
@@ -968,6 +1095,805 @@ def pair_rgbd_frames(
     return paired_frames
 
 
+def write_rgbd_single_frame_artifacts(
+    keyframes: list[dict],
+    depth_frames: list[dict],
+    work_dir: Path,
+) -> dict:
+    output_path = work_dir / "rgbd_single_frame_diagnostics.json"
+    warnings: list[str] = []
+    paired_frames = pair_rgbd_frames(keyframes, depth_frames, work_dir)
+    if not paired_frames:
+        stats = unavailable_rgbd_diagnostic_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=0,
+            warnings=["No RGB/depth frame pair could be matched by colorKeyframeId or timestamp."],
+        )
+        output_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    timestamps = [
+        float(frame[1].get("timestamp") or frame[0].get("timestamp") or 0.0)
+        for frame in paired_frames
+    ]
+    scan_midpoint = (min(timestamps) + max(timestamps)) / 2 if timestamps else 0.0
+    scan_span = max(max(timestamps) - min(timestamps), 1e-6) if timestamps else 1.0
+
+    candidates = []
+    for index, pair in enumerate(paired_frames):
+        try:
+            candidates.append(rgbd_diagnostic_candidate_metrics(
+                index=index,
+                pair=pair,
+                work_dir=work_dir,
+                scan_midpoint=scan_midpoint,
+                scan_span=scan_span,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"Skipped RGB-D diagnostic candidate {index + 1}: {exc}")
+
+    if not candidates:
+        stats = unavailable_rgbd_diagnostic_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=len(paired_frames),
+            warnings=warnings or ["No RGB/depth candidate had valid depth bytes, transforms, and intrinsics."],
+        )
+        output_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    selected = candidates[0]
+    keyframe, depth_frame, color_path, depth_path = selected["pair"]
+    width, height = [int(value) for value in depth_frame["depthResolution"]]
+    rgb_image = Image.open(color_path).convert("RGB")
+    depth_values = read_float32_depth_values(depth_path, width, height)
+    confidence_values = read_confidence_values(depth_frame, work_dir, width, height)
+    projection_keyframe = diagnostic_projection_keyframe(keyframe, rgb_image)
+
+    samples = collect_rgbd_diagnostic_samples(
+        keyframe=keyframe,
+        depth_frame=depth_frame,
+        projection_keyframe=projection_keyframe,
+        rgb_image=rgb_image,
+        depth_values=depth_values,
+        confidence_values=confidence_values,
+        max_samples=RGBD_DIAGNOSTIC_MAX_POINT_SAMPLES,
+    )
+    point_stats = write_rgbd_colored_point_cloud_ply(
+        samples["points"],
+        work_dir / "rgbd_single_frame_points.ply",
+    )
+    mesh_stats = write_rgbd_single_frame_mesh_obj(
+        keyframe=keyframe,
+        depth_frame=depth_frame,
+        projection_keyframe=projection_keyframe,
+        rgb_image=rgb_image,
+        depth_values=depth_values,
+        confidence_values=confidence_values,
+        output_path=work_dir / "rgbd_single_frame_mesh.obj",
+    )
+    overlay_stats = write_rgbd_overlay_png(
+        rgb_image=rgb_image,
+        samples=samples["points"],
+        output_path=work_dir / "rgbd_single_frame_overlay.png",
+    )
+    depth_viz_stats = write_depth_visualization_png(
+        depth_values=depth_values,
+        width=width,
+        height=height,
+        output_path=work_dir / "rgbd_single_frame_depth.png",
+    )
+    confidence_viz_stats = write_confidence_visualization_png(
+        confidence_values=confidence_values,
+        width=width,
+        height=height,
+        output_path=work_dir / "rgbd_single_frame_confidence.png",
+    )
+
+    warnings.extend(selected.get("warnings", []))
+    if selected["validDepthRatio"] < 0.05:
+        warnings.append("Selected depth frame has very low valid-depth coverage.")
+    if confidence_values is not None and selected["highConfidenceRatio"] < 0.05:
+        warnings.append("Selected depth frame has very low high-confidence coverage.")
+    if samples["reprojection"]["inBoundsRatio"] < 0.65:
+        warnings.append("Many backprojected depth samples reproject outside the paired RGB image.")
+    if samples["reprojection"].get("medianExpectedPixelError") is not None and samples["reprojection"]["medianExpectedPixelError"] > 2.0:
+        warnings.append("Median depth-to-RGB reprojection error is above two pixels; check intrinsics scaling and image orientation.")
+
+    timestamp_delta = timestamp_delta_seconds(depth_frame, keyframe)
+    stats = {
+        "available": True,
+        "profile": "rgbd_one_keyframe_diagnostic",
+        "strategy": "best_single_rgbd_pair_by_exact_pairing_depth_confidence_sharpness_and_mid_scan_tie_break",
+        "candidateCount": len(candidates),
+        "pairedFrameCount": len(paired_frames),
+        "selectedCandidateRank": 1,
+        "selectedKeyframeId": keyframe.get("id"),
+        "selectedDepthFrameId": depth_frame.get("id"),
+        "selectedColorKeyframeId": depth_frame.get("colorKeyframeId"),
+        "colorKeyframeIdMatched": bool(
+            depth_frame.get("colorKeyframeId")
+            and keyframe.get("id")
+            and str(depth_frame.get("colorKeyframeId")) == str(keyframe.get("id"))
+        ),
+        "timestamps": {
+            "rgbTimestamp": keyframe.get("timestamp"),
+            "depthTimestamp": depth_frame.get("timestamp"),
+            "deltaSeconds": timestamp_delta,
+        },
+        "rgb": {
+            "resolution": [rgb_image.width, rgb_image.height],
+            "declaredResolution": keyframe.get("imageResolution"),
+            "intrinsics": keyframe.get("intrinsics"),
+            "sharpnessScore": selected.get("rgbSharpnessScore"),
+        },
+        "depth": {
+            "resolution": [width, height],
+            "intrinsics": depth_frame.get("intrinsics"),
+            "format": depth_frame.get("depthFormat"),
+            "metersPerUnit": depth_frame.get("metersPerUnit", 1),
+            "validPixelCount": selected["validDepthCount"],
+            "totalPixelCount": selected["totalDepthPixelCount"],
+            "validDepthRatio": selected["validDepthRatio"],
+            "minDepthMeters": selected.get("minDepthMeters"),
+            "medianDepthMeters": selected.get("medianDepthMeters"),
+            "maxDepthMeters": selected.get("maxDepthMeters"),
+        },
+        "confidence": {
+            "available": confidence_values is not None,
+            "format": depth_frame.get("confidenceFormat") if confidence_values is not None else None,
+            "histogram": selected["confidenceHistogram"],
+            "highConfidenceRatio": selected["highConfidenceRatio"],
+        },
+        "artifacts": {
+            "pointsPly": point_stats,
+            "meshObj": mesh_stats,
+            "overlayPng": overlay_stats,
+            "depthPng": depth_viz_stats,
+            "confidencePng": confidence_viz_stats,
+        },
+        "reprojection": samples["reprojection"],
+        "coordinateConvention": {
+            "cameraTransform": "ARKit camera-to-world, column-major 4x4",
+            "cameraForward": "ARKit camera looks down local -Z",
+            "backprojection": "x=(u-cx)*depth/fx, y=(cy-v)*depth/fy, local=(x,y,-depth), world=cameraTransform*local",
+            "projection": "worldToCamera=inverse(cameraTransform), depth=-z, u=fx*x/depth+cx, v=cy-fy*y/depth",
+            "worldCoordinateSpace": "ARKit world meters",
+        },
+        "warnings": dedupe_preserve_order(warnings),
+        "candidateSummary": [
+            {
+                key: candidate[key]
+                for key in [
+                    "keyframeId",
+                    "depthFrameId",
+                    "colorKeyframeIdMatched",
+                    "timestampDeltaSeconds",
+                    "validDepthRatio",
+                    "highConfidenceRatio",
+                    "rgbSharpnessScore",
+                    "middleTieBreakScore",
+                    "score",
+                ]
+            }
+            for candidate in candidates[:8]
+        ],
+    }
+    output_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    return stats
+
+
+def unavailable_rgbd_diagnostic_stats(
+    *,
+    keyframes: list[dict],
+    depth_frames: list[dict],
+    paired_count: int,
+    warnings: list[str],
+) -> dict:
+    return {
+        "available": False,
+        "profile": "rgbd_one_keyframe_diagnostic",
+        "keyframeCount": len(keyframes),
+        "depthFrameCount": len(depth_frames),
+        "pairedFrameCount": paired_count,
+        "artifacts": {
+            "pointsPly": {"path": "rgbd_single_frame_points.ply", "available": False},
+            "meshObj": {"path": "rgbd_single_frame_mesh.obj", "available": False},
+            "overlayPng": {"path": "rgbd_single_frame_overlay.png", "available": False},
+            "depthPng": {"path": "rgbd_single_frame_depth.png", "available": False},
+            "confidencePng": {"path": "rgbd_single_frame_confidence.png", "available": False},
+        },
+        "coordinateConvention": {
+            "cameraTransform": "ARKit camera-to-world, column-major 4x4",
+            "cameraForward": "ARKit camera looks down local -Z",
+        },
+        "warnings": dedupe_preserve_order(warnings),
+    }
+
+
+def rgbd_diagnostic_candidate_metrics(
+    *,
+    index: int,
+    pair: tuple[dict, dict, Path, Path],
+    work_dir: Path,
+    scan_midpoint: float,
+    scan_span: float,
+) -> dict:
+    keyframe, depth_frame, color_path, depth_path = pair
+    resolution = depth_frame.get("depthResolution") or []
+    intrinsics = depth_frame.get("intrinsics") or []
+    transform = depth_frame.get("cameraTransform") or []
+    keyframe_intrinsics = keyframe.get("intrinsics") or []
+    keyframe_transform = keyframe.get("cameraTransform") or []
+    if len(resolution) != 2 or len(intrinsics) != 9 or len(transform) != 16:
+        raise ValueError("depth frame is missing resolution, intrinsics, or camera transform")
+    if len(keyframe_intrinsics) != 9 or len(keyframe_transform) != 16:
+        raise ValueError("keyframe is missing intrinsics or camera transform")
+    width, height = int(resolution[0]), int(resolution[1])
+    if width <= 0 or height <= 0:
+        raise ValueError("depth frame has invalid resolution")
+
+    depth_values = read_float32_depth_values(depth_path, width, height)
+    confidence_values = read_confidence_values(depth_frame, work_dir, width, height)
+    valid_depths = [
+        float(value)
+        for value in depth_values
+        if math.isfinite(float(value)) and 0 < float(value) <= RGBD_DEPTH_TRUNC_METERS
+    ]
+    total_pixels = width * height
+    valid_ratio = len(valid_depths) / total_pixels if total_pixels else 0.0
+    confidence_histogram = confidence_histogram_for_values(confidence_values)
+    high_confidence_ratio = (
+        confidence_histogram.get("2", 0) / total_pixels
+        if confidence_values is not None and total_pixels
+        else 0.0
+    )
+    color_match = bool(
+        depth_frame.get("colorKeyframeId")
+        and keyframe.get("id")
+        and str(depth_frame.get("colorKeyframeId")) == str(keyframe.get("id"))
+    )
+    timestamp = float(depth_frame.get("timestamp") or keyframe.get("timestamp") or 0.0)
+    middle_score = 1.0 - min(abs(timestamp - scan_midpoint) / (scan_span / 2), 1.0)
+    timestamp_delta = timestamp_delta_seconds(depth_frame, keyframe)
+    sharpness = rgb_sharpness_score(color_path)
+    score = (
+        (2.0 if color_match else 0.0)
+        + valid_ratio * 6.0
+        + high_confidence_ratio * 2.5
+        + min(sharpness / 28.0, 1.0) * 0.75
+        + middle_score * 0.35
+        - min(timestamp_delta, 1.0) * 0.5
+    )
+    sorted_depths = sorted(valid_depths)
+    warnings = []
+    warnings.extend(intrinsics_resolution_warnings("rgb", keyframe.get("intrinsics") or [], keyframe.get("imageResolution") or []))
+    warnings.extend(intrinsics_resolution_warnings("depth", intrinsics, [width, height]))
+    return {
+        "index": index,
+        "pair": pair,
+        "keyframeId": keyframe.get("id"),
+        "depthFrameId": depth_frame.get("id"),
+        "colorKeyframeIdMatched": color_match,
+        "timestampDeltaSeconds": timestamp_delta,
+        "validDepthCount": len(valid_depths),
+        "totalDepthPixelCount": total_pixels,
+        "validDepthRatio": valid_ratio,
+        "confidenceHistogram": confidence_histogram,
+        "highConfidenceRatio": high_confidence_ratio,
+        "rgbSharpnessScore": sharpness,
+        "middleTieBreakScore": middle_score,
+        "minDepthMeters": round(sorted_depths[0], 4) if sorted_depths else None,
+        "medianDepthMeters": round(median_sorted(sorted_depths), 4) if sorted_depths else None,
+        "maxDepthMeters": round(sorted_depths[-1], 4) if sorted_depths else None,
+        "score": round(score, 6),
+        "warnings": warnings,
+    }
+
+
+def diagnostic_projection_keyframe(keyframe: dict, image: Image.Image) -> ProjectionKeyframe:
+    transform = keyframe.get("cameraTransform") or []
+    intrinsics = keyframe.get("intrinsics") or []
+    return ProjectionKeyframe(
+        image=image,
+        width=image.width,
+        height=image.height,
+        world_to_camera=invert_rigid_transform(transform),
+        camera_position=(float(transform[12]), float(transform[13]), float(transform[14])),
+        intrinsics=intrinsics,
+        pixels=image.load(),
+        id=str(keyframe.get("id")) if keyframe.get("id") else None,
+        path=str(keyframe.get("path")) if keyframe.get("path") else None,
+    )
+
+
+def collect_rgbd_diagnostic_samples(
+    *,
+    keyframe: dict,
+    depth_frame: dict,
+    projection_keyframe: ProjectionKeyframe,
+    rgb_image: Image.Image,
+    depth_values: array,
+    confidence_values: bytes | None,
+    max_samples: int,
+) -> dict:
+    width, height = [int(value) for value in depth_frame["depthResolution"]]
+    intrinsics = depth_frame.get("intrinsics") or []
+    transform = depth_frame.get("cameraTransform") or []
+    total_pixels = width * height
+    sample_step = max(1, int(math.ceil(math.sqrt(total_pixels / max(max_samples, 1)))))
+    rgb_pixels = rgb_image.load()
+    points = []
+    valid_sample_count = 0
+    in_bounds_count = 0
+    confidence_rejected_count = 0
+    reprojection_errors = []
+
+    for source_y in range(0, height, sample_step):
+        for source_x in range(0, width, sample_step):
+            source_index = source_y * width + source_x
+            depth = float(depth_values[source_index])
+            if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+                continue
+            confidence = int(confidence_values[source_index]) if confidence_values is not None else None
+            if confidence == 0:
+                confidence_rejected_count += 1
+                continue
+
+            valid_sample_count += 1
+            world = backproject_depth_sample_to_world(
+                source_x=source_x,
+                source_y=source_y,
+                depth=depth,
+                intrinsics=intrinsics,
+                camera_transform=transform,
+            )
+            projection = project_world_point(world, projection_keyframe)
+            expected = expected_rgb_pixel_for_depth_sample(source_x, source_y, depth_frame, keyframe)
+            if projection is None:
+                continue
+
+            u, v, projected_depth = projection
+            in_bounds_count += 1
+            if expected is not None:
+                error = math.hypot(u - expected[0], v - expected[1])
+                reprojection_errors.append(error)
+            else:
+                error = None
+
+            color = rgb_pixels[
+                max(0, min(int(round(u)), rgb_image.width - 1)),
+                max(0, min(int(round(v)), rgb_image.height - 1)),
+            ]
+            points.append({
+                "world": world,
+                "color": (int(color[0]), int(color[1]), int(color[2])),
+                "source": (source_x, source_y),
+                "depth": depth,
+                "confidence": confidence,
+                "projection": (u, v, projected_depth),
+                "expectedProjection": expected,
+                "expectedPixelError": error,
+            })
+
+    errors_sorted = sorted(reprojection_errors)
+    return {
+        "points": points,
+        "reprojection": {
+            "sampleStep": sample_step,
+            "validSampleCount": valid_sample_count,
+            "confidenceRejectedSampleCount": confidence_rejected_count,
+            "sampleCount": valid_sample_count + confidence_rejected_count,
+            "inBoundsCount": in_bounds_count,
+            "inBoundsRatio": in_bounds_count / valid_sample_count if valid_sample_count else 0.0,
+            "medianExpectedPixelError": round(median_sorted(errors_sorted), 4) if errors_sorted else None,
+            "p95ExpectedPixelError": round(percentile_sorted(errors_sorted, 0.95), 4) if errors_sorted else None,
+        },
+    }
+
+
+def write_rgbd_colored_point_cloud_ply(samples: list[dict], output_path: Path) -> dict:
+    lines = [
+        "ply",
+        "format ascii 1.0",
+        "comment LidarAI one-keyframe RGB-D diagnostic point cloud",
+        "comment Units are meters in ARKit world space",
+        f"element vertex {len(samples)}",
+        "property float x",
+        "property float y",
+        "property float z",
+        "property uchar red",
+        "property uchar green",
+        "property uchar blue",
+        "end_header",
+    ]
+    for sample in samples:
+        x, y, z = sample["world"]
+        r, g, b = sample["color"]
+        lines.append(f"{x:.6f} {y:.6f} {z:.6f} {r} {g} {b}")
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "path": output_path.name,
+        "format": "ply",
+        "available": output_path.exists(),
+        "pointCount": len(samples),
+    }
+
+
+def write_rgbd_single_frame_mesh_obj(
+    *,
+    keyframe: dict,
+    depth_frame: dict,
+    projection_keyframe: ProjectionKeyframe,
+    rgb_image: Image.Image,
+    depth_values: array,
+    confidence_values: bytes | None,
+    output_path: Path,
+) -> dict:
+    width, height = [int(value) for value in depth_frame["depthResolution"]]
+    intrinsics = depth_frame.get("intrinsics") or []
+    transform = depth_frame.get("cameraTransform") or []
+    total_pixels = width * height
+    sample_step = max(1, int(math.ceil(math.sqrt(total_pixels / RGBD_DIAGNOSTIC_MESH_TARGET_SAMPLES))))
+    x_samples = list(range(0, width, sample_step))
+    y_samples = list(range(0, height, sample_step))
+    rgb_pixels = rgb_image.load()
+    vertices: list[tuple[float, float, float]] = []
+    colors: list[tuple[int, int, int]] = []
+    faces: list[tuple[int, int, int]] = []
+    seen_faces: set[tuple[int, int, int]] = set()
+    rejected_face_count = 0
+    invalid_depth_count = 0
+    out_of_bounds_color_count = 0
+    grid: list[list[int | None]] = []
+    depth_grid: list[list[float]] = []
+
+    for source_y in y_samples:
+        row: list[int | None] = []
+        depth_row: list[float] = []
+        for source_x in x_samples:
+            source_index = source_y * width + source_x
+            depth = float(depth_values[source_index])
+            if confidence_values is not None and confidence_values[source_index] == 0:
+                depth = 0
+            if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+                invalid_depth_count += 1
+                row.append(None)
+                depth_row.append(0)
+                continue
+
+            world = backproject_depth_sample_to_world(
+                source_x=source_x,
+                source_y=source_y,
+                depth=depth,
+                intrinsics=intrinsics,
+                camera_transform=transform,
+            )
+            projection = project_world_point(world, projection_keyframe)
+            if projection is None:
+                out_of_bounds_color_count += 1
+                row.append(None)
+                depth_row.append(0)
+                continue
+
+            u, v, _projected_depth = projection
+            color = rgb_pixels[
+                max(0, min(int(round(u)), rgb_image.width - 1)),
+                max(0, min(int(round(v)), rgb_image.height - 1)),
+            ]
+            row.append(len(vertices))
+            depth_row.append(depth)
+            vertices.append(world)
+            colors.append((int(color[0]), int(color[1]), int(color[2])))
+        grid.append(row)
+        depth_grid.append(depth_row)
+
+    for y in range(len(grid) - 1):
+        for x in range(len(grid[y]) - 1):
+            top_left = grid[y][x]
+            top_right = grid[y][x + 1]
+            bottom_left = grid[y + 1][x]
+            bottom_right = grid[y + 1][x + 1]
+            d_tl = depth_grid[y][x]
+            d_tr = depth_grid[y][x + 1]
+            d_bl = depth_grid[y + 1][x]
+            d_br = depth_grid[y + 1][x + 1]
+            rejected_face_count += add_depth_mesh_face(
+                vertices,
+                faces,
+                seen_faces,
+                (top_left, bottom_left, top_right),
+                (d_tl, d_bl, d_tr),
+            )
+            rejected_face_count += add_depth_mesh_face(
+                vertices,
+                faces,
+                seen_faces,
+                (top_right, bottom_left, bottom_right),
+                (d_tr, d_bl, d_br),
+            )
+
+    lines = [
+        "# LidarAI one-keyframe RGB-D diagnostic mesh",
+        "# Vertex RGB values are written with the common OBJ vertex-color extension",
+        "# Units are meters in ARKit world space",
+        "o rgbd_single_frame_mesh",
+    ]
+    for (x, y, z), (r, g, b) in zip(vertices, colors):
+        lines.append(f"v {x:.6f} {y:.6f} {z:.6f} {r / 255:.6f} {g / 255:.6f} {b / 255:.6f}")
+    for a, b, c in faces:
+        lines.append(f"f {a + 1} {b + 1} {c + 1}")
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "path": output_path.name,
+        "format": "obj",
+        "available": output_path.exists(),
+        "vertexCount": len(vertices),
+        "faceCount": len(faces),
+        "sampleStep": sample_step,
+        "invalidDepthSampleCount": invalid_depth_count,
+        "outOfBoundsColorSampleCount": out_of_bounds_color_count,
+        "rejectedFaceCount": rejected_face_count,
+    }
+
+
+def write_rgbd_overlay_png(
+    *,
+    rgb_image: Image.Image,
+    samples: list[dict],
+    output_path: Path,
+) -> dict:
+    overlay = rgb_image.copy()
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    if not samples:
+        overlay.save(output_path)
+        return {
+            "path": output_path.name,
+            "format": "png",
+            "available": output_path.exists(),
+            "drawnPointCount": 0,
+        }
+
+    depths = sorted(float(sample["depth"]) for sample in samples if math.isfinite(float(sample["depth"])))
+    min_depth = percentile_sorted(depths, 0.05) if depths else 0.0
+    max_depth = percentile_sorted(depths, 0.95) if depths else 1.0
+    sample_step = max(1, math.ceil(len(samples) / RGBD_DIAGNOSTIC_OVERLAY_MAX_SAMPLES))
+    radius = max(1, min(rgb_image.width, rgb_image.height) // 420)
+    drawn = 0
+    for sample in samples[::sample_step]:
+        u, v, _depth = sample["projection"]
+        confidence = sample.get("confidence")
+        color = confidence_overlay_color(confidence) if confidence is not None else depth_overlay_color(sample["depth"], min_depth, max_depth)
+        draw.ellipse(
+            (u - radius, v - radius, u + radius, v + radius),
+            fill=color,
+        )
+        drawn += 1
+    overlay.save(output_path)
+    return {
+        "path": output_path.name,
+        "format": "png",
+        "available": output_path.exists(),
+        "drawnPointCount": drawn,
+        "sourcePointCount": len(samples),
+        "overlaySampleStep": sample_step,
+        "colorMode": "confidence" if any(sample.get("confidence") is not None for sample in samples) else "depth",
+    }
+
+
+def write_depth_visualization_png(
+    *,
+    depth_values: array,
+    width: int,
+    height: int,
+    output_path: Path,
+) -> dict:
+    valid_depths = sorted(
+        float(value)
+        for value in depth_values
+        if math.isfinite(float(value)) and 0 < float(value) <= RGBD_DEPTH_TRUNC_METERS
+    )
+    if valid_depths:
+        min_depth = percentile_sorted(valid_depths, 0.05)
+        max_depth = percentile_sorted(valid_depths, 0.95)
+    else:
+        min_depth = 0.0
+        max_depth = 1.0
+    image = Image.new("RGB", (width, height), (0, 0, 0))
+    pixels = image.load()
+    for y in range(height):
+        for x in range(width):
+            depth = float(depth_values[y * width + x])
+            if math.isfinite(depth) and 0 < depth <= RGBD_DEPTH_TRUNC_METERS:
+                pixels[x, y] = depth_rgb(depth, min_depth, max_depth)
+    image.save(output_path)
+    return {
+        "path": output_path.name,
+        "format": "png",
+        "available": output_path.exists(),
+        "minDepthMeters": round(valid_depths[0], 4) if valid_depths else None,
+        "maxDepthMeters": round(valid_depths[-1], 4) if valid_depths else None,
+        "normalization": "5th_to_95th_percentile_valid_depth",
+    }
+
+
+def write_confidence_visualization_png(
+    *,
+    confidence_values: bytes | None,
+    width: int,
+    height: int,
+    output_path: Path,
+) -> dict:
+    if confidence_values is None:
+        return {
+            "path": output_path.name,
+            "format": "png",
+            "available": False,
+            "reason": "No ARKit confidence map was uploaded for the selected depth frame.",
+        }
+
+    image = Image.new("RGB", (width, height), (0, 0, 0))
+    pixels = image.load()
+    for y in range(height):
+        for x in range(width):
+            confidence = int(confidence_values[y * width + x])
+            if confidence <= 0:
+                pixels[x, y] = (196, 52, 58)
+            elif confidence == 1:
+                pixels[x, y] = (238, 190, 72)
+            else:
+                pixels[x, y] = (74, 171, 102)
+    image.save(output_path)
+    return {
+        "path": output_path.name,
+        "format": "png",
+        "available": output_path.exists(),
+        "legend": {"0": "low/red", "1": "medium/yellow", "2": "high/green"},
+    }
+
+
+def expected_rgb_pixel_for_depth_sample(
+    source_x: int,
+    source_y: int,
+    depth_frame: dict,
+    keyframe: dict,
+) -> tuple[float, float] | None:
+    depth_intrinsics = depth_frame.get("intrinsics") or []
+    rgb_intrinsics = keyframe.get("intrinsics") or []
+    if len(depth_intrinsics) != 9 or len(rgb_intrinsics) != 9:
+        return None
+    depth_fx = float(depth_intrinsics[0])
+    depth_fy = float(depth_intrinsics[4])
+    if abs(depth_fx) < 1e-8 or abs(depth_fy) < 1e-8:
+        return None
+    ray_x = (source_x - float(depth_intrinsics[6])) / depth_fx
+    ray_y = (float(depth_intrinsics[7]) - source_y) / depth_fy
+    return (
+        float(rgb_intrinsics[0]) * ray_x + float(rgb_intrinsics[6]),
+        float(rgb_intrinsics[7]) - float(rgb_intrinsics[4]) * ray_y,
+    )
+
+
+def rgb_sharpness_score(image_path: Path) -> float:
+    image = Image.open(image_path).convert("L")
+    image.thumbnail((320, 320), Image.Resampling.BILINEAR)
+    width, height = image.size
+    if width < 2 or height < 2:
+        return 0.0
+    pixels = image.load()
+    total = 0.0
+    count = 0
+    for y in range(0, height - 1, 2):
+        for x in range(0, width - 1, 2):
+            center = int(pixels[x, y])
+            total += abs(center - int(pixels[x + 1, y]))
+            total += abs(center - int(pixels[x, y + 1]))
+            count += 2
+    return round(total / count if count else 0.0, 4)
+
+
+def confidence_histogram_for_values(confidence_values: bytes | None) -> dict[str, int]:
+    histogram = {"0": 0, "1": 0, "2": 0, "other": 0}
+    if confidence_values is None:
+        return histogram
+    for value in confidence_values:
+        key = str(int(value))
+        if key in histogram:
+            histogram[key] += 1
+        else:
+            histogram["other"] += 1
+    return histogram
+
+
+def timestamp_delta_seconds(depth_frame: dict, keyframe: dict) -> float:
+    try:
+        return abs(float(depth_frame.get("timestamp")) - float(keyframe.get("timestamp")))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def intrinsics_resolution_warnings(kind: str, intrinsics: list, resolution: list) -> list[str]:
+    if len(intrinsics) != 9:
+        return [f"{kind} intrinsics are missing or not a 3x3 matrix."]
+    if len(resolution) != 2:
+        return [f"{kind} resolution is missing."]
+    width = float(resolution[0])
+    height = float(resolution[1])
+    fx = float(intrinsics[0])
+    fy = float(intrinsics[4])
+    cx = float(intrinsics[6])
+    cy = float(intrinsics[7])
+    warnings = []
+    if fx <= 0 or fy <= 0:
+        warnings.append(f"{kind} intrinsics have non-positive focal length.")
+    if width > 0 and not (-width * 0.1 <= cx <= width * 1.1):
+        warnings.append(f"{kind} principal point cx={cx:.2f} is outside the expected image width range.")
+    if height > 0 and not (-height * 0.1 <= cy <= height * 1.1):
+        warnings.append(f"{kind} principal point cy={cy:.2f} is outside the expected image height range.")
+    return warnings
+
+
+def confidence_overlay_color(confidence: int | None) -> tuple[int, int, int, int]:
+    if confidence is None:
+        return (70, 180, 255, 210)
+    if confidence <= 0:
+        return (226, 45, 65, 220)
+    if confidence == 1:
+        return (255, 205, 80, 220)
+    return (62, 220, 120, 220)
+
+
+def depth_overlay_color(depth: float, min_depth: float, max_depth: float) -> tuple[int, int, int, int]:
+    r, g, b = depth_rgb(depth, min_depth, max_depth)
+    return (r, g, b, 215)
+
+
+def depth_rgb(depth: float, min_depth: float, max_depth: float) -> tuple[int, int, int]:
+    denominator = max(max_depth - min_depth, 1e-6)
+    t = clamp_float((depth - min_depth) / denominator, 0.0, 1.0)
+    return (
+        clamp_color(45 + 210 * t),
+        clamp_color(220 - 130 * abs(t - 0.45)),
+        clamp_color(255 - 215 * t),
+    )
+
+
+def median_sorted(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    mid = len(values) // 2
+    if len(values) % 2:
+        return float(values[mid])
+    return (float(values[mid - 1]) + float(values[mid])) / 2
+
+
+def percentile_sorted(values: list[float], percentile: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    position = clamp_float(percentile, 0.0, 1.0) * (len(values) - 1)
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return float(values[lower])
+    weight = position - lower
+    return float(values[lower]) * (1 - weight) + float(values[upper]) * weight
+
+
+def dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
 def processing_profile_from_payload(payload: dict | ScanPayloadEnvelope | None) -> ProcessingProfile:
     raw_profile = None
     if isinstance(payload, ScanPayloadEnvelope):
@@ -996,6 +1922,7 @@ def processing_profile_stats(profile: ProcessingProfile) -> dict:
         "planarChartRasterStride": profile.planar_chart_raster_stride,
         "planarChartProjectionMode": profile.planar_chart_projection_mode,
         "fallbackTextureFaceLimit": profile.fallback_texture_face_limit,
+        "singleFrameDiagnostic": profile.single_frame_diagnostic,
     }
 
 

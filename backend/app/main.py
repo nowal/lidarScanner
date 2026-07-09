@@ -204,6 +204,12 @@ async def download_result_file(job_id: str, filename: str) -> Response:
         "fused_mesh.obj",
         "arkit_fused_mesh.obj",
         "rgbd_fused_mesh.obj",
+        "rgbd_single_frame_points.ply",
+        "rgbd_single_frame_mesh.obj",
+        "rgbd_single_frame_overlay.png",
+        "rgbd_single_frame_depth.png",
+        "rgbd_single_frame_confidence.png",
+        "rgbd_single_frame_diagnostics.json",
         "colored_mesh.ply",
         "textured_mesh.obj",
         "textured_mesh.mtl",
@@ -239,6 +245,8 @@ def media_type_for_result(filename: str) -> str:
         return "image/png"
     if filename.endswith(".obj"):
         return "model/obj"
+    if filename.endswith(".ply"):
+        return "model/ply"
     if filename.endswith(".mtl"):
         return "text/plain"
     if filename.endswith(".usdz"):

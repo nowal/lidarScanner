@@ -58,6 +58,12 @@ class ArtifactLinks(BaseModel):
     rawFusedMeshUrl: Optional[str] = None
     arkitFusedMeshUrl: Optional[str] = None
     rgbdFusedMeshUrl: Optional[str] = None
+    rgbdSingleFramePointsUrl: Optional[str] = None
+    rgbdSingleFrameMeshUrl: Optional[str] = None
+    rgbdSingleFrameOverlayUrl: Optional[str] = None
+    rgbdSingleFrameDepthUrl: Optional[str] = None
+    rgbdSingleFrameConfidenceUrl: Optional[str] = None
+    rgbdSingleFrameDiagnosticsUrl: Optional[str] = None
     vertexColoredPlyUrl: Optional[str] = None
     texturedObjUrl: Optional[str] = None
     texturedMtlUrl: Optional[str] = None
@@ -102,6 +108,8 @@ class ScanPayloadEnvelope(BaseModel):
     schemaVersion: str
     createdAt: datetime
     processingProfile: Optional[str] = None
+    scanPurpose: Optional[str] = None
+    alignmentContext: Optional[dict[str, Any]] = None
     captureSelection: Optional[dict[str, Any]] = None
     meshAnchors: list[dict[str, Any]]
     roomJSONBase64: Optional[str] = None
