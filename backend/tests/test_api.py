@@ -1051,6 +1051,106 @@ def test_two_rgbd_pair_selection_prefers_first_pair_plus_timed_supplement():
     assert stats["poseDelta"]["timeDeltaSeconds"] == pytest.approx(2.5)
 
 
+def test_rgbd_hero_patch_ownership_culls_supplemental_faces_when_primary_owns():
+    primary_patch = make_rgbd_hero_patch_test_patch("primary", bytes([2] * 16))
+    secondary_patch = make_rgbd_hero_patch_test_patch("secondary", bytes([2] * 16))
+
+    combined = pipeline.combine_rgbd_hero_patch_meshes([primary_patch, secondary_patch])
+    cull_stats = combined["mesh"].stats["ownershipCull"]
+
+    assert len(combined["mesh"].faces) == 2
+    assert combined["patches"][0]["keptFaceCount"] == 2
+    assert combined["patches"][1]["keptFaceCount"] == 0
+    assert combined["patches"][1]["culledFaceCount"] == 2
+    assert cull_stats["patches"][1]["primaryOwnedDepthAgreementCount"] == 2
+    assert cull_stats["totalCulledFaceCount"] == 2
+
+
+def test_rgbd_hero_patch_ownership_replaces_low_confidence_primary_faces():
+    primary_patch = make_rgbd_hero_patch_test_patch("primary", bytes([0] * 16))
+    secondary_patch = make_rgbd_hero_patch_test_patch("secondary", bytes([2] * 16))
+
+    combined = pipeline.combine_rgbd_hero_patch_meshes([primary_patch, secondary_patch])
+    cull_stats = combined["mesh"].stats["ownershipCull"]
+
+    assert len(combined["mesh"].faces) == 2
+    assert combined["patches"][0]["keptFaceCount"] == 0
+    assert combined["patches"][0]["culledFaceCount"] == 2
+    assert combined["patches"][0]["ownershipCull"]["replacedBySupplementalCount"] == 2
+    assert combined["patches"][1]["keptFaceCount"] == 2
+    assert cull_stats["patches"][1]["primaryMissingOrLowConfidenceCount"] == 2
+
+
+def make_rgbd_hero_patch_test_patch(name: str, confidence_values: bytes) -> dict:
+    vertices = [
+        (-0.2, -0.2, -1.0),
+        (0.2, -0.2, -1.0),
+        (-0.2, 0.2, -1.0),
+        (0.2, 0.2, -1.0),
+    ]
+    faces = [(0, 1, 2), (1, 3, 2)]
+    mesh = pipeline.FusedMesh(vertices=vertices, faces=faces, stats={"geometrySource": "test_patch"})
+    return {
+        "patchIndex": 0 if name == "primary" else 1,
+        "candidate": {
+            "index": 0 if name == "primary" else 1,
+            "sourceTimestamp": 0.0 if name == "primary" else 2.5,
+            "timestampDeltaSeconds": 0.0,
+            "colorKeyframeIdMatched": True,
+            "validDepthRatio": 1.0,
+            "highConfidenceRatio": 1.0,
+            "rgbSharpnessScore": 10.0,
+        },
+        "keyframe": {"id": f"{name}-keyframe"},
+        "depthFrame": {
+            "id": f"{name}-depth",
+            "colorKeyframeId": f"{name}-keyframe",
+            "depthResolution": [4, 4],
+        },
+        "rgbImage": Image.new("RGB", (8, 8), (80, 120, 160)),
+        "ownershipDepthFrame": pipeline.ProjectionDepthFrame(
+            id=f"{name}-depth",
+            color_keyframe_id=f"{name}-keyframe",
+            width=4,
+            height=4,
+            world_to_camera=[
+                1, 0, 0, 0,
+                0, 1, 0, 0,
+                0, 0, 1, 0,
+                0, 0, 0, 1,
+            ],
+            intrinsics=[
+                4, 0, 0,
+                0, 4, 0,
+                2, 2, 1,
+            ],
+            depth_values=array("f", [1.0] * 16),
+            confidence_values=confidence_values,
+        ),
+        "preparedDepthStats": {
+            "finalValidDepthCount": 16,
+            "remainingInvalidDepthCount": 0,
+            "totalPixelCount": 16,
+            "confidenceThreshold": "accept_all_nonzero_depth_values",
+        },
+        "mesh": mesh,
+        "uvCoordinates": [
+            (0.25, 0.75),
+            (0.75, 0.75),
+            (0.25, 0.25),
+            (0.75, 0.25),
+        ],
+        "meshStats": {
+            "vertexCount": len(vertices),
+            "faceCount": len(faces),
+            "acceptedFaceCount": len(faces),
+            "rejectedFaceCount": 0,
+            "invalidDepthSampleCount": 0,
+            "outOfBoundsColorSampleCount": 0,
+        },
+    }
+
+
 def test_planar_chart_local_fill_repairs_small_holes():
     chart = make_test_planar_chart(width=7, height=5)
     texture = Image.new("RGB", (7, 5), pipeline.FALLBACK_COLOR)

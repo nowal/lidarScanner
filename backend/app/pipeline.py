@@ -314,6 +314,10 @@ RGBD_HERO_PATCH_FACE_RELATIVE_TOLERANCE = 0.45
 RGBD_HERO_PATCH_SUPPLEMENT_MIN_TIME_DELTA_SECONDS = 2.0
 RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS = 2.5
 RGBD_HERO_PATCH_SUPPLEMENT_MAX_PREFERRED_TIME_DELTA_SECONDS = 3.25
+RGBD_HERO_PATCH_PRIMARY_OWNER_CONFIDENCE_MIN = 1
+RGBD_HERO_PATCH_PRIMARY_OWNER_ABSOLUTE_TOLERANCE_METERS = 0.12
+RGBD_HERO_PATCH_PRIMARY_OWNER_RELATIVE_TOLERANCE = 0.10
+RGBD_HERO_PATCH_SECONDARY_CLAIM_RADIUS_PIXELS = 1
 
 
 @dataclass(frozen=True)
@@ -1869,6 +1873,27 @@ def write_rgbd_hero_patch_textured_obj(
             "keyframe": keyframe,
             "depthFrame": depth_frame,
             "rgbImage": rgb_image,
+            "ownershipDepthFrame": ProjectionDepthFrame(
+                id=str(depth_frame.get("id")) if depth_frame.get("id") else None,
+                color_keyframe_id=(
+                    str(depth_frame.get("colorKeyframeId"))
+                    if depth_frame.get("colorKeyframeId")
+                    else None
+                ),
+                width=width,
+                height=height,
+                world_to_camera=invert_rigid_transform(depth_frame.get("cameraTransform") or []),
+                intrinsics=depth_frame.get("intrinsics") or [],
+                depth_values=depth_values,
+                confidence_values=confidence_values,
+                timestamp=safe_float(depth_frame.get("timestamp")),
+                path=str(depth_frame.get("path")) if depth_frame.get("path") else None,
+                confidence_path=(
+                    str(depth_frame.get("confidencePath"))
+                    if depth_frame.get("confidencePath")
+                    else None
+                ),
+            ),
             "preparedDepthStats": prepared_depth["stats"],
             "mesh": mesh,
             "uvCoordinates": mesh_result["uvCoordinates"],
@@ -1944,6 +1969,9 @@ def write_rgbd_hero_patch_textured_obj(
                     "keyframeId": patch["keyframe"].get("id"),
                     "depthFrameId": patch["depthFrame"].get("id"),
                     "atlasRect": patch["atlasRect"],
+                    "sourceFaceCount": patch.get("sourceFaceCount"),
+                    "keptFaceCount": patch.get("keptFaceCount"),
+                    "culledFaceCount": patch.get("culledFaceCount"),
                 }
                 for patch in combined["patches"]
             ],
@@ -1957,7 +1985,14 @@ def write_rgbd_hero_patch_textured_obj(
 
 
 def select_rgbd_hero_patch_candidates(candidates: list[dict]) -> tuple[list[dict], dict]:
-    ranked = sorted(
+    ordered = sorted(
+        candidates,
+        key=lambda item: (
+            rgbd_hero_patch_candidate_timestamp(item),
+            int(item.get("index") or 0),
+        ),
+    )
+    ranked_by_quality = sorted(
         candidates,
         key=lambda item: (
             float(item.get("validDepthRatio") or 0),
@@ -1966,23 +2001,23 @@ def select_rgbd_hero_patch_candidates(candidates: list[dict]) -> tuple[list[dict
         ),
         reverse=True,
     )
-    if not ranked:
+    if not ordered:
         return [], {
             "strategy": "no_rgbd_hero_patch_candidates",
             "selectedPatchCount": 0,
         }
 
-    primary = ranked[0]
-    if len(ranked) == 1 or RGBD_HERO_PATCH_MAX_PATCHES <= 1:
+    primary = ordered[0]
+    if len(ordered) == 1 or RGBD_HERO_PATCH_MAX_PATCHES <= 1:
         return [primary], {
-            "strategy": "best_single_rgbd_hero_patch_candidate",
+            "strategy": "first_rgbd_hero_patch_candidate",
             "selectedPatchCount": 1,
             "selectedCandidateIndexes": [primary.get("index")],
             "supplementalSelection": None,
         }
 
     secondary = max(
-        (candidate for candidate in ranked[1:] if candidate is not primary),
+        (candidate for candidate in ranked_by_quality if candidate is not primary),
         key=lambda candidate: supplemental_rgbd_hero_patch_candidate_score(candidate, primary),
         default=None,
     )
@@ -2002,7 +2037,7 @@ def select_rgbd_hero_patch_candidates(candidates: list[dict]) -> tuple[list[dict
         }
 
     return selected, {
-        "strategy": "best_primary_plus_timed_supplemental_rgbd_hero_patch",
+        "strategy": "first_primary_plus_timed_supplemental_rgbd_hero_patch",
         "selectedPatchCount": len(selected),
         "selectedCandidateIndexes": [candidate.get("index") for candidate in selected],
         "selectedKeyframeIds": [candidate.get("keyframeId") for candidate in selected],
@@ -2059,19 +2094,21 @@ def combine_rgbd_hero_patch_meshes(patches: list[dict]) -> dict:
     faces: list[tuple[int, int, int]] = []
     uv_coordinates: list[tuple[float, float]] = []
     patch_summaries = []
+    kept_faces_by_patch, ownership_cull_stats = rgbd_hero_patch_owned_face_sets(patches)
     y_offset = 0
 
     for output_index, patch in enumerate(patches):
         rgb_image = patch["rgbImage"]
         mesh = patch["mesh"]
         source_uv_coordinates = patch["uvCoordinates"]
+        kept_faces = kept_faces_by_patch[output_index]
         texture.paste(rgb_image, (0, y_offset))
 
         vertex_offset = len(vertices)
         vertices.extend(mesh.vertices)
         faces.extend(
             (a + vertex_offset, b + vertex_offset, c + vertex_offset)
-            for a, b, c in mesh.faces
+            for a, b, c in kept_faces
         )
         for source_u, source_obj_v in source_uv_coordinates:
             source_v = 1.0 - source_obj_v
@@ -2091,6 +2128,10 @@ def combine_rgbd_hero_patch_meshes(patches: list[dict]) -> dict:
             **patch,
             "patchIndex": output_index,
             "atlasRect": atlas_rect,
+            "sourceFaceCount": len(mesh.faces),
+            "keptFaceCount": len(kept_faces),
+            "culledFaceCount": max(len(mesh.faces) - len(kept_faces), 0),
+            "ownershipCull": ownership_cull_stats["patches"][output_index],
             "atlasUVBounds": {
                 "minU": 0.0,
                 "maxU": round((rgb_image.width - 1) / max(atlas_width - 1, 1), 6),
@@ -2116,6 +2157,7 @@ def combine_rgbd_hero_patch_meshes(patches: list[dict]) -> dict:
             patch["depthFrame"].get("depthResolution")
             for patch in patch_summaries
         ],
+        "ownershipCull": ownership_cull_stats,
         "targetSamplesPerPatch": RGBD_HERO_PATCH_TARGET_SAMPLES,
         "depthConnectionAbsoluteToleranceMeters": RGBD_HERO_PATCH_FACE_ABSOLUTE_TOLERANCE_METERS,
         "depthConnectionRelativeTolerance": RGBD_HERO_PATCH_FACE_RELATIVE_TOLERANCE,
@@ -2130,6 +2172,195 @@ def combine_rgbd_hero_patch_meshes(patches: list[dict]) -> dict:
         "texture": texture,
         "patches": patch_summaries,
     }
+
+
+def rgbd_hero_patch_owned_face_sets(patches: list[dict]) -> tuple[list[list[tuple[int, int, int]]], dict]:
+    kept_faces_by_patch = [list(patch["mesh"].faces) for patch in patches]
+    patch_stats = [
+        {
+            "patchIndex": index,
+            "role": "primary" if index == 0 else "supplemental",
+            "sourceFaceCount": len(patch["mesh"].faces),
+            "keptFaceCount": len(patch["mesh"].faces),
+            "culledFaceCount": 0,
+            "primaryOwnedDepthAgreementCount": 0,
+            "primaryOwnedDepthDisagreementCount": 0,
+            "primaryMissingOrLowConfidenceCount": 0,
+            "outsidePrimaryFrustumCount": 0,
+            "replacedBySupplementalCount": 0,
+        }
+        for index, patch in enumerate(patches)
+    ]
+    stats = {
+        "enabled": len(patches) > 1,
+        "strategy": "primary_depth_confidence_ownership_mask",
+        "primaryOwnerConfidenceMin": RGBD_HERO_PATCH_PRIMARY_OWNER_CONFIDENCE_MIN,
+        "primaryOwnerAbsoluteToleranceMeters": RGBD_HERO_PATCH_PRIMARY_OWNER_ABSOLUTE_TOLERANCE_METERS,
+        "primaryOwnerRelativeTolerance": RGBD_HERO_PATCH_PRIMARY_OWNER_RELATIVE_TOLERANCE,
+        "secondaryClaimRadiusPixels": RGBD_HERO_PATCH_SECONDARY_CLAIM_RADIUS_PIXELS,
+        "patches": patch_stats,
+    }
+    if len(patches) <= 1:
+        return kept_faces_by_patch, stats
+
+    primary_depth_frame = patches[0]["ownershipDepthFrame"]
+    secondary_claimed_cells: set[tuple[int, int]] = set()
+    secondary_claimed_face_count = 0
+
+    for patch_index, patch in enumerate(patches[1:], start=1):
+        mesh = patch["mesh"]
+        kept_faces: list[tuple[int, int, int]] = []
+        patch_stat = patch_stats[patch_index]
+        for face in mesh.faces:
+            ownership = rgbd_hero_patch_primary_ownership_for_face(mesh, face, primary_depth_frame)
+            status = ownership["status"]
+            if status == "primary_owned_depth_agreement":
+                patch_stat["primaryOwnedDepthAgreementCount"] += 1
+            elif status == "primary_owned_depth_disagreement":
+                patch_stat["primaryOwnedDepthDisagreementCount"] += 1
+            elif status == "primary_missing_or_low_confidence":
+                patch_stat["primaryMissingOrLowConfidenceCount"] += 1
+            elif status == "outside_primary_frustum":
+                patch_stat["outsidePrimaryFrustumCount"] += 1
+
+            if ownership["primaryOwns"]:
+                continue
+
+            kept_faces.append(face)
+            secondary_claimed_face_count += 1
+            cell = ownership.get("cell")
+            if cell is not None:
+                mark_rgbd_hero_patch_claimed_cells(
+                    secondary_claimed_cells,
+                    cell,
+                    primary_depth_frame.width,
+                    primary_depth_frame.height,
+                )
+
+        kept_faces_by_patch[patch_index] = kept_faces
+        patch_stat["keptFaceCount"] = len(kept_faces)
+        patch_stat["culledFaceCount"] = len(mesh.faces) - len(kept_faces)
+
+    if secondary_claimed_cells:
+        primary_mesh = patches[0]["mesh"]
+        primary_kept_faces: list[tuple[int, int, int]] = []
+        primary_stat = patch_stats[0]
+        for face in primary_mesh.faces:
+            ownership = rgbd_hero_patch_primary_ownership_for_face(primary_mesh, face, primary_depth_frame)
+            status = ownership["status"]
+            if status == "primary_owned_depth_agreement":
+                primary_stat["primaryOwnedDepthAgreementCount"] += 1
+            elif status == "primary_owned_depth_disagreement":
+                primary_stat["primaryOwnedDepthDisagreementCount"] += 1
+            elif status == "primary_missing_or_low_confidence":
+                primary_stat["primaryMissingOrLowConfidenceCount"] += 1
+            elif status == "outside_primary_frustum":
+                primary_stat["outsidePrimaryFrustumCount"] += 1
+
+            cell = ownership.get("cell")
+            if (
+                not ownership["primaryOwns"]
+                and cell is not None
+                and cell in secondary_claimed_cells
+            ):
+                primary_stat["replacedBySupplementalCount"] += 1
+                continue
+            primary_kept_faces.append(face)
+
+        kept_faces_by_patch[0] = primary_kept_faces
+        primary_stat["keptFaceCount"] = len(primary_kept_faces)
+        primary_stat["culledFaceCount"] = len(primary_mesh.faces) - len(primary_kept_faces)
+
+    stats["secondaryClaimedFaceCount"] = secondary_claimed_face_count
+    stats["secondaryClaimedCellCount"] = len(secondary_claimed_cells)
+    stats["totalSourceFaceCount"] = sum(item["sourceFaceCount"] for item in patch_stats)
+    stats["totalKeptFaceCount"] = sum(item["keptFaceCount"] for item in patch_stats)
+    stats["totalCulledFaceCount"] = sum(item["culledFaceCount"] for item in patch_stats)
+    return kept_faces_by_patch, stats
+
+
+def rgbd_hero_patch_primary_ownership_for_face(
+    mesh: FusedMesh,
+    face: tuple[int, int, int],
+    primary_depth_frame: ProjectionDepthFrame,
+) -> dict:
+    vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
+    center = triangle_center(vertices[0], vertices[1], vertices[2])
+    projection = project_world_point_to_depth(center, primary_depth_frame)
+    if projection is None:
+        return {
+            "status": "outside_primary_frustum",
+            "primaryOwns": False,
+            "cell": None,
+        }
+
+    u, v, projected_depth = projection
+    cell = (
+        max(0, min(int(round(u)), primary_depth_frame.width - 1)),
+        max(0, min(int(round(v)), primary_depth_frame.height - 1)),
+    )
+    sampled = sample_depth_frame(primary_depth_frame, u, v)
+    if sampled is None:
+        return {
+            "status": "primary_missing_or_low_confidence",
+            "primaryOwns": False,
+            "cell": cell,
+            "projectedDepth": round(projected_depth, 4),
+            "sampledDepth": None,
+            "confidence": None,
+        }
+
+    sampled_depth, confidence = sampled
+    confidence_reliable = (
+        confidence is None
+        or confidence >= RGBD_HERO_PATCH_PRIMARY_OWNER_CONFIDENCE_MIN
+    )
+    if not confidence_reliable:
+        return {
+            "status": "primary_missing_or_low_confidence",
+            "primaryOwns": False,
+            "cell": cell,
+            "projectedDepth": round(projected_depth, 4),
+            "sampledDepth": round(sampled_depth, 4),
+            "confidence": confidence,
+        }
+
+    tolerance = max(
+        RGBD_HERO_PATCH_PRIMARY_OWNER_ABSOLUTE_TOLERANCE_METERS,
+        projected_depth * RGBD_HERO_PATCH_PRIMARY_OWNER_RELATIVE_TOLERANCE,
+    )
+    depth_error = abs(sampled_depth - projected_depth)
+    return {
+        "status": (
+            "primary_owned_depth_agreement"
+            if depth_error <= tolerance
+            else "primary_owned_depth_disagreement"
+        ),
+        "primaryOwns": True,
+        "cell": cell,
+        "projectedDepth": round(projected_depth, 4),
+        "sampledDepth": round(sampled_depth, 4),
+        "confidence": confidence,
+        "depthErrorMeters": round(depth_error, 4),
+        "toleranceMeters": round(tolerance, 4),
+    }
+
+
+def mark_rgbd_hero_patch_claimed_cells(
+    claimed_cells: set[tuple[int, int]],
+    cell: tuple[int, int],
+    width: int,
+    height: int,
+) -> None:
+    center_x, center_y = cell
+    radius = RGBD_HERO_PATCH_SECONDARY_CLAIM_RADIUS_PIXELS
+    for y in range(center_y - radius, center_y + radius + 1):
+        if y < 0 or y >= height:
+            continue
+        for x in range(center_x - radius, center_x + radius + 1):
+            if x < 0 or x >= width:
+                continue
+            claimed_cells.add((x, y))
 
 
 def prepare_rgbd_hero_patch_depth_grid(
@@ -2523,7 +2754,7 @@ def build_rgbd_hero_patch_texture_diagnostics(
             "fallbackFaceCount": 0,
             "projectionCoverage": 1.0 if face_count else 0.0,
             "selectedKeyframeFaceCounts": [
-                {"keyframe": patch["keyframe"].get("id"), "faceCount": len(patch["mesh"].faces)}
+                {"keyframe": patch["keyframe"].get("id"), "faceCount": patch.get("keptFaceCount", len(patch["mesh"].faces))}
                 for patch in selected_patches
             ],
             "keyframeContributionCounts": [
@@ -2569,6 +2800,19 @@ def aggregate_rgbd_hero_patch_mesh_stats(selected_patches: list[dict], mesh: Fus
             int(patch["meshStats"].get("rejectedFaceCount", 0))
             for patch in selected_patches
         ),
+        "ownershipCulledFaceCount": sum(
+            int(patch.get("culledFaceCount", 0))
+            for patch in selected_patches
+        ),
+        "ownershipKeptFaceCount": sum(
+            int(patch.get("keptFaceCount", 0))
+            for patch in selected_patches
+        ),
+        "sourcePatchFaceCount": sum(
+            int(patch.get("sourceFaceCount", len(patch["mesh"].faces)))
+            for patch in selected_patches
+        ),
+        "ownershipCull": mesh.stats.get("ownershipCull", {}),
         "invalidDepthSampleCount": sum(
             int(patch["meshStats"].get("invalidDepthSampleCount", 0))
             for patch in selected_patches
@@ -2603,6 +2847,10 @@ def rgbd_hero_patch_debug_summary(patch: dict) -> dict:
         "sourceDepthResolution": depth_frame.get("depthResolution"),
         "atlasRect": patch["atlasRect"],
         "atlasUVBounds": patch["atlasUVBounds"],
+        "sourceFaceCount": patch.get("sourceFaceCount", len(patch["mesh"].faces)),
+        "keptFaceCount": patch.get("keptFaceCount", len(patch["mesh"].faces)),
+        "culledFaceCount": patch.get("culledFaceCount", 0),
+        "ownershipCull": patch.get("ownershipCull", {}),
         "depthPreparation": patch["preparedDepthStats"],
         "mesh": patch["meshStats"],
     }
