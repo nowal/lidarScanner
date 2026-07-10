@@ -216,6 +216,8 @@ async def download_result_file(job_id: str, filename: str) -> Response:
         "textured_mesh_texture.png",
         "texture_debug.json",
         "texture_debug_preview.png",
+        "two_keyframe_projection_0.png",
+        "two_keyframe_projection_1.png",
         "stage_timings.json",
         "keyframe_selection.json",
         "depth_frame_selection.json",

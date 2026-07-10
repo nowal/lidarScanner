@@ -534,6 +534,7 @@ async def test_raw_mesh_artifacts_are_exported_when_texturing_is_disabled():
         payload = {
             "schemaVersion": "v1",
             "createdAt": "2026-05-18T12:00:00Z",
+            "processingProfile": "full_quality",
             "meshAnchors": [
                 {
                     "id": "00000000-0000-0000-0000-000000000001",
@@ -1265,6 +1266,7 @@ async def test_depth_frames_are_decoded_and_rgbd_fallback_mesh_is_exported(monke
         payload = {
             "schemaVersion": "v1",
             "createdAt": "2026-05-18T12:00:00Z",
+            "processingProfile": "full_quality",
             "meshAnchors": [
                 {
                     "id": "00000000-0000-0000-0000-000000000011",
@@ -1503,7 +1505,7 @@ async def test_rgbd_one_keyframe_diagnostic_exports_alignment_artifacts():
 
 
 @pytest.mark.asyncio
-async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyframes():
+async def test_fast_onboarding_profile_textures_arkit_mesh_with_two_paired_rgbd_frames():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = auth_headers()
@@ -1542,7 +1544,7 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
                         1, 0, 0, 0,
                         0, 1, 0, 0,
                         0, 0, 1, 0,
-                        index * 0.03, 0, 0, 1,
+                        index * 0.005, 0, 0, 1,
                     ],
                     "intrinsics": [
                         100, 0, 0,
@@ -1564,7 +1566,7 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
                         1, 0, 0, 0,
                         0, 1, 0, 0,
                         0, 0, 1, 0,
-                        index * 0.03, 0, 0, 1,
+                        index * 0.005, 0, 0, 1,
                     ],
                     "intrinsics": [
                         10, 0, 0,
@@ -1598,34 +1600,68 @@ async def test_fast_onboarding_profile_preserves_dense_geometry_with_fewer_keyfr
         assert status["status"] == "complete"
         assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
         assert status["artifacts"]["vertexColoredPlyUrl"] is None
-        assert status["artifacts"]["previewMeshUrl"].endswith("/rgbd_fused_mesh.obj")
+        assert status["artifacts"]["previewMeshUrl"].endswith("/fused_mesh.obj")
+        assert status["artifacts"]["rgbdFusedMeshUrl"] is None
         assert status["artifacts"]["textureDebugPreviewUrl"] is None
         assert status["artifacts"]["stageTimingsUrl"].endswith("/stage_timings.json")
 
         rgbd_stats = (await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_fusion_stats.json", headers=headers)).json()
-        assert rgbd_stats["used"] is True
-        assert rgbd_stats["geometrySource"] in {"rgbd_tsdf_open3d", "rgbd_keyframe_depth_mesh"}
+        assert rgbd_stats["used"] is False
+        assert rgbd_stats["geometrySource"] == "arkit_mesh_anchor_fusion"
+        assert rgbd_stats["geometryPreserved"] is True
         assert rgbd_stats["profile"]["name"] == "fast_onboarding"
-        assert rgbd_stats["profile"]["useRgbdGeometry"] is True
+        assert rgbd_stats["profile"]["maxKeyframes"] == 2
+        assert rgbd_stats["profile"]["maxDepthFrames"] == 2
+        assert rgbd_stats["profile"]["maxRgbdFrames"] == 2
+        assert rgbd_stats["profile"]["useRgbdGeometry"] is False
+        assert rgbd_stats["profile"]["preserveTextureRenderMesh"] is True
         assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["profile"]["textureTsdfRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
-        assert rgbd_stats["sampledDepthFrameCount"] == 36
+        assert rgbd_stats["depthFrameCount"] == 2
+        assert rgbd_stats["keyframeCount"] == 2
 
         keyframe_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/keyframe_selection.json", headers=headers)).json()
         assert keyframe_selection["originalKeyframeCount"] == 55
-        assert keyframe_selection["selectedKeyframeCount"] == 18
+        assert keyframe_selection["selectedKeyframeCount"] == 2
+        assert keyframe_selection["strategy"] == "two_keyframe_rgbd_pairs"
+        assert len(keyframe_selection["selectedKeyframeIds"]) == 2
+        assert len(keyframe_selection["selectedPairDepthFrameIds"]) == 2
 
         depth_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_selection.json", headers=headers)).json()
         assert depth_selection["originalDepthFrameCount"] == 55
-        assert depth_selection["geometryDepthSelection"] == "all_depth_frames"
-        assert depth_selection["selectedDepthFrameCount"] == 48
+        assert depth_selection["geometryDepthSelection"] == "selected_keyframe_pairs"
+        assert depth_selection["selectedDepthFrameCount"] == 2
+        assert depth_selection["selectedKeyframeIds"] == keyframe_selection["selectedKeyframeIds"]
+        assert depth_selection["selectedDepthFrameIds"] == keyframe_selection["selectedPairDepthFrameIds"]
+
+        depth_manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_manifest.json", headers=headers)).json()
+        assert len(depth_manifest) == 2
+        assert [frame["colorKeyframeId"] for frame in depth_manifest] == keyframe_selection["selectedKeyframeIds"]
+
+        fused_mesh = await client.get(f"/api/v1/jobs/{job_id}/result/fused_mesh.obj", headers=headers)
+        arkit_mesh = await client.get(f"/api/v1/jobs/{job_id}/result/arkit_fused_mesh.obj", headers=headers)
+        assert fused_mesh.text == arkit_mesh.text
 
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
         assert manifest["processingProfile"]["name"] == "fast_onboarding"
-        assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is True
+        assert manifest["artifacts"]["rgbdFusedMesh"]["available"] is False
+        assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is False
+        assert manifest["artifacts"]["rawFusedMesh"]["stats"]["geometryPreserved"] is True
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
         assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
+        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["used"] is False
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
+
+        texture_debug = (await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug.json", headers=headers)).json()
+        assert [item["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedKeyframeIds"]
+        assert [item["depthFrame"]["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedPairDepthFrameIds"]
+        assert texture_debug["geometry"]["geometryPreserved"] is True
+        assert len(texture_debug["perKeyframeProjection"]) == 2
+        assert texture_debug["projection"]["projectionCoverage"] > 0
+
+        overlay = await client.get(f"/api/v1/jobs/{job_id}/result/two_keyframe_projection_0.png", headers=headers)
+        assert overlay.status_code == 200
+        assert overlay.headers["content-type"] == "image/png"
 
         timings = (await client.get(f"/api/v1/jobs/{job_id}/result/stage_timings.json", headers=headers)).json()
         assert timings["jobId"] == job_id

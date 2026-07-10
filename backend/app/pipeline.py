@@ -57,6 +57,9 @@ class ProjectionDepthFrame:
     intrinsics: list[float]
     depth_values: array
     confidence_values: bytes | None = None
+    timestamp: float | None = None
+    path: str | None = None
+    confidence_path: str | None = None
     world_to_camera_values: tuple[float, ...] = field(init=False, repr=False)
     fx: float = field(init=False)
     fy: float = field(init=False)
@@ -84,6 +87,8 @@ class ProjectionKeyframe:
     pixels: object
     id: str | None = None
     path: str | None = None
+    timestamp: float | None = None
+    captured_at: str | None = None
     color_correction: dict | None = None
     depth_frame: ProjectionDepthFrame | None = None
     world_to_camera_values: tuple[float, ...] = field(init=False, repr=False)
@@ -314,15 +319,16 @@ class ProcessingProfile:
     planar_chart_projection_mode: str = "blend"
     fallback_texture_face_limit: int | None = None
     single_frame_diagnostic: bool = False
+    preserve_texture_render_mesh: bool = False
 
 
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
     "fast_onboarding": ProcessingProfile(
         name="fast_onboarding",
-        max_keyframes=18,
-        max_depth_frames=48,
-        max_rgbd_frames=36,
-        use_rgbd_geometry=True,
+        max_keyframes=2,
+        max_depth_frames=2,
+        max_rgbd_frames=2,
+        use_rgbd_geometry=False,
         write_vertex_colored_debug=False,
         write_texture_debug_preview=False,
         texture_render_target_faces=FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT,
@@ -330,6 +336,7 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         planar_chart_raster_stride=2,
         planar_chart_projection_mode="direct",
         fallback_texture_face_limit=FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT,
+        preserve_texture_render_mesh=True,
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",
@@ -362,7 +369,7 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
     ),
 }
 
-DEFAULT_PROCESSING_PROFILE = os.getenv("LIDARAI_DEFAULT_PROCESSING_PROFILE", "full_quality")
+DEFAULT_PROCESSING_PROFILE = os.getenv("LIDARAI_DEFAULT_PROCESSING_PROFILE", "fast_onboarding")
 
 
 class ValidationStage:
@@ -434,7 +441,11 @@ class KeyframeDecodeStage:
         await report(self.name, 58, "Decoding camera keyframes")
         payload = json.loads((job_dir / "upload" / "scan_payload.json").read_text(encoding="utf-8"))
         profile = read_processing_profile(job_dir / "work")
-        selected_images, selection_stats = select_keyframes_for_profile(payload.get("images", []), profile)
+        selected_images, selection_stats = select_keyframes_for_profile(
+            payload.get("images", []),
+            profile,
+            depth_frames=payload.get("depthFrames") or [],
+        )
         keyframe_dir = job_dir / "work" / "keyframes"
         keyframe_dir.mkdir(parents=True, exist_ok=True)
 
@@ -613,6 +624,16 @@ class RGBDGeometryFusionStage:
             return
 
         if not profile.use_rgbd_geometry and arkit_mesh.faces:
+            fused_mesh = read_fused_mesh_json(job_dir / "work" / "fused_mesh.json")
+            geometry_preservation = mesh_geometry_preservation_stats(arkit_mesh, fused_mesh)
+            fused_mesh.stats.update({
+                "geometrySource": "arkit_mesh_anchor_fusion",
+                "geometryPreserved": geometry_preservation["geometryPreserved"],
+                "geometryPreservation": geometry_preservation,
+            })
+            write_fused_mesh_json(fused_mesh, job_dir / "work" / "fused_mesh.json")
+            write_obj(fused_mesh, job_dir / "work" / "fused_mesh.obj")
+            (job_dir / "work" / "mesh_stats.json").write_text(json.dumps(fused_mesh.stats, indent=2), encoding="utf-8")
             stats_path.write_text(json.dumps({
                 "available": bool(depth_frames),
                 "used": False,
@@ -620,6 +641,8 @@ class RGBDGeometryFusionStage:
                 "depthFrameCount": len(depth_frames),
                 "keyframeCount": len(keyframes),
                 "geometrySource": "arkit_mesh_anchor_fusion",
+                "geometryPreserved": geometry_preservation["geometryPreserved"],
+                "geometryPreservation": geometry_preservation,
                 "profile": processing_profile_stats(profile),
             }, indent=2), encoding="utf-8")
             await report(self.name, 76, "RGBD fusion skipped for fast onboarding")
@@ -747,6 +770,11 @@ class TexturedMeshStage:
                 if profile.write_texture_debug_preview
                 else None
             ),
+            output_projection_overlay_dir=(
+                job_dir / "work"
+                if is_two_keyframe_rgbd_texture_profile(profile)
+                else None
+            ),
             report_progress=lambda progress, message: report(self.name, progress, message),
             is_cancelled=is_cancelled,
             profile=profile,
@@ -865,6 +893,8 @@ class ExportStage:
             "textured_mesh_texture.png",
             "texture_debug.json",
             "texture_debug_preview.png",
+            "two_keyframe_projection_0.png",
+            "two_keyframe_projection_1.png",
             "stage_timings.json",
             "keyframe_selection.json",
             "depth_frame_selection.json",
@@ -1014,6 +1044,8 @@ class ExportStage:
                 "textured_mesh_texture.png",
                 "texture_debug.json",
                 "texture_debug_preview.png",
+                "two_keyframe_projection_0.png",
+                "two_keyframe_projection_1.png",
                 "keyframe_manifest.json",
                 "keyframe_selection.json",
                 "depth_frame_selection.json",
@@ -1933,6 +1965,7 @@ def processing_profile_stats(profile: ProcessingProfile) -> dict:
         "planarChartProjectionMode": profile.planar_chart_projection_mode,
         "fallbackTextureFaceLimit": profile.fallback_texture_face_limit,
         "singleFrameDiagnostic": profile.single_frame_diagnostic,
+        "preserveTextureRenderMesh": profile.preserve_texture_render_mesh,
     }
 
 
@@ -1955,7 +1988,37 @@ def current_full_quality_profile() -> ProcessingProfile:
     )
 
 
-def select_keyframes_for_profile(keyframes: list[dict], profile: ProcessingProfile) -> tuple[list[dict], dict]:
+def select_keyframes_for_profile(
+    keyframes: list[dict],
+    profile: ProcessingProfile,
+    *,
+    depth_frames: list[dict] | None = None,
+) -> tuple[list[dict], dict]:
+    if is_two_keyframe_rgbd_texture_profile(profile):
+        selected_pairs, pair_stats = select_two_rgbd_payload_pairs(keyframes, depth_frames or [])
+        if selected_pairs:
+            selected = [pair["keyframe"] for pair in selected_pairs]
+            selected_ids = [item.get("id") for item in selected if item.get("id")]
+            return selected, {
+                "strategy": "two_keyframe_rgbd_pairs",
+                "profile": profile.name,
+                "originalKeyframeCount": len(keyframes),
+                "selectedKeyframeCount": len(selected),
+                "selectedKeyframeIds": selected_ids,
+                **pair_stats,
+            }
+
+        selected = center_biased_items(keyframes, limit=profile.max_keyframes)
+        selected_ids = [item.get("id") for item in selected if item.get("id")]
+        return selected, {
+            "strategy": "two_keyframe_rgbd_pairs_fallback",
+            "profile": profile.name,
+            "originalKeyframeCount": len(keyframes),
+            "selectedKeyframeCount": len(selected),
+            "selectedKeyframeIds": selected_ids,
+            **pair_stats,
+        }
+
     selected = pose_diverse_items(
         keyframes,
         limit=profile.max_keyframes,
@@ -1977,11 +2040,34 @@ def select_depth_frames_for_profile(
     selected_keyframes: list[dict],
     profile: ProcessingProfile,
 ) -> tuple[list[dict], dict]:
-    selected_keyframe_ids = {str(keyframe.get("id")) for keyframe in selected_keyframes if keyframe.get("id")}
+    selected_keyframe_ids = [str(keyframe.get("id")) for keyframe in selected_keyframes if keyframe.get("id")]
+    selected_keyframe_id_set = set(selected_keyframe_ids)
     paired = [
         frame for frame in depth_frames
-        if frame.get("colorKeyframeId") and str(frame.get("colorKeyframeId")) in selected_keyframe_ids
+        if frame.get("colorKeyframeId") and str(frame.get("colorKeyframeId")) in selected_keyframe_id_set
     ]
+    if is_two_keyframe_rgbd_texture_profile(profile):
+        selected = best_depth_frame_per_selected_keyframe(selected_keyframes, paired)
+        selected_ids = [item.get("id") for item in selected if item.get("id")]
+        fallback_reason = None
+        if not selected:
+            selected = center_biased_items(depth_frames, limit=profile.max_depth_frames)
+            selected_ids = [item.get("id") for item in selected if item.get("id")]
+            fallback_reason = "no_depth_frames_matching_selected_keyframes"
+        elif len(selected) < min(len(selected_keyframes), profile.max_depth_frames or len(selected_keyframes)):
+            fallback_reason = "fewer_paired_depth_frames_than_selected_keyframes"
+        return selected, {
+            "strategy": "two_keyframe_rgbd_pairs" if fallback_reason is None else "two_keyframe_rgbd_pairs_fallback",
+            "profile": profile.name,
+            "originalDepthFrameCount": len(depth_frames),
+            "pairedDepthFrameCount": len(paired),
+            "geometryDepthSelection": "selected_keyframe_pairs" if fallback_reason != "no_depth_frames_matching_selected_keyframes" else "fallback_center_biased_depth_frames",
+            "selectedDepthFrameCount": len(selected),
+            "selectedDepthFrameIds": selected_ids,
+            "selectedKeyframeIds": selected_keyframe_ids,
+            "fallbackReason": fallback_reason,
+        }
+
     candidates = depth_frames if profile.use_rgbd_geometry else (paired or depth_frames)
     selected = pose_diverse_items(
         candidates,
@@ -2012,12 +2098,191 @@ def select_rgbd_pairs_for_profile(
     paired_frames: list[tuple[dict, dict, Path, Path]],
     profile: ProcessingProfile,
 ) -> list[tuple[dict, dict, Path, Path]]:
+    if is_two_keyframe_rgbd_texture_profile(profile):
+        selected_pairs, _stats = select_two_rgbd_loaded_pairs(paired_frames)
+        return selected_pairs
+
     return pose_diverse_items(
         paired_frames,
         limit=profile.max_rgbd_frames,
         transform_getter=lambda item: item[1].get("cameraTransform") or item[0].get("cameraTransform") or [],
         timestamp_getter=lambda item: item[1].get("timestamp") or item[0].get("timestamp"),
     )
+
+
+def is_two_keyframe_rgbd_texture_profile(profile: ProcessingProfile) -> bool:
+    return (
+        profile.name == "fast_onboarding"
+        and profile.max_keyframes == 2
+        and profile.max_depth_frames == 2
+        and profile.max_rgbd_frames == 2
+        and not profile.use_rgbd_geometry
+    )
+
+
+def select_two_rgbd_payload_pairs(keyframes: list[dict], depth_frames: list[dict]) -> tuple[list[dict], dict]:
+    pairs = build_payload_rgbd_pairs(keyframes, depth_frames)
+    selected_pairs, selection_stats = select_two_rgbd_pair_records(pairs)
+    return selected_pairs, {
+        "originalDepthFrameCount": len(depth_frames),
+        "pairedDepthFrameCount": len(pairs),
+        "selectedDepthFrameIds": [
+            pair["depthFrame"].get("id")
+            for pair in selected_pairs
+            if pair["depthFrame"].get("id")
+        ],
+        **selection_stats,
+    }
+
+
+def build_payload_rgbd_pairs(keyframes: list[dict], depth_frames: list[dict]) -> list[dict]:
+    keyframes_by_id = {
+        str(keyframe.get("id")): (index, keyframe)
+        for index, keyframe in enumerate(keyframes)
+        if keyframe.get("id")
+    }
+    candidates_by_keyframe_id: dict[str, list[tuple[int, dict]]] = {}
+    for depth_index, depth_frame in enumerate(depth_frames):
+        color_keyframe_id = depth_frame.get("colorKeyframeId")
+        if not color_keyframe_id:
+            continue
+        key = str(color_keyframe_id)
+        if key in keyframes_by_id:
+            candidates_by_keyframe_id.setdefault(key, []).append((depth_index, depth_frame))
+
+    pairs: list[dict] = []
+    for keyframe_id, (keyframe_index, keyframe) in keyframes_by_id.items():
+        candidates = candidates_by_keyframe_id.get(keyframe_id) or []
+        if not candidates:
+            continue
+        depth_index, depth_frame = min(
+            candidates,
+            key=lambda item: timestamp_delta(keyframe.get("timestamp"), item[1].get("timestamp")),
+        )
+        pairs.append({
+            "keyframe": keyframe,
+            "depthFrame": depth_frame,
+            "keyframeIndex": keyframe_index,
+            "depthFrameIndex": depth_index,
+            "pose": pose_from_transform(
+                keyframe.get("cameraTransform") or depth_frame.get("cameraTransform") or [],
+                keyframe.get("timestamp") if keyframe.get("timestamp") is not None else depth_frame.get("timestamp"),
+            ),
+        })
+    return sorted(pairs, key=lambda pair: int(pair["keyframeIndex"]))
+
+
+def best_depth_frame_per_selected_keyframe(selected_keyframes: list[dict], paired_depth_frames: list[dict]) -> list[dict]:
+    selected: list[dict] = []
+    for keyframe in selected_keyframes:
+        keyframe_id = str(keyframe.get("id")) if keyframe.get("id") else None
+        if not keyframe_id:
+            continue
+        candidates = [
+            frame for frame in paired_depth_frames
+            if str(frame.get("colorKeyframeId")) == keyframe_id
+        ]
+        if not candidates:
+            continue
+        selected.append(min(
+            candidates,
+            key=lambda frame: timestamp_delta(keyframe.get("timestamp"), frame.get("timestamp")),
+        ))
+    return selected
+
+
+def select_two_rgbd_loaded_pairs(
+    paired_frames: list[tuple[dict, dict, Path, Path]],
+) -> tuple[list[tuple[dict, dict, Path, Path]], dict]:
+    records = [
+        {
+            "pair": pair,
+            "keyframe": pair[0],
+            "depthFrame": pair[1],
+            "keyframeIndex": index,
+            "depthFrameIndex": index,
+            "pose": pose_from_transform(
+                pair[1].get("cameraTransform") or pair[0].get("cameraTransform") or [],
+                pair[1].get("timestamp") if pair[1].get("timestamp") is not None else pair[0].get("timestamp"),
+            ),
+        }
+        for index, pair in enumerate(paired_frames)
+    ]
+    selected_records, stats = select_two_rgbd_pair_records(records)
+    return [record["pair"] for record in selected_records], stats
+
+
+def select_two_rgbd_pair_records(pairs: list[dict]) -> tuple[list[dict], dict]:
+    if not pairs:
+        return [], {
+            "fallbackReason": "no_valid_rgbd_pairs",
+            "selectedPairCount": 0,
+            "poseDelta": None,
+        }
+    if len(pairs) == 1:
+        return pairs, {
+            "fallbackReason": "only_one_valid_rgbd_pair",
+            "selectedPairCount": 1,
+            "poseDelta": None,
+        }
+
+    center_index = (len(pairs) - 1) / 2
+    primary = min(
+        pairs,
+        key=lambda pair: abs(float(pair["keyframeIndex"]) - center_index),
+    )
+    target_diversity = 0.85
+    secondary = max(
+        (pair for pair in pairs if pair is not primary),
+        key=lambda pair: modest_rgbd_pair_score(pair, primary, len(pairs), target_diversity),
+    )
+    selected = sorted([primary, secondary], key=lambda pair: int(pair["keyframeIndex"]))
+    return selected, {
+        "fallbackReason": None,
+        "selectedPairCount": len(selected),
+        "selectedPairKeyframeIds": [pair["keyframe"].get("id") for pair in selected if pair["keyframe"].get("id")],
+        "selectedPairDepthFrameIds": [pair["depthFrame"].get("id") for pair in selected if pair["depthFrame"].get("id")],
+        "poseDelta": pose_delta_summary(selected[0]["pose"], selected[1]["pose"]),
+    }
+
+
+def modest_rgbd_pair_score(candidate: dict, primary: dict, pair_count: int, target_diversity: float) -> float:
+    diversity = pose_novelty_score(candidate["pose"], [primary["pose"]])
+    diversity_score = 1 - min(abs(diversity - target_diversity) / max(target_diversity, 1e-6), 1)
+    center_position = float(candidate["keyframeIndex"]) / max(pair_count - 1, 1)
+    center_score = 1 - abs(center_position - 0.5) * 0.5
+    visible_baseline_bonus = min(diversity / max(target_diversity, 1e-6), 1) * 0.15
+    return diversity_score + center_score + visible_baseline_bonus
+
+
+def center_biased_items(items: list, limit: int | None) -> list:
+    if limit is None or limit <= 0 or len(items) <= limit:
+        return items
+    if limit == 1:
+        return [items[len(items) // 2]]
+    center = (len(items) - 1) // 2
+    indices = sorted({max(0, center - 1), min(len(items) - 1, center + 1)})[:limit]
+    return [items[index] for index in indices]
+
+
+def timestamp_delta(left: object, right: object) -> float:
+    left_value = safe_float(left)
+    right_value = safe_float(right)
+    if left_value is None or right_value is None:
+        return math.inf
+    return abs(left_value - right_value)
+
+
+def pose_delta_summary(left: dict, right: dict) -> dict:
+    distance = length(subtract(left["position"], right["position"]))
+    direction_dot = clamp_float(dot(left["forward"], right["forward"]), -1.0, 1.0)
+    angle = math.acos(direction_dot)
+    time_delta = abs(float(left["timestamp"]) - float(right["timestamp"]))
+    return {
+        "translationMeters": round(distance, 4),
+        "angleDegrees": round(math.degrees(angle), 3),
+        "timeDeltaSeconds": round(time_delta, 4),
+    }
 
 
 def pose_diverse_items(
@@ -2071,6 +2336,13 @@ def pose_from_transform(transform: list, timestamp: object) -> dict:
     except (TypeError, ValueError):
         resolved_timestamp = 0.0
     return {"position": position, "forward": forward, "timestamp": resolved_timestamp}
+
+
+def safe_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def pose_novelty_score(candidate: dict, selected: list[dict]) -> float:
@@ -2737,6 +3009,48 @@ def write_obj(mesh: FusedMesh, output_path: Path) -> None:
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def mesh_geometry_preservation_stats(source: FusedMesh, fused: FusedMesh) -> dict:
+    same_vertex_count = len(source.vertices) == len(fused.vertices)
+    same_face_count = len(source.faces) == len(fused.faces)
+    max_vertex_delta = None
+    mean_vertex_delta = None
+    if same_vertex_count:
+        deltas = [
+            length(subtract(source_vertex, fused_vertex))
+            for source_vertex, fused_vertex in zip(source.vertices, fused.vertices)
+        ]
+        max_vertex_delta = max(deltas) if deltas else 0.0
+        mean_vertex_delta = (sum(deltas) / len(deltas)) if deltas else 0.0
+
+    face_mismatch_count = None
+    if same_face_count:
+        face_mismatch_count = sum(
+            1 for source_face, fused_face in zip(source.faces, fused.faces)
+            if source_face != fused_face
+        )
+
+    geometry_preserved = (
+        same_vertex_count
+        and same_face_count
+        and (max_vertex_delta is not None and max_vertex_delta <= 1e-7)
+        and face_mismatch_count == 0
+    )
+    return {
+        "source": "arkit_fused_mesh",
+        "fused": "fused_mesh",
+        "sourceVertexCount": len(source.vertices),
+        "sourceFaceCount": len(source.faces),
+        "fusedVertexCount": len(fused.vertices),
+        "fusedFaceCount": len(fused.faces),
+        "sameVertexCount": same_vertex_count,
+        "sameFaceCount": same_face_count,
+        "maxVertexDeltaMeters": round(max_vertex_delta, 9) if max_vertex_delta is not None else None,
+        "meanVertexDeltaMeters": round(mean_vertex_delta, 9) if mean_vertex_delta is not None else None,
+        "faceMismatchCount": face_mismatch_count,
+        "geometryPreserved": geometry_preserved,
+    }
+
+
 def transform_point(matrix: list[float], vertex: list[float]) -> tuple[float, float, float]:
     x, y, z = float(vertex[0]), float(vertex[1]), float(vertex[2])
     return (
@@ -2839,6 +3153,9 @@ def load_projection_depth_frames(
             intrinsics=intrinsics,
             depth_values=depth_values,
             confidence_values=confidence_values,
+            timestamp=safe_float(depth_frame.get("timestamp")),
+            path=str(depth_path),
+            confidence_path=str(depth_frame.get("confidencePath")) if depth_frame.get("confidencePath") else None,
         )
         if color_keyframe_id:
             loaded[color_keyframe_id] = frame
@@ -2881,6 +3198,8 @@ def load_projection_keyframes(
             pixels=image.load(),
             id=str(keyframe.get("id")) if keyframe.get("id") else None,
             path=str(keyframe.get("path")) if keyframe.get("path") else image_path.name,
+            timestamp=safe_float(keyframe.get("timestamp")),
+            captured_at=str(keyframe.get("capturedAt")) if keyframe.get("capturedAt") else None,
             color_correction=color_correction,
             depth_frame=depth_by_keyframe_id.get(str(keyframe.get("id"))) if keyframe.get("id") else None,
         ))
@@ -3104,6 +3423,26 @@ def make_texture_render_mesh(mesh: FusedMesh, profile: ProcessingProfile | None 
         "targetMinTileSize": TEXTURE_RENDER_TARGET_MIN_TILE_SIZE,
         "atlasMaxSize": atlas_max_size,
     }
+
+    if profile.preserve_texture_render_mesh:
+        render_stats = {
+            **base_stats,
+            "used": False,
+            "algorithm": "none",
+            "renderVertexCount": len(mesh.vertices),
+            "renderFaceCount": source_face_count,
+            "geometryPreserved": True,
+            "smoothing": {
+                "enabled": False,
+                "scope": "disabled by profile",
+            },
+            "reason": f"{profile.name} preserves the ARKit/LiDAR mesh for texture projection.",
+        }
+        return FusedMesh(
+            vertices=mesh.vertices,
+            faces=mesh.faces,
+            stats={**mesh.stats, "textureRenderMesh": render_stats},
+        )
 
     if source_face_count <= target_face_count:
         render_stats = {
@@ -3811,6 +4150,7 @@ async def write_textured_obj(
     output_texture_path: Path,
     output_debug_path: Path | None = None,
     output_debug_preview_path: Path | None = None,
+    output_projection_overlay_dir: Path | None = None,
     report_progress: Callable[[float, str], Awaitable[None]] | None = None,
     is_cancelled: CancellationCheck | None = None,
     profile: ProcessingProfile | None = None,
@@ -4273,6 +4613,38 @@ async def write_textured_obj(
         "solidSceneColor": list(solid_scene_color),
         "solidSceneColorProjected": solid_scene_color_projected,
     }
+    texture_diagnostics["geometry"] = texture_geometry_debug(mesh)
+    texture_diagnostics["keyframes"] = projection_keyframe_debug_summaries(keyframes)
+    texture_diagnostics["poseDelta"] = (
+        projection_keyframe_pose_delta(keyframes[0], keyframes[1])
+        if len(keyframes) >= 2
+        else None
+    )
+    texture_diagnostics["perKeyframeProjection"] = per_keyframe_mesh_projection_stats(mesh, keyframes)
+    texture_diagnostics["projection"]["faceRejectionReasons"] = {
+        "overexposedSampleCount": rejected_overexposed_sample_count,
+        "underexposedSampleCount": rejected_underexposed_sample_count,
+        "edgeSampleCount": rejected_edge_sample_count,
+        "grazingSampleCount": rejected_grazing_sample_count,
+        "invalidProjectionSampleCount": rejected_invalid_projection_sample_count,
+        "occludedSampleCount": rejected_occluded_sample_count,
+    }
+    texture_diagnostics["projection"]["depthVisibilityStats"] = {
+        "depthTestedSampleCount": depth_tested_sample_count,
+        "missingDepthSampleCount": missing_depth_sample_count,
+        "occludedSampleCount": rejected_occluded_sample_count,
+        "depthVisibilityDecisionCount": (
+            depth_tested_sample_count
+            + missing_depth_sample_count
+            + rejected_occluded_sample_count
+        ),
+    }
+    if output_projection_overlay_dir is not None:
+        texture_diagnostics["projectionOverlays"] = write_two_keyframe_projection_overlays(
+            mesh,
+            keyframes,
+            output_projection_overlay_dir,
+        )
 
     texture.save(output_texture_path)
     if output_debug_preview_path is not None:
@@ -5497,6 +5869,176 @@ def write_texture_debug_preview(texture: Image.Image, output_path: Path, max_siz
     preview = texture.copy()
     preview.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
     preview.save(output_path)
+
+
+def texture_geometry_debug(mesh: FusedMesh) -> dict:
+    return {
+        "geometrySource": mesh.stats.get("geometrySource"),
+        "vertexCount": len(mesh.vertices),
+        "faceCount": len(mesh.faces),
+        "geometryPreserved": bool(mesh.stats.get("geometryPreserved")),
+        "geometryPreservation": mesh.stats.get("geometryPreservation"),
+        "renderMesh": mesh.stats.get("textureRenderMesh", {}),
+    }
+
+
+def projection_keyframe_debug_summaries(keyframes: list[ProjectionKeyframe]) -> list[dict]:
+    summaries: list[dict] = []
+    for index, keyframe in enumerate(keyframes):
+        depth_frame = keyframe.depth_frame
+        summaries.append({
+            "index": index,
+            "id": keyframe.id,
+            "path": keyframe.path,
+            "timestamp": keyframe.timestamp,
+            "capturedAt": keyframe.captured_at,
+            "imageSize": [keyframe.width, keyframe.height],
+            "intrinsics": [round(float(value), 6) for value in keyframe.intrinsics[:9]],
+            "cameraPosition": [round(value, 6) for value in keyframe.camera_position],
+            "forwardVector": [round(value, 6) for value in camera_forward_from_world_to_camera(keyframe.world_to_camera_values)],
+            "depthFrame": (
+                {
+                    "id": depth_frame.id,
+                    "colorKeyframeId": depth_frame.color_keyframe_id,
+                    "path": depth_frame.path,
+                    "confidencePath": depth_frame.confidence_path,
+                    "timestamp": depth_frame.timestamp,
+                    "depthSize": [depth_frame.width, depth_frame.height],
+                    "intrinsics": [round(float(value), 6) for value in depth_frame.intrinsics[:9]],
+                }
+                if depth_frame is not None
+                else None
+            ),
+        })
+    return summaries
+
+
+def projection_keyframe_pose_delta(left: ProjectionKeyframe, right: ProjectionKeyframe) -> dict:
+    direction_dot = clamp_float(
+        dot(
+            camera_forward_from_world_to_camera(left.world_to_camera_values),
+            camera_forward_from_world_to_camera(right.world_to_camera_values),
+        ),
+        -1.0,
+        1.0,
+    )
+    time_delta = None
+    if left.timestamp is not None and right.timestamp is not None:
+        time_delta = abs(left.timestamp - right.timestamp)
+    return {
+        "translationMeters": round(length(subtract(left.camera_position, right.camera_position)), 4),
+        "angleDegrees": round(math.degrees(math.acos(direction_dot)), 3),
+        "timeDeltaSeconds": round(time_delta, 4) if time_delta is not None else None,
+    }
+
+
+def camera_forward_from_world_to_camera(world_to_camera_values: tuple[float, ...] | list[float]) -> tuple[float, float, float]:
+    if len(world_to_camera_values) < 16:
+        return (0.0, 0.0, -1.0)
+    camera_to_world = invert_rigid_transform([float(value) for value in world_to_camera_values[:16]])
+    forward = normalize((-camera_to_world[8], -camera_to_world[9], -camera_to_world[10]))
+    return forward if forward != (0.0, 0.0, 0.0) else (0.0, 0.0, -1.0)
+
+
+def per_keyframe_mesh_projection_stats(
+    mesh: FusedMesh,
+    keyframes: list[ProjectionKeyframe],
+    max_sampled_faces: int = 20_000,
+) -> list[dict]:
+    if not mesh.faces or not keyframes:
+        return []
+
+    stride = max(1, math.ceil(len(mesh.faces) / max_sampled_faces))
+    sampled_faces = list(range(0, len(mesh.faces), stride))
+    stats: list[dict] = []
+    for keyframe in keyframes:
+        in_bounds_count = 0
+        out_of_bounds_count = 0
+        occluded_count = 0
+        depth_tested_count = 0
+        missing_depth_count = 0
+        unknown_depth_count = 0
+        for face_index in sampled_faces:
+            face = mesh.faces[face_index]
+            center = triangle_center(mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]])
+            projection = project_world_point(center, keyframe)
+            if projection is None:
+                out_of_bounds_count += 1
+                continue
+            in_bounds_count += 1
+            depth_visibility = depth_visibility_for_world_point(center, keyframe)
+            if depth_visibility.status == "occluded":
+                occluded_count += 1
+            elif depth_visibility.status == "unknown":
+                unknown_depth_count += 1
+            if depth_visibility.projected_depth is not None:
+                depth_tested_count += 1
+            if depth_visibility.sampled_depth is None:
+                missing_depth_count += 1
+
+        sample_count = len(sampled_faces)
+        stats.append({
+            "keyframeId": keyframe.id,
+            "sampledFaceCenterCount": sample_count,
+            "inBoundsFaceCenterCount": in_bounds_count,
+            "outOfBoundsFaceCenterCount": out_of_bounds_count,
+            "inBoundsRatio": round(in_bounds_count / max(sample_count, 1), 4),
+            "occludedFaceCenterCount": occluded_count,
+            "unknownDepthFaceCenterCount": unknown_depth_count,
+            "depthTestedFaceCenterCount": depth_tested_count,
+            "missingDepthFaceCenterCount": missing_depth_count,
+        })
+    return stats
+
+
+def write_two_keyframe_projection_overlays(
+    mesh: FusedMesh,
+    keyframes: list[ProjectionKeyframe],
+    output_dir: Path,
+    max_points_per_keyframe: int = 5_000,
+) -> list[dict]:
+    overlays: list[dict] = []
+    if not mesh.faces:
+        return overlays
+
+    for keyframe_index, keyframe in enumerate(keyframes[:2]):
+        overlay = keyframe.image.copy()
+        draw = ImageDraw.Draw(overlay)
+        stride = max(1, math.ceil(len(mesh.faces) / max_points_per_keyframe))
+        projected_count = 0
+        occluded_count = 0
+        sampled_count = 0
+        for face_index in range(0, len(mesh.faces), stride):
+            sampled_count += 1
+            face = mesh.faces[face_index]
+            vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
+            center = triangle_center(vertices[0], vertices[1], vertices[2])
+            projection = project_world_point(center, keyframe)
+            if projection is None:
+                continue
+            u, v, _depth = projection
+            visibility = depth_visibility_for_world_point(center, keyframe)
+            if visibility.status == "occluded":
+                occluded_count += 1
+                color = (255, 196, 0)
+            else:
+                projected_count += 1
+                color = (0, 220, 120)
+            radius = 2
+            draw.ellipse((u - radius, v - radius, u + radius, v + radius), outline=color, fill=color)
+
+        filename = f"two_keyframe_projection_{keyframe_index}.png"
+        output_path = output_dir / filename
+        overlay.save(output_path)
+        overlays.append({
+            "keyframeId": keyframe.id,
+            "path": filename,
+            "sampledFaceCenterCount": sampled_count,
+            "projectedFaceCenterCount": projected_count,
+            "occludedFaceCenterCount": occluded_count,
+            "projectionRatio": round(projected_count / max(sampled_count, 1), 4),
+        })
+    return overlays
 
 
 def is_fallback_color(color: tuple[int, int, int], tolerance: int = 3) -> bool:
