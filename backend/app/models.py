@@ -57,6 +57,9 @@ class ArtifactLinks(BaseModel):
     manifestUrl: Optional[str] = None
     rawFusedMeshUrl: Optional[str] = None
     arkitFusedMeshUrl: Optional[str] = None
+    meshIntegrityReportUrl: Optional[str] = None
+    geometryOnlyGlbUrl: Optional[str] = None
+    geometryCulledGlbUrl: Optional[str] = None
     rgbdFusedMeshUrl: Optional[str] = None
     rgbdSingleFramePointsUrl: Optional[str] = None
     rgbdSingleFrameMeshUrl: Optional[str] = None
@@ -70,6 +73,9 @@ class ArtifactLinks(BaseModel):
     texturePngUrl: Optional[str] = None
     textureDebugJsonUrl: Optional[str] = None
     textureDebugPreviewUrl: Optional[str] = None
+    uvCheckerGlbUrl: Optional[str] = None
+    coverageDebugGlbUrl: Optional[str] = None
+    coverageDebugReportUrl: Optional[str] = None
     stageTimingsUrl: Optional[str] = None
     usdzUrl: Optional[str] = None
     glbUrl: Optional[str] = None

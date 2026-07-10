@@ -99,6 +99,9 @@ class JobStore:
         manifest_url = None
         raw_fused_mesh_url = None
         arkit_fused_mesh_url = None
+        mesh_integrity_report_url = None
+        geometry_only_glb_url = None
+        geometry_culled_glb_url = None
         rgbd_fused_mesh_url = None
         rgbd_single_frame_points_url = None
         rgbd_single_frame_mesh_url = None
@@ -112,6 +115,9 @@ class JobStore:
         texture_png_url = None
         texture_debug_json_url = None
         texture_debug_preview_url = None
+        uv_checker_glb_url = None
+        coverage_debug_glb_url = None
+        coverage_debug_report_url = None
         stage_timings_url = None
         usdz_url = None
         glb_url = None
@@ -122,6 +128,9 @@ class JobStore:
             manifest_url = f"{result_base}/manifest.json"
             raw_fused_mesh_url = self._artifact_url_if_present(result_dir, result_base, "fused_mesh.obj")
             arkit_fused_mesh_url = self._artifact_url_if_present(result_dir, result_base, "arkit_fused_mesh.obj")
+            mesh_integrity_report_url = self._artifact_url_if_present(result_dir, result_base, "mesh_integrity_report.json")
+            geometry_only_glb_url = self._artifact_url_if_present(result_dir, result_base, "geometry_only.glb")
+            geometry_culled_glb_url = self._artifact_url_if_present(result_dir, result_base, "geometry_culled.glb")
             rgbd_fused_mesh_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_fused_mesh.obj")
             rgbd_single_frame_points_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_single_frame_points.ply")
             rgbd_single_frame_mesh_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_single_frame_mesh.obj")
@@ -136,6 +145,9 @@ class JobStore:
             texture_png_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh_texture.png")
             texture_debug_json_url = self._artifact_url_if_present(result_dir, result_base, "texture_debug.json")
             texture_debug_preview_url = self._artifact_url_if_present(result_dir, result_base, "texture_debug_preview.png")
+            uv_checker_glb_url = self._artifact_url_if_present(result_dir, result_base, "uv_checker.glb")
+            coverage_debug_glb_url = self._artifact_url_if_present(result_dir, result_base, "coverage_debug.glb")
+            coverage_debug_report_url = self._artifact_url_if_present(result_dir, result_base, "coverage_debug_report.json")
             stage_timings_url = self._artifact_url_if_present(result_dir, result_base, "stage_timings.json")
             usdz_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.usdz")
             glb_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.glb")
@@ -154,6 +166,9 @@ class JobStore:
                 manifestUrl=manifest_url,
                 rawFusedMeshUrl=raw_fused_mesh_url,
                 arkitFusedMeshUrl=arkit_fused_mesh_url,
+                meshIntegrityReportUrl=mesh_integrity_report_url,
+                geometryOnlyGlbUrl=geometry_only_glb_url,
+                geometryCulledGlbUrl=geometry_culled_glb_url,
                 rgbdFusedMeshUrl=rgbd_fused_mesh_url,
                 rgbdSingleFramePointsUrl=rgbd_single_frame_points_url,
                 rgbdSingleFrameMeshUrl=rgbd_single_frame_mesh_url,
@@ -167,6 +182,9 @@ class JobStore:
                 texturePngUrl=texture_png_url,
                 textureDebugJsonUrl=texture_debug_json_url,
                 textureDebugPreviewUrl=texture_debug_preview_url,
+                uvCheckerGlbUrl=uv_checker_glb_url,
+                coverageDebugGlbUrl=coverage_debug_glb_url,
+                coverageDebugReportUrl=coverage_debug_report_url,
                 stageTimingsUrl=stage_timings_url,
                 usdzUrl=usdz_url,
                 glbUrl=glb_url,

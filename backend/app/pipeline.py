@@ -7,12 +7,14 @@ import binascii
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 import importlib
+from io import BytesIO
 import json
 import logging
 import math
 import multiprocessing
 import os
 import shutil
+import struct
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -45,6 +47,9 @@ class FusedMesh:
     vertices: list[tuple[float, float, float]]
     faces: list[tuple[int, int, int]]
     stats: dict
+
+
+FaceUVs = list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]]
 
 
 @dataclass
@@ -91,6 +96,8 @@ class ProjectionKeyframe:
     captured_at: str | None = None
     color_correction: dict | None = None
     depth_frame: ProjectionDepthFrame | None = None
+    mesh_visibility_mask: bytearray | None = None
+    mesh_visibility_stats: dict | None = None
     world_to_camera_values: tuple[float, ...] = field(init=False, repr=False)
     fx: float = field(init=False)
     fy: float = field(init=False)
@@ -285,6 +292,19 @@ TEXTURE_BLEND_MAX_FACE_CANDIDATES = 6
 TEXTURE_BLEND_MAX_PIXEL_SAMPLES = 5
 TEXTURE_BLEND_MIN_FACING = 0.18
 TEXTURE_BLEND_EDGE_MARGIN_RATIO = 0.018
+TEXTURE_VISIBILITY_RASTER_MAX_SIZE = 768
+TEXTURE_VISIBILITY_DEPTH_TOLERANCE_METERS = 0.035
+TEXTURE_COHERENT_LABEL_MAX_CANDIDATES = 4
+TEXTURE_COHERENT_LABEL_ITERATIONS = 3
+TEXTURE_COHERENT_LABEL_SMOOTHNESS_WEIGHT = 0.18
+TEXTURE_COHERENT_LABEL_SWITCH_TOLERANCE = 0.72
+ADAPTIVE_KEYFRAME_PROXY_FACE_SAMPLES = 6_000
+ADAPTIVE_KEYFRAME_MIN_MARGINAL_BENEFIT_RATIO = 0.006
+ADAPTIVE_KEYFRAME_MIN_NEW_COVERAGE_RATIO = 0.0025
+ADAPTIVE_KEYFRAME_MIN_VISIBLE_SAMPLE_RATIO = 0.002
+ADAPTIVE_KEYFRAME_POSE_DEDUPE_TRANSLATION_METERS = 0.045
+ADAPTIVE_KEYFRAME_POSE_DEDUPE_ANGLE_DEGREES = 4.0
+ADAPTIVE_KEYFRAME_QUALITY_GAIN_EPSILON = 0.015
 TEXTURE_DEPTH_OCCLUSION_BASE_TOLERANCE_METERS = 0.08
 TEXTURE_DEPTH_OCCLUSION_RELATIVE_TOLERANCE = 0.035
 TEXTURE_DEPTH_EDGE_ABSOLUTE_METERS = 0.12
@@ -357,8 +377,8 @@ class ProcessingProfile:
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
     "fast_onboarding": ProcessingProfile(
         name="fast_onboarding",
-        max_keyframes=12,
-        max_depth_frames=12,
+        max_keyframes=None,
+        max_depth_frames=None,
         max_rgbd_frames=0,
         use_rgbd_geometry=False,
         write_vertex_colored_debug=False,
@@ -367,7 +387,7 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         texture_tsdf_render_target_faces=FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
         planar_chart_raster_stride=2,
         planar_chart_projection_mode="direct",
-        fallback_texture_face_limit=FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT,
+        fallback_texture_face_limit=None,
         preserve_texture_render_mesh=True,
         densify_texture_render_mesh=True,
         dense_single_view_texture=False,
@@ -375,16 +395,16 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",
-        max_keyframes=64,
-        max_depth_frames=48,
+        max_keyframes=None,
+        max_depth_frames=None,
         max_rgbd_frames=36,
-        use_rgbd_geometry=True,
+        use_rgbd_geometry=False,
         write_vertex_colored_debug=True,
         write_texture_debug_preview=True,
         texture_render_target_faces=TEXTURE_RENDER_TARGET_FACE_COUNT,
         texture_tsdf_render_target_faces=TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT,
         planar_chart_raster_stride=1,
-        planar_chart_projection_mode="blend",
+        planar_chart_projection_mode="direct",
         fallback_texture_face_limit=None,
     ),
     "rgbd_one_keyframe_diagnostic": ProcessingProfile(
@@ -436,6 +456,10 @@ class ValidationStage:
             "roomPlanSegmentCount": len(payload.roomPlanSegments),
         }
         (job_dir / "work" / "payload_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        (job_dir / "work" / "capture_data_validation.json").write_text(
+            json.dumps(build_capture_data_validation(payload), indent=2),
+            encoding="utf-8",
+        )
         if is_cancelled():
             raise asyncio.CancelledError
         await report(self.name, 20, f"Validated {mesh_count} mesh anchors and {keyframe_count} keyframes")
@@ -452,6 +476,15 @@ class GeometryFusionStage:
         (job_dir / "work" / "raw_mesh_anchors.json").write_text(json.dumps(mesh_anchors, indent=2), encoding="utf-8")
 
         mesh = fuse_mesh_anchors(mesh_anchors)
+        integrity_report = build_mesh_integrity_report(mesh)
+        mesh.stats["integrity"] = {
+            "bounds": integrity_report["bounds"],
+            "surfaceAreaM2": integrity_report["surfaceAreaM2"],
+            "topology": integrity_report["topology"],
+            "connectedComponents": integrity_report["connectedComponents"],
+            "validation": integrity_report["validation"],
+        }
+        mesh.stats["diagnosticArtifacts"] = write_geometry_diagnostic_artifacts(mesh, job_dir / "work")
         write_fused_mesh_json(mesh, job_dir / "work" / "fused_mesh.json")
         write_fused_mesh_json(mesh, job_dir / "work" / "arkit_fused_mesh.json")
         obj_path = job_dir / "work" / "fused_mesh.obj"
@@ -476,10 +509,13 @@ class KeyframeDecodeStage:
         await report(self.name, 58, "Decoding camera keyframes")
         payload = json.loads((job_dir / "upload" / "scan_payload.json").read_text(encoding="utf-8"))
         profile = read_processing_profile(job_dir / "work")
+        mesh_path = job_dir / "work" / "arkit_fused_mesh.json"
+        mesh = read_fused_mesh_json(mesh_path) if mesh_path.exists() else None
         selected_images, selection_stats = select_keyframes_for_profile(
             payload.get("images", []),
             profile,
             depth_frames=payload.get("depthFrames") or [],
+            mesh=mesh,
         )
         keyframe_dir = job_dir / "work" / "keyframes"
         keyframe_dir.mkdir(parents=True, exist_ok=True)
@@ -507,6 +543,16 @@ class KeyframeDecodeStage:
                 "cameraTransform": image.get("cameraTransform"),
                 "intrinsics": image.get("intrinsics"),
                 "imageResolution": image.get("imageResolution"),
+                "originalImageResolution": image.get("originalImageResolution"),
+                "imageOrientation": image.get("imageOrientation"),
+                "intrinsicsReferenceResolution": image.get("intrinsicsReferenceResolution"),
+                "trackingState": image.get("trackingState"),
+                "trackingReason": image.get("trackingReason"),
+                "exposureDurationSeconds": image.get("exposureDurationSeconds"),
+                "iso": image.get("iso"),
+                "ambientIntensity": image.get("ambientIntensity"),
+                "ambientColorTemperature": image.get("ambientColorTemperature"),
+                "sharpnessScore": image.get("sharpnessScore"),
                 "path": f"keyframes/{filename}",
                 "byteCount": len(image_bytes),
             })
@@ -672,7 +718,7 @@ class RGBDGeometryFusionStage:
             stats_path.write_text(json.dumps({
                 "available": bool(depth_frames),
                 "used": False,
-                "reason": f"RGBD geometry skipped by {profile.name}; using ARKit mesh for fast first result.",
+                "reason": f"RGBD geometry skipped by {profile.name}; using ARKit mesh as authoritative geometry.",
                 "depthFrameCount": len(depth_frames),
                 "keyframeCount": len(keyframes),
                 "geometrySource": "arkit_mesh_anchor_fusion",
@@ -680,7 +726,7 @@ class RGBDGeometryFusionStage:
                 "geometryPreservation": geometry_preservation,
                 "profile": processing_profile_stats(profile),
             }, indent=2), encoding="utf-8")
-            await report(self.name, 76, "RGBD fusion skipped for fast onboarding")
+            await report(self.name, 76, f"RGBD fusion skipped for {profile.name}")
             return
 
         if not depth_frames:
@@ -893,11 +939,11 @@ class TexturedMeshStage:
                 if profile.write_texture_debug_preview
                 else None
             ),
-            output_projection_overlay_dir=(
-                job_dir / "work"
-                if is_fast_rgbd_hero_patch_profile(profile)
-                else None
-            ),
+            output_projection_overlay_dir=job_dir / "work",
+            output_textured_glb_path=job_dir / "work" / "textured_mesh.glb",
+            output_uv_checker_glb_path=job_dir / "work" / "uv_checker.glb",
+            output_coverage_debug_glb_path=job_dir / "work" / "coverage_debug.glb",
+            output_coverage_debug_report_path=job_dir / "work" / "coverage_debug_report.json",
             report_progress=lambda progress, message: report(self.name, progress, message),
             is_cancelled=is_cancelled,
             profile=profile,
@@ -946,10 +992,10 @@ class TexturedMeshStage:
                 "reason": "USDZ conversion is represented in the manifest but not enabled in this backend milestone.",
             },
             "glb": {
-                "available": False,
-                "path": None,
-                "reason": "GLB export is not supported by the current iOS viewer.",
+                **textured_stats["glb"],
+                "role": "photoreal_textured_mesh",
             },
+            "diagnosticGlbs": textured_stats["diagnosticGlbs"],
         }, indent=2), encoding="utf-8")
         await asyncio.sleep(0.2)
         if is_cancelled():
@@ -993,6 +1039,7 @@ class ExportStage:
                 "available": False,
                 "reason": "TexturedMeshStage disabled for raw relocalization testing.",
             },
+            "diagnosticGlbs": {},
         }
         processing_profile = json.loads((work_dir / "processing_profile.json").read_text(encoding="utf-8")) if (work_dir / "processing_profile.json").exists() else {
             "name": "full_quality",
@@ -1014,14 +1061,22 @@ class ExportStage:
             "textured_mesh.obj",
             "textured_mesh.mtl",
             "textured_mesh_texture.png",
+            "textured_mesh.glb",
+            "geometry_only.glb",
+            "geometry_culled.glb",
+            "uv_checker.glb",
+            "coverage_debug.glb",
             "texture_debug.json",
             "texture_debug_preview.png",
+            "mesh_integrity_report.json",
+            "coverage_debug_report.json",
             "two_keyframe_projection_0.png",
             "two_keyframe_projection_1.png",
             "stage_timings.json",
             "keyframe_selection.json",
             "depth_frame_selection.json",
             "processing_profile.json",
+            "capture_data_validation.json",
         ]:
             src = work_dir / filename
             if src.exists():
@@ -1089,6 +1144,26 @@ class ExportStage:
                     "statsPath": "arkit_mesh_stats.json",
                     "available": (result_dir / "arkit_fused_mesh.obj").exists(),
                 },
+                "meshIntegrityReport": {
+                    "role": "mesh_integrity_report",
+                    "format": "json",
+                    "path": "mesh_integrity_report.json",
+                    "available": (result_dir / "mesh_integrity_report.json").exists(),
+                },
+                "geometryOnlyGlb": {
+                    "role": "complete_arkit_geometry_no_texture",
+                    "format": "glb",
+                    "path": "geometry_only.glb",
+                    "available": (result_dir / "geometry_only.glb").exists(),
+                    "stats": mesh_stats.get("diagnosticArtifacts", {}).get("geometryOnlyGlb", {}),
+                },
+                "geometryCulledGlb": {
+                    "role": "complete_arkit_geometry_backface_culling_check",
+                    "format": "glb",
+                    "path": "geometry_culled.glb",
+                    "available": (result_dir / "geometry_culled.glb").exists(),
+                    "stats": mesh_stats.get("diagnosticArtifacts", {}).get("geometryCulledGlb", {}),
+                },
                 "rgbdFusedMesh": {
                     "role": "rgbd_tsdf_fused_mesh",
                     "format": "obj",
@@ -1132,6 +1207,22 @@ class ExportStage:
                     "previewAvailable": (result_dir / "texture_debug_preview.png").exists(),
                     "stats": texture_manifest.get("textureDebug", {}).get("stats", {}),
                 },
+                "uvCheckerGlb": {
+                    "role": "uv_checker_complete_texture_mesh",
+                    "format": "glb",
+                    "path": "uv_checker.glb",
+                    "available": (result_dir / "uv_checker.glb").exists(),
+                    "stats": texture_manifest.get("diagnosticGlbs", {}).get("uvCheckerGlb", {}),
+                },
+                "coverageDebugGlb": {
+                    "role": "texture_coverage_debug_mesh",
+                    "format": "glb",
+                    "path": "coverage_debug.glb",
+                    "reportPath": "coverage_debug_report.json",
+                    "available": (result_dir / "coverage_debug.glb").exists(),
+                    "reportAvailable": (result_dir / "coverage_debug_report.json").exists(),
+                    "stats": texture_manifest.get("diagnosticGlbs", {}).get("coverageDebugGlb", {}),
+                },
                 "stageTimings": {
                     "role": "processing_timing_diagnostics",
                     "format": "json",
@@ -1165,14 +1256,22 @@ class ExportStage:
                 "textured_mesh.obj",
                 "textured_mesh.mtl",
                 "textured_mesh_texture.png",
+                "textured_mesh.glb",
+                "geometry_only.glb",
+                "geometry_culled.glb",
+                "uv_checker.glb",
+                "coverage_debug.glb",
                 "texture_debug.json",
                 "texture_debug_preview.png",
+                "mesh_integrity_report.json",
+                "coverage_debug_report.json",
                 "two_keyframe_projection_0.png",
                 "two_keyframe_projection_1.png",
                 "keyframe_manifest.json",
                 "keyframe_selection.json",
                 "depth_frame_selection.json",
                 "processing_profile.json",
+                "capture_data_validation.json",
                 "stage_timings.json",
                 "arkit_mesh_stats.json",
                 "depth_frame_manifest.json",
@@ -1185,6 +1284,9 @@ class ExportStage:
             "mesh": {
                 "rawFusedMesh": artifact_manifest["artifacts"]["rawFusedMesh"],
                 "arkitFusedMeshDebug": artifact_manifest["artifacts"]["arkitFusedMeshDebug"],
+                "meshIntegrityReport": artifact_manifest["artifacts"]["meshIntegrityReport"],
+                "geometryOnlyGlb": artifact_manifest["artifacts"]["geometryOnlyGlb"],
+                "geometryCulledGlb": artifact_manifest["artifacts"]["geometryCulledGlb"],
                 "rgbdFusedMesh": artifact_manifest["artifacts"]["rgbdFusedMesh"],
                 "rgbdSingleFrameDiagnostic": artifact_manifest["artifacts"]["rgbdSingleFrameDiagnostic"],
             },
@@ -1193,6 +1295,8 @@ class ExportStage:
                 "preferredArtifact": preferred_photoreal,
                 "texturedObj": artifact_manifest["artifacts"]["texturedObj"],
                 "textureDebug": artifact_manifest["artifacts"]["textureDebug"],
+                "uvCheckerGlb": artifact_manifest["artifacts"]["uvCheckerGlb"],
+                "coverageDebugGlb": artifact_manifest["artifacts"]["coverageDebugGlb"],
                 "usdz": artifact_manifest["artifacts"]["usdz"],
                 "glb": artifact_manifest["artifacts"]["glb"],
             },
@@ -3284,6 +3388,112 @@ def processing_profile_from_payload(payload: dict | ScanPayloadEnvelope | None) 
     return PROCESSING_PROFILES.get(name) or PROCESSING_PROFILES.get(DEFAULT_PROCESSING_PROFILE) or PROCESSING_PROFILES["full_quality"]
 
 
+def build_capture_data_validation(payload: dict | ScanPayloadEnvelope) -> dict:
+    if isinstance(payload, ScanPayloadEnvelope):
+        data = payload.model_dump(mode="json")
+    else:
+        data = payload
+
+    mesh_anchors = data.get("meshAnchors") or []
+    keyframes = data.get("images") or []
+    depth_frames = data.get("depthFrames") or []
+    keyframe_optional_fields = [
+        "originalImageResolution",
+        "imageOrientation",
+        "intrinsicsReferenceResolution",
+        "trackingState",
+        "trackingReason",
+        "exposureDurationSeconds",
+        "iso",
+        "ambientIntensity",
+        "ambientColorTemperature",
+        "sharpnessScore",
+    ]
+    depth_optional_fields = ["confidenceBase64", "confidenceFormat", "metersPerUnit"]
+    missing_keyframe_fields = {
+        field_name: sum(1 for keyframe in keyframes if keyframe.get(field_name) is None)
+        for field_name in keyframe_optional_fields
+    }
+    missing_depth_fields = {
+        field_name: sum(1 for frame in depth_frames if frame.get(field_name) is None)
+        for field_name in depth_optional_fields
+    }
+    invalid_keyframe_projection_records = [
+        {
+            "index": index,
+            "id": keyframe.get("id"),
+            "reason": validation["reason"],
+        }
+        for index, keyframe in enumerate(keyframes)
+        if not (validation := validate_keyframe_projection_metadata(keyframe))["valid"]
+    ]
+    mesh_anchor_field_counts = {
+        "transform": sum(1 for anchor in mesh_anchors if len(anchor.get("transform") or []) == 16),
+        "vertices": sum(1 for anchor in mesh_anchors if bool(anchor.get("vertices"))),
+        "triangleIndices": sum(1 for anchor in mesh_anchors if bool(anchor.get("triangleIndices"))),
+        "normals": sum(1 for anchor in mesh_anchors if bool(anchor.get("normals"))),
+        "classifications": sum(1 for anchor in mesh_anchors if bool(anchor.get("classifications"))),
+    }
+    warnings = []
+    if missing_keyframe_fields.get("originalImageResolution") == len(keyframes) and keyframes:
+        warnings.append("RGB original/native image resolution is missing from all keyframes.")
+    if missing_keyframe_fields.get("imageOrientation") == len(keyframes) and keyframes:
+        warnings.append("RGB image orientation is missing from all keyframes.")
+    if missing_keyframe_fields.get("trackingState") == len(keyframes) and keyframes:
+        warnings.append("ARKit tracking state is missing from all keyframes.")
+    if mesh_anchor_field_counts["normals"] == 0 and mesh_anchors:
+        warnings.append("Mesh normals are not uploaded; backend recomputes normals from fused faces.")
+    if invalid_keyframe_projection_records:
+        warnings.append("Some keyframes have invalid transform, intrinsics, or image-resolution metadata.")
+
+    return {
+        "version": "v1",
+        "coordinateConventions": {
+            "matrixStorage": "column_major_4x4",
+            "cameraTransform": "ARKit camera-to-world transform",
+            "meshAnchorTransform": "ARKit mesh-anchor local-to-world transform",
+            "worldToCamera": "rigid inverse of cameraTransform",
+            "cameraForward": "ARKit camera looks down local -Z",
+            "projection": "depth=-cameraZ; u=fx*x/depth+cx; v=cy-fy*y/depth",
+            "units": "meters in ARKit world space",
+            "rgbImageOrientationAssumption": "intrinsics are expected to match the encoded JPEG pixel orientation and resolution",
+        },
+        "mesh": {
+            "anchorCount": len(mesh_anchors),
+            "fieldCounts": mesh_anchor_field_counts,
+            "savesVerticesAndFaces": mesh_anchor_field_counts["vertices"] == len(mesh_anchors)
+            and mesh_anchor_field_counts["triangleIndices"] == len(mesh_anchors),
+            "savesAnchorTransforms": mesh_anchor_field_counts["transform"] == len(mesh_anchors),
+            "savesNormals": mesh_anchor_field_counts["normals"] == len(mesh_anchors) and bool(mesh_anchors),
+            "savesClassifications": mesh_anchor_field_counts["classifications"] == len(mesh_anchors) and bool(mesh_anchors),
+        },
+        "keyframes": {
+            "count": len(keyframes),
+            "requiredFieldCounts": {
+                "cameraTransform": sum(1 for item in keyframes if len(item.get("cameraTransform") or []) == 16),
+                "intrinsics": sum(1 for item in keyframes if len(item.get("intrinsics") or []) == 9),
+                "imageResolution": sum(1 for item in keyframes if len(item.get("imageResolution") or []) == 2),
+                "jpegBase64": sum(1 for item in keyframes if bool(item.get("jpegBase64"))),
+                "timestamp": sum(1 for item in keyframes if item.get("timestamp") is not None),
+            },
+            "missingOptionalFieldCounts": missing_keyframe_fields,
+            "invalidProjectionMetadata": invalid_keyframe_projection_records[:80],
+        },
+        "depthFrames": {
+            "count": len(depth_frames),
+            "requiredFieldCounts": {
+                "cameraTransform": sum(1 for item in depth_frames if len(item.get("cameraTransform") or []) == 16),
+                "intrinsics": sum(1 for item in depth_frames if len(item.get("intrinsics") or []) == 9),
+                "depthResolution": sum(1 for item in depth_frames if len(item.get("depthResolution") or []) == 2),
+                "depthBase64": sum(1 for item in depth_frames if bool(item.get("depthBase64"))),
+                "timestamp": sum(1 for item in depth_frames if item.get("timestamp") is not None),
+            },
+            "missingOptionalFieldCounts": missing_depth_fields,
+        },
+        "warnings": warnings,
+    }
+
+
 def write_processing_profile(profile: ProcessingProfile, output_path: Path) -> None:
     output_path.write_text(json.dumps(processing_profile_stats(profile), indent=2), encoding="utf-8")
 
@@ -3334,6 +3544,7 @@ def select_keyframes_for_profile(
     profile: ProcessingProfile,
     *,
     depth_frames: list[dict] | None = None,
+    mesh: FusedMesh | None = None,
 ) -> tuple[list[dict], dict]:
     if is_fast_rgbd_hero_patch_profile(profile):
         selected_pairs, pair_stats = select_rgbd_payload_candidate_pool_for_fast_profile(
@@ -3361,8 +3572,38 @@ def select_keyframes_for_profile(
             "originalKeyframeCount": len(keyframes),
             "selectedKeyframeCount": len(selected),
             "selectedKeyframeIds": selected_ids,
-            **pair_stats,
-        }
+                **pair_stats,
+            }
+
+    if profile.max_keyframes is None:
+        selected = [
+            keyframe for keyframe in keyframes
+            if validate_keyframe_projection_metadata(keyframe)["valid"] and keyframe.get("jpegBase64")
+        ]
+        if selected:
+            selected_ids = [item.get("id") for item in selected if item.get("id")]
+            return selected, {
+                "strategy": "all_uploaded_keyframes_coverage_first",
+                "profile": profile.name,
+                "originalKeyframeCount": len(keyframes),
+                "selectedKeyframeCount": len(selected),
+                "selectedKeyframeIds": selected_ids,
+                "rejectedKeyframeCount": len(keyframes) - len(selected),
+                "reason": "Profile has no maxKeyframes cap; texture coverage takes priority over adaptive pruning.",
+            }
+
+    if mesh is not None and mesh.faces:
+        selected, adaptive_stats = select_adaptive_texture_keyframes(keyframes, mesh, profile=profile)
+        if selected:
+            selected_ids = [item.get("id") for item in selected if item.get("id")]
+            return selected, {
+                "strategy": "adaptive_mesh_coverage_quality",
+                "profile": profile.name,
+                "originalKeyframeCount": len(keyframes),
+                "selectedKeyframeCount": len(selected),
+                "selectedKeyframeIds": selected_ids,
+                **adaptive_stats,
+            }
 
     selected = pose_diverse_items(
         keyframes,
@@ -3377,6 +3618,487 @@ def select_keyframes_for_profile(
         "originalKeyframeCount": len(keyframes),
         "selectedKeyframeCount": len(selected),
         "selectedKeyframeIds": selected_ids,
+        "fallbackReason": "adaptive_mesh_selection_unavailable" if mesh is None or not mesh.faces else None,
+    }
+
+
+def select_adaptive_texture_keyframes(
+    keyframes: list[dict],
+    mesh: FusedMesh,
+    *,
+    profile: ProcessingProfile,
+) -> tuple[list[dict], dict]:
+    if not keyframes or not mesh.faces:
+        return [], {
+            "adaptiveSelectionAvailable": False,
+            "fallbackReason": "missing_keyframes_or_mesh_faces",
+        }
+
+    samples = adaptive_mesh_surface_samples(mesh, max_samples=ADAPTIVE_KEYFRAME_PROXY_FACE_SAMPLES)
+    if not samples:
+        return [], {
+            "adaptiveSelectionAvailable": False,
+            "fallbackReason": "mesh_proxy_sampling_empty",
+        }
+
+    quality_stats_by_index = keyframe_image_quality_stats(keyframes)
+    frame_records: list[dict] = []
+    rejected: list[dict] = []
+    for index, keyframe in enumerate(keyframes):
+        record = adaptive_keyframe_record(
+            keyframe,
+            index=index,
+            samples=samples,
+            image_quality=quality_stats_by_index.get(index, {}),
+        )
+        if record.get("usable"):
+            frame_records.append(record)
+        else:
+            rejected.append({
+                "index": index,
+                "id": keyframe.get("id"),
+                "reason": record.get("rejectionReason", "unusable_keyframe"),
+            })
+
+    if not frame_records:
+        return [], {
+            "adaptiveSelectionAvailable": False,
+            "fallbackReason": "no_keyframes_project_mesh_proxy",
+            "proxySampleCount": len(samples),
+            "rejectedKeyframes": rejected[:80],
+        }
+
+    total_proxy_area = max(sum(sample["area"] for sample in samples), 1e-9)
+    total_potential = max(
+        sum(max(record["sampleScores"].get(sample["sampleIndex"], 0.0) for record in frame_records) for sample in samples),
+        1e-9,
+    )
+    selected_records: list[dict] = []
+    selected_indices: set[int] = set()
+    selected_sample_quality = {sample["sampleIndex"]: 0.0 for sample in samples}
+    selected_sample_observed = {sample["sampleIndex"]: False for sample in samples}
+    iterations: list[dict] = []
+
+    while len(selected_indices) < len(frame_records):
+        best_record: dict | None = None
+        best_metrics: dict | None = None
+        for record in frame_records:
+            if int(record["index"]) in selected_indices:
+                continue
+            if is_redundant_adaptive_pose(record, selected_records):
+                continue
+            metrics = adaptive_keyframe_marginal_metrics(
+                record,
+                selected_sample_quality,
+                selected_sample_observed,
+                total_proxy_area=total_proxy_area,
+                total_potential=total_potential,
+            )
+            if best_metrics is None or metrics["marginalBenefit"] > best_metrics["marginalBenefit"]:
+                best_record = record
+                best_metrics = metrics
+
+        if best_record is None or best_metrics is None:
+            break
+
+        should_continue = (
+            not selected_records
+            or best_metrics["marginalBenefitRatio"] >= ADAPTIVE_KEYFRAME_MIN_MARGINAL_BENEFIT_RATIO
+            or (
+                best_metrics["newCoverageRatio"] >= ADAPTIVE_KEYFRAME_MIN_NEW_COVERAGE_RATIO
+                and best_metrics["improvedSampleCount"] > 0
+            )
+        )
+        if not should_continue:
+            rejected.append({
+                "index": best_record.get("index"),
+                "id": best_record.get("id"),
+                "reason": "below_marginal_benefit_threshold",
+                "marginalBenefitRatio": round(best_metrics["marginalBenefitRatio"], 6),
+                "newCoverageRatio": round(best_metrics["newCoverageRatio"], 6),
+            })
+            break
+
+        selected_records.append(best_record)
+        selected_indices.add(int(best_record["index"]))
+        for sample_index, quality in best_record["sampleScores"].items():
+            if quality > selected_sample_quality.get(sample_index, 0.0):
+                selected_sample_quality[sample_index] = quality
+            selected_sample_observed[sample_index] = True
+        iterations.append({
+            "iteration": len(selected_records),
+            "index": best_record["index"],
+            "id": best_record.get("id"),
+            "visibleSampleCount": best_record["visibleSampleCount"],
+            "visibleCoverageRatio": round(best_record["visibleArea"] / total_proxy_area, 5),
+            "marginalBenefitRatio": round(best_metrics["marginalBenefitRatio"], 6),
+            "newCoverageRatio": round(best_metrics["newCoverageRatio"], 6),
+            "improvedSampleCount": best_metrics["improvedSampleCount"],
+        })
+
+    selected = [keyframes[int(record["index"])] for record in selected_records]
+    selected_coverage_area = sum(
+        sample["area"]
+        for sample in samples
+        if selected_sample_observed.get(sample["sampleIndex"], False)
+    )
+    for record in frame_records:
+        if int(record["index"]) not in selected_indices:
+            rejected.append({
+                "index": record.get("index"),
+                "id": record.get("id"),
+                "reason": "not_selected_after_greedy_optimization",
+                "visibleSampleCount": record.get("visibleSampleCount"),
+                "visibleCoverageRatio": round(record.get("visibleArea", 0.0) / total_proxy_area, 5),
+            })
+
+    return selected, {
+        "adaptiveSelectionAvailable": True,
+        "algorithm": "greedy_proxy_mesh_coverage_quality",
+        "proxySampleCount": len(samples),
+        "proxyFaceStride": adaptive_proxy_face_stride(mesh, ADAPTIVE_KEYFRAME_PROXY_FACE_SAMPLES),
+        "candidateKeyframeCount": len(frame_records),
+        "rejectedKeyframeCount": len(rejected),
+        "selectedCoverageRatio": round(selected_coverage_area / total_proxy_area, 5),
+        "selectedQualityPotentialRatio": round(sum(selected_sample_quality.values()) / total_potential, 5),
+        "minMarginalBenefitRatio": ADAPTIVE_KEYFRAME_MIN_MARGINAL_BENEFIT_RATIO,
+        "minNewCoverageRatio": ADAPTIVE_KEYFRAME_MIN_NEW_COVERAGE_RATIO,
+        "iterations": iterations,
+        "candidateSummary": [
+            adaptive_keyframe_record_summary(record, total_proxy_area)
+            for record in sorted(frame_records, key=lambda item: item["qualitySum"], reverse=True)[:80]
+        ],
+        "rejectedKeyframes": rejected[:160],
+    }
+
+
+def adaptive_proxy_face_stride(mesh: FusedMesh, max_samples: int) -> int:
+    return max(1, math.ceil(len(mesh.faces) / max(1, max_samples)))
+
+
+def adaptive_mesh_surface_samples(mesh: FusedMesh, max_samples: int) -> list[dict]:
+    stride = adaptive_proxy_face_stride(mesh, max_samples)
+    samples: list[dict] = []
+    for sample_index, face_index in enumerate(range(0, len(mesh.faces), stride)):
+        face = mesh.faces[face_index]
+        if not valid_triangle_indices(face, len(mesh.vertices)):
+            continue
+        vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
+        area = triangle_area(vertices[0], vertices[1], vertices[2])
+        if area <= 1e-10:
+            continue
+        samples.append({
+            "sampleIndex": sample_index,
+            "faceIndex": face_index,
+            "center": triangle_center(vertices[0], vertices[1], vertices[2]),
+            "normal": triangle_normal(vertices[0], vertices[1], vertices[2]),
+            "area": area * stride,
+        })
+    return samples
+
+
+def keyframe_image_quality_stats(keyframes: list[dict]) -> dict[int, dict]:
+    return {
+        index: estimate_keyframe_image_quality(keyframe)
+        for index, keyframe in enumerate(keyframes)
+    }
+
+
+def estimate_keyframe_image_quality(keyframe: dict, thumbnail_max: int = 112) -> dict:
+    raw_base64 = keyframe.get("jpegBase64")
+    if not raw_base64:
+        return {
+            "available": False,
+            "sharpnessScore": safe_float(keyframe.get("sharpnessScore")) or 0.75,
+            "exposureScore": 0.75,
+            "meanLuminance": None,
+            "overexposedRatio": None,
+            "underexposedRatio": None,
+        }
+
+    try:
+        image_bytes = base64.b64decode(raw_base64, validate=True)
+        image = Image.open(BytesIO(image_bytes)).convert("L")
+        image.thumbnail((thumbnail_max, thumbnail_max), Image.Resampling.BILINEAR)
+        width, height = image.size
+        values = list(image.getdata())
+    except Exception:
+        return {
+            "available": False,
+            "sharpnessScore": safe_float(keyframe.get("sharpnessScore")) or 0.65,
+            "exposureScore": 0.55,
+            "meanLuminance": None,
+            "overexposedRatio": None,
+            "underexposedRatio": None,
+        }
+
+    if not values or width < 3 or height < 3:
+        return {
+            "available": False,
+            "sharpnessScore": 0.55,
+            "exposureScore": 0.55,
+            "meanLuminance": None,
+            "overexposedRatio": None,
+            "underexposedRatio": None,
+        }
+
+    mean_luminance = sum(values) / len(values)
+    overexposed_ratio = sum(1 for value in values if value >= 248) / len(values)
+    underexposed_ratio = sum(1 for value in values if value <= 6) / len(values)
+    laplacian_sum = 0.0
+    laplacian_count = 0
+    for y in range(1, height - 1, 2):
+        row = y * width
+        for x in range(1, width - 1, 2):
+            center = values[row + x]
+            response = (
+                4 * center
+                - values[row + x - 1]
+                - values[row + x + 1]
+                - values[row - width + x]
+                - values[row + width + x]
+            )
+            laplacian_sum += abs(response)
+            laplacian_count += 1
+    laplacian_mean = laplacian_sum / max(laplacian_count, 1)
+    sharpness_score = clamp_float(laplacian_mean / 18.0, 0.35, 1.35)
+    exposure_score = clamp_float(
+        1.0
+        - (abs(mean_luminance - 128.0) / 170.0)
+        - overexposed_ratio * 0.75
+        - underexposed_ratio * 0.9,
+        0.15,
+        1.0,
+    )
+    return {
+        "available": True,
+        "sharpnessScore": round(sharpness_score, 4),
+        "exposureScore": round(exposure_score, 4),
+        "meanLuminance": round(mean_luminance, 2),
+        "overexposedRatio": round(overexposed_ratio, 4),
+        "underexposedRatio": round(underexposed_ratio, 4),
+    }
+
+
+def adaptive_keyframe_record(
+    keyframe: dict,
+    *,
+    index: int,
+    samples: list[dict],
+    image_quality: dict,
+) -> dict:
+    transform = keyframe.get("cameraTransform") or []
+    intrinsics = keyframe.get("intrinsics") or []
+    resolution = keyframe.get("imageResolution") or []
+    validation = validate_keyframe_projection_metadata(keyframe)
+    if not validation["valid"]:
+        return {
+            "usable": False,
+            "index": index,
+            "id": keyframe.get("id"),
+            "rejectionReason": validation["reason"],
+        }
+
+    width, height = int(resolution[0]), int(resolution[1])
+    fx = float(intrinsics[0])
+    fy = float(intrinsics[4])
+    world_to_camera = invert_rigid_transform(transform)
+    camera_position = (float(transform[12]), float(transform[13]), float(transform[14]))
+    pose_confidence = tracking_pose_confidence(keyframe)
+    sharpness_score = float(image_quality.get("sharpnessScore") or safe_float(keyframe.get("sharpnessScore")) or 0.75)
+    exposure_score = float(image_quality.get("exposureScore") or 0.75)
+    sample_scores: dict[int, float] = {}
+    visible_area = 0.0
+    quality_sum = 0.0
+    edge_reject_count = 0
+    grazing_reject_count = 0
+    invalid_projection_count = 0
+
+    for sample in samples:
+        projection = project_world_point_values(sample["center"], world_to_camera, intrinsics, width, height)
+        if projection is None:
+            invalid_projection_count += 1
+            continue
+        u, v, depth = projection
+        edge_margin = min(u, v, width - u, height - v)
+        edge_threshold = max(2.0, min(width, height) * TEXTURE_BLEND_EDGE_MARGIN_RATIO)
+        if edge_margin < edge_threshold:
+            edge_reject_count += 1
+            continue
+
+        view_vector = normalize(subtract(camera_position, sample["center"]))
+        facing = abs(dot(sample["normal"], view_vector)) if sample["normal"] != (0.0, 0.0, 0.0) else 0.25
+        if facing < TEXTURE_BLEND_MIN_FACING:
+            grazing_reject_count += 1
+            continue
+
+        pixel_density = math.sqrt(max(fx * fy, 1e-6)) / max(depth, 0.2)
+        resolution_score = clamp_float(pixel_density / 450.0, 0.2, 2.75)
+        angle_score = clamp_float((facing - TEXTURE_BLEND_MIN_FACING) / (1.0 - TEXTURE_BLEND_MIN_FACING), 0.05, 1.0)
+        edge_score = clamp_float(edge_margin / max(min(width, height) * 0.22, 1.0), 0.08, 1.0)
+        area = float(sample["area"])
+        quality = (
+            area
+            * resolution_score
+            * angle_score
+            * edge_score
+            * clamp_float(sharpness_score, 0.25, 1.35)
+            * clamp_float(exposure_score, 0.15, 1.0)
+            * pose_confidence
+        )
+        if quality <= 0:
+            continue
+        sample_scores[int(sample["sampleIndex"])] = quality
+        visible_area += area
+        quality_sum += quality
+
+    visible_sample_count = len(sample_scores)
+    visible_ratio = visible_sample_count / max(len(samples), 1)
+    if visible_ratio < ADAPTIVE_KEYFRAME_MIN_VISIBLE_SAMPLE_RATIO:
+        return {
+            "usable": False,
+            "index": index,
+            "id": keyframe.get("id"),
+            "rejectionReason": "insufficient_projected_mesh_coverage",
+            "visibleSampleCount": visible_sample_count,
+            "visibleSampleRatio": round(visible_ratio, 5),
+        }
+
+    return {
+        "usable": True,
+        "index": index,
+        "id": keyframe.get("id"),
+        "timestamp": safe_float(keyframe.get("timestamp")),
+        "cameraPosition": camera_position,
+        "cameraForward": normalize((-transform[8], -transform[9], -transform[10])),
+        "sampleScores": sample_scores,
+        "visibleSampleCount": visible_sample_count,
+        "visibleArea": visible_area,
+        "qualitySum": quality_sum,
+        "poseConfidence": pose_confidence,
+        "sharpnessScore": round(sharpness_score, 4),
+        "exposureScore": round(exposure_score, 4),
+        "imageQuality": image_quality,
+        "rejectCounts": {
+            "invalidProjection": invalid_projection_count,
+            "edge": edge_reject_count,
+            "grazing": grazing_reject_count,
+        },
+    }
+
+
+def validate_keyframe_projection_metadata(keyframe: dict) -> dict:
+    transform = keyframe.get("cameraTransform") or []
+    intrinsics = keyframe.get("intrinsics") or []
+    resolution = keyframe.get("imageResolution") or []
+    if len(transform) != 16 or not all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in transform):
+        return {"valid": False, "reason": "invalid_camera_transform"}
+    if len(intrinsics) != 9 or not all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in intrinsics):
+        return {"valid": False, "reason": "invalid_camera_intrinsics"}
+    if float(intrinsics[0]) <= 0 or float(intrinsics[4]) <= 0:
+        return {"valid": False, "reason": "non_positive_focal_length"}
+    if len(resolution) != 2:
+        return {"valid": False, "reason": "missing_image_resolution"}
+    width, height = int(resolution[0]), int(resolution[1])
+    if width <= 0 or height <= 0:
+        return {"valid": False, "reason": "invalid_image_resolution"}
+    if not (0 <= float(intrinsics[6]) <= max(width, 1) * 1.25 and 0 <= float(intrinsics[7]) <= max(height, 1) * 1.25):
+        return {"valid": False, "reason": "principal_point_outside_expected_bounds"}
+    return {"valid": True, "reason": None}
+
+
+def tracking_pose_confidence(keyframe: dict) -> float:
+    state = str(keyframe.get("trackingState") or "normal").lower()
+    reason = str(keyframe.get("trackingReason") or "").lower()
+    if state == "normal":
+        return 1.0
+    if state == "limited":
+        if "excessivemotion" in reason:
+            return 0.35
+        if "insufficientfeatures" in reason:
+            return 0.55
+        return 0.65
+    if state == "notavailable":
+        return 0.15
+    return 0.8
+
+
+def project_world_point_values(
+    vertex: tuple[float, float, float],
+    world_to_camera: list[float],
+    intrinsics: list[float],
+    width: int,
+    height: int,
+) -> tuple[float, float, float] | None:
+    matrix = tuple(float(value) for value in world_to_camera[:16])
+    x = matrix[0] * vertex[0] + matrix[4] * vertex[1] + matrix[8] * vertex[2] + matrix[12]
+    y = matrix[1] * vertex[0] + matrix[5] * vertex[1] + matrix[9] * vertex[2] + matrix[13]
+    z = matrix[2] * vertex[0] + matrix[6] * vertex[1] + matrix[10] * vertex[2] + matrix[14]
+    depth = -z
+    if depth <= 1e-5:
+        return None
+    fx = float(intrinsics[0])
+    fy = float(intrinsics[4])
+    cx = float(intrinsics[6])
+    cy = float(intrinsics[7])
+    u = fx * (x / depth) + cx
+    v = cy - fy * (y / depth)
+    if not (0 <= u < width and 0 <= v < height):
+        return None
+    return u, v, depth
+
+
+def adaptive_keyframe_marginal_metrics(
+    record: dict,
+    selected_sample_quality: dict[int, float],
+    selected_sample_observed: dict[int, bool],
+    *,
+    total_proxy_area: float,
+    total_potential: float,
+) -> dict:
+    marginal_benefit = 0.0
+    new_coverage_area = 0.0
+    improved_sample_count = 0
+    for sample_index, quality in record["sampleScores"].items():
+        previous_quality = selected_sample_quality.get(sample_index, 0.0)
+        if quality > previous_quality + ADAPTIVE_KEYFRAME_QUALITY_GAIN_EPSILON:
+            marginal_benefit += quality - previous_quality
+            improved_sample_count += 1
+        if not selected_sample_observed.get(sample_index, False):
+            new_coverage_area += quality
+
+    return {
+        "marginalBenefit": marginal_benefit,
+        "marginalBenefitRatio": marginal_benefit / total_potential,
+        "newCoverageRatio": new_coverage_area / total_proxy_area,
+        "improvedSampleCount": improved_sample_count,
+    }
+
+
+def is_redundant_adaptive_pose(record: dict, selected_records: list[dict]) -> bool:
+    position = record.get("cameraPosition") or (0.0, 0.0, 0.0)
+    forward = record.get("cameraForward") or (0.0, 0.0, -1.0)
+    for selected in selected_records:
+        selected_position = selected.get("cameraPosition") or (0.0, 0.0, 0.0)
+        selected_forward = selected.get("cameraForward") or (0.0, 0.0, -1.0)
+        translation = length(subtract(position, selected_position))
+        angle = math.degrees(math.acos(clamp_float(dot(forward, selected_forward), -1.0, 1.0)))
+        if translation <= ADAPTIVE_KEYFRAME_POSE_DEDUPE_TRANSLATION_METERS and angle <= ADAPTIVE_KEYFRAME_POSE_DEDUPE_ANGLE_DEGREES:
+            return True
+    return False
+
+
+def adaptive_keyframe_record_summary(record: dict, total_proxy_area: float) -> dict:
+    return {
+        "index": record.get("index"),
+        "id": record.get("id"),
+        "visibleSampleCount": record.get("visibleSampleCount"),
+        "visibleCoverageRatio": round(float(record.get("visibleArea") or 0.0) / max(total_proxy_area, 1e-9), 5),
+        "qualitySum": round(float(record.get("qualitySum") or 0.0), 5),
+        "poseConfidence": record.get("poseConfidence"),
+        "sharpnessScore": record.get("sharpnessScore"),
+        "exposureScore": record.get("exposureScore"),
+        "rejectCounts": record.get("rejectCounts"),
     }
 
 
@@ -4459,14 +5181,31 @@ def fuse_mesh_anchors(mesh_anchors: list[dict], quantization: float = 1e-5) -> F
     invalid_vertex_count = 0
     invalid_face_count = 0
     duplicate_face_count = 0
+    anchor_stats: list[dict] = []
 
     for anchor in mesh_anchors:
         transform = anchor.get("transform") or []
         local_vertices = anchor.get("vertices") or []
         indices = anchor.get("triangleIndices") or []
+        per_anchor = {
+            "id": anchor.get("id"),
+            "inputVertexCount": len(local_vertices),
+            "inputIndexCount": len(indices),
+            "inputFaceCount": len(indices) // 3,
+            "transformValid": len(transform) == 16,
+            "validWorldVertexCount": 0,
+            "duplicateVertexCount": 0,
+            "invalidVertexCount": 0,
+            "emittedFaceCount": 0,
+            "invalidFaceCount": 0,
+            "duplicateFaceCount": 0,
+        }
         if len(transform) != 16:
             invalid_vertex_count += len(local_vertices)
             invalid_face_count += len(indices) // 3
+            per_anchor["invalidVertexCount"] = len(local_vertices)
+            per_anchor["invalidFaceCount"] = len(indices) // 3
+            anchor_stats.append(per_anchor)
             continue
 
         local_to_fused: list[int | None] = []
@@ -4474,12 +5213,14 @@ def fuse_mesh_anchors(mesh_anchors: list[dict], quantization: float = 1e-5) -> F
             original_vertex_count += 1
             if len(vertex) != 3:
                 invalid_vertex_count += 1
+                per_anchor["invalidVertexCount"] += 1
                 local_to_fused.append(None)
                 continue
 
             world = transform_point(transform, vertex)
             if not all(math.isfinite(component) for component in world):
                 invalid_vertex_count += 1
+                per_anchor["invalidVertexCount"] += 1
                 local_to_fused.append(None)
                 continue
 
@@ -4487,6 +5228,7 @@ def fuse_mesh_anchors(mesh_anchors: list[dict], quantization: float = 1e-5) -> F
             existing = vertex_lookup.get(key)
             if existing is not None:
                 duplicate_vertex_count += 1
+                per_anchor["duplicateVertexCount"] += 1
                 local_to_fused.append(existing)
                 continue
 
@@ -4494,6 +5236,7 @@ def fuse_mesh_anchors(mesh_anchors: list[dict], quantization: float = 1e-5) -> F
             vertex_lookup[key] = fused_index
             vertices.append(world)
             local_to_fused.append(fused_index)
+            per_anchor["validWorldVertexCount"] += 1
 
         for index in range(0, len(indices) - 2, 3):
             original_face_count += 1
@@ -4503,29 +5246,37 @@ def fuse_mesh_anchors(mesh_anchors: list[dict], quantization: float = 1e-5) -> F
                 raw_c = int(indices[index + 2])
             except (TypeError, ValueError):
                 invalid_face_count += 1
+                per_anchor["invalidFaceCount"] += 1
                 continue
 
             if min(raw_a, raw_b, raw_c) < 0 or max(raw_a, raw_b, raw_c) >= len(local_to_fused):
                 invalid_face_count += 1
+                per_anchor["invalidFaceCount"] += 1
                 continue
 
             resolved = (local_to_fused[raw_a], local_to_fused[raw_b], local_to_fused[raw_c])
             if resolved[0] is None or resolved[1] is None or resolved[2] is None:
                 invalid_face_count += 1
+                per_anchor["invalidFaceCount"] += 1
                 continue
 
             face = (int(resolved[0]), int(resolved[1]), int(resolved[2]))
             if len(set(face)) != 3 or triangle_area(vertices[face[0]], vertices[face[1]], vertices[face[2]]) <= 1e-10:
                 invalid_face_count += 1
+                per_anchor["invalidFaceCount"] += 1
                 continue
 
             face_key = tuple(sorted(face))
             if face_key in seen_faces:
                 duplicate_face_count += 1
+                per_anchor["duplicateFaceCount"] += 1
                 continue
 
             seen_faces.add(face_key)
             faces.append(face)
+            per_anchor["emittedFaceCount"] += 1
+
+        anchor_stats.append(per_anchor)
 
     stats = {
         "geometrySource": "arkit_mesh_anchor_fusion",
@@ -4538,6 +5289,7 @@ def fuse_mesh_anchors(mesh_anchors: list[dict], quantization: float = 1e-5) -> F
         "invalidVertexCount": invalid_vertex_count,
         "invalidFaceCount": invalid_face_count,
         "duplicateFaceCount": duplicate_face_count,
+        "anchors": anchor_stats,
         "cleanup": {
             "duplicateVertexQuantizationMeters": quantization,
             "removedInvalidFaces": invalid_face_count,
@@ -4581,6 +5333,614 @@ def write_obj(mesh: FusedMesh, output_path: Path) -> None:
     for a, b, c in mesh.faces:
         lines.append(f"f {a + 1} {b + 1} {c + 1}")
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def build_mesh_integrity_report(mesh: FusedMesh) -> dict:
+    bounds = mesh_bounds_stats(mesh.vertices)
+    topology = mesh_topology_stats(mesh)
+    connected = mesh_connected_component_stats(mesh)
+    area = sum(triangle_area(mesh.vertices[a], mesh.vertices[b], mesh.vertices[c]) for a, b, c in mesh.faces)
+    return {
+        "geometrySource": mesh.stats.get("geometrySource", "unknown"),
+        "vertexCount": len(mesh.vertices),
+        "faceCount": len(mesh.faces),
+        "primitiveType": "triangles",
+        "coordinateSpace": "arkit_world_meters",
+        "bounds": bounds,
+        "surfaceAreaM2": round(area, 6),
+        "topology": topology,
+        "connectedComponents": connected,
+        "sourceStats": {
+            "anchorCount": mesh.stats.get("anchorCount", 0),
+            "originalVertexCount": mesh.stats.get("originalVertexCount", 0),
+            "originalFaceCount": mesh.stats.get("originalFaceCount", 0),
+            "duplicateVertexCount": mesh.stats.get("duplicateVertexCount", 0),
+            "invalidVertexCount": mesh.stats.get("invalidVertexCount", 0),
+            "invalidFaceCount": mesh.stats.get("invalidFaceCount", 0),
+            "duplicateFaceCount": mesh.stats.get("duplicateFaceCount", 0),
+            "anchors": mesh.stats.get("anchors", []),
+        },
+        "validation": {
+            "hasVertices": bool(mesh.vertices),
+            "hasTriangleFaces": bool(mesh.faces),
+            "allVerticesFinite": topology["nonFiniteVertexCount"] == 0,
+            "allIndicesInRange": topology["outOfRangeIndexCount"] == 0,
+            "nonDegenerateFaces": topology["degenerateFaceCount"] == 0,
+            "glbPrimitiveMode": 4,
+            "unassignedFacesOpaque": True,
+        },
+    }
+
+
+def mesh_bounds_stats(vertices: list[tuple[float, float, float]]) -> dict:
+    if not vertices:
+        return {
+            "min": None,
+            "max": None,
+            "dimensionsMeters": None,
+            "diagonalMeters": 0,
+        }
+
+    min_x = min(vertex[0] for vertex in vertices)
+    min_y = min(vertex[1] for vertex in vertices)
+    min_z = min(vertex[2] for vertex in vertices)
+    max_x = max(vertex[0] for vertex in vertices)
+    max_y = max(vertex[1] for vertex in vertices)
+    max_z = max(vertex[2] for vertex in vertices)
+    dimensions = (max_x - min_x, max_y - min_y, max_z - min_z)
+    return {
+        "min": [round(min_x, 6), round(min_y, 6), round(min_z, 6)],
+        "max": [round(max_x, 6), round(max_y, 6), round(max_z, 6)],
+        "dimensionsMeters": [round(value, 6) for value in dimensions],
+        "diagonalMeters": round(length(dimensions), 6),
+    }
+
+
+def mesh_topology_stats(mesh: FusedMesh) -> dict:
+    non_finite_vertex_count = sum(
+        1 for vertex in mesh.vertices
+        if len(vertex) != 3 or not all(math.isfinite(component) for component in vertex)
+    )
+    out_of_range_index_count = 0
+    duplicate_index_face_count = 0
+    degenerate_face_count = 0
+    unique_edges: set[tuple[int, int]] = set()
+    edge_face_counts: dict[tuple[int, int], int] = {}
+    vertex_count = len(mesh.vertices)
+
+    for face in mesh.faces:
+        if len(face) != 3:
+            out_of_range_index_count += 1
+            continue
+        if min(face) < 0 or max(face) >= vertex_count:
+            out_of_range_index_count += sum(1 for index in face if index < 0 or index >= vertex_count)
+            continue
+        if len(set(face)) != 3:
+            duplicate_index_face_count += 1
+            degenerate_face_count += 1
+            continue
+        if triangle_area(mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]) <= 1e-10:
+            degenerate_face_count += 1
+        for edge in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+            edge_key = tuple(sorted(edge))
+            unique_edges.add(edge_key)
+            edge_face_counts[edge_key] = edge_face_counts.get(edge_key, 0) + 1
+
+    boundary_edge_count = sum(1 for count in edge_face_counts.values() if count == 1)
+    non_manifold_edge_count = sum(1 for count in edge_face_counts.values() if count > 2)
+    referenced_vertices = {index for face in mesh.faces for index in face if 0 <= index < vertex_count}
+    return {
+        "nonFiniteVertexCount": non_finite_vertex_count,
+        "outOfRangeIndexCount": out_of_range_index_count,
+        "duplicateIndexFaceCount": duplicate_index_face_count,
+        "degenerateFaceCount": degenerate_face_count,
+        "referencedVertexCount": len(referenced_vertices),
+        "unreferencedVertexCount": vertex_count - len(referenced_vertices),
+        "uniqueEdgeCount": len(unique_edges),
+        "boundaryEdgeCount": boundary_edge_count,
+        "nonManifoldEdgeCount": non_manifold_edge_count,
+    }
+
+
+def mesh_connected_component_stats(mesh: FusedMesh, max_components: int = 12) -> dict:
+    if not mesh.faces:
+        return {
+            "componentCount": 0,
+            "largestFaceCount": 0,
+            "largestSurfaceAreaM2": 0,
+            "components": [],
+        }
+
+    vertex_to_faces: dict[int, list[int]] = {}
+    for face_index, face in enumerate(mesh.faces):
+        for vertex_index in face:
+            vertex_to_faces.setdefault(vertex_index, []).append(face_index)
+
+    visited = [False] * len(mesh.faces)
+    components: list[dict] = []
+    for start_index in range(len(mesh.faces)):
+        if visited[start_index]:
+            continue
+        queue: deque[int] = deque([start_index])
+        visited[start_index] = True
+        face_indices: list[int] = []
+        vertex_indices: set[int] = set()
+        surface_area = 0.0
+
+        while queue:
+            face_index = queue.popleft()
+            face = mesh.faces[face_index]
+            face_indices.append(face_index)
+            vertex_indices.update(face)
+            surface_area += triangle_area(mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]])
+            for vertex_index in face:
+                for adjacent_face_index in vertex_to_faces.get(vertex_index, []):
+                    if not visited[adjacent_face_index]:
+                        visited[adjacent_face_index] = True
+                        queue.append(adjacent_face_index)
+
+        components.append({
+            "faceCount": len(face_indices),
+            "vertexCount": len(vertex_indices),
+            "surfaceAreaM2": round(surface_area, 6),
+        })
+
+    components.sort(key=lambda item: (item["faceCount"], item["surfaceAreaM2"]), reverse=True)
+    return {
+        "componentCount": len(components),
+        "largestFaceCount": components[0]["faceCount"] if components else 0,
+        "largestSurfaceAreaM2": components[0]["surfaceAreaM2"] if components else 0,
+        "components": components[:max_components],
+        "truncatedComponentList": len(components) > max_components,
+    }
+
+
+def write_geometry_diagnostic_artifacts(mesh: FusedMesh, work_dir: Path) -> dict:
+    integrity_report = build_mesh_integrity_report(mesh)
+    artifacts = {
+        "geometryOnlyGlb": write_mesh_glb(
+            mesh,
+            work_dir / "geometry_only.glb",
+            name="geometry_only",
+            material_color=(0.72, 0.72, 0.70, 1.0),
+            double_sided=True,
+        ),
+        "geometryCulledGlb": write_mesh_glb(
+            mesh,
+            work_dir / "geometry_culled.glb",
+            name="geometry_culled",
+            material_color=(0.72, 0.72, 0.70, 1.0),
+            double_sided=False,
+        ),
+    }
+    integrity_report["diagnosticArtifacts"] = artifacts
+    (work_dir / "mesh_integrity_report.json").write_text(
+        json.dumps(integrity_report, indent=2),
+        encoding="utf-8",
+    )
+    return {
+        "meshIntegrityReport": {
+            "format": "json",
+            "path": "mesh_integrity_report.json",
+            "available": True,
+        },
+        **artifacts,
+    }
+
+
+def make_checker_png_bytes(size: int = 512, squares: int = 16) -> bytes:
+    image = Image.new("RGBA", (size, size), (238, 238, 232, 255))
+    draw = ImageDraw.Draw(image)
+    square_size = max(1, size // squares)
+    colors = ((32, 32, 34, 255), (235, 235, 224, 255), (168, 22, 37, 255))
+    for y in range(squares):
+        for x in range(squares):
+            color = colors[(x + y) % 2]
+            if x == 0 or y == 0 or x == squares - 1 or y == squares - 1:
+                color = colors[2]
+            draw.rectangle(
+                [
+                    x * square_size,
+                    y * square_size,
+                    min(size, (x + 1) * square_size) - 1,
+                    min(size, (y + 1) * square_size) - 1,
+                ],
+                fill=color,
+            )
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def write_uv_checker_glb(mesh: FusedMesh, output_path: Path) -> dict:
+    face_uvs = [((0.04, 0.04), (0.96, 0.04), (0.04, 0.96)) for _ in mesh.faces]
+    return write_mesh_glb(
+        mesh,
+        output_path,
+        name="uv_checker",
+        face_uvs=face_uvs,
+        texture_png_bytes=make_checker_png_bytes(),
+        material_color=(1.0, 1.0, 1.0, 1.0),
+        double_sided=True,
+    )
+
+
+def write_coverage_debug_glb(
+    mesh: FusedMesh,
+    output_path: Path,
+    output_report_path: Path | None,
+    face_statuses: list[str],
+) -> dict:
+    palette = {
+        "projected": (58, 156, 91),
+        "projected_solid": (62, 132, 214),
+        "candidate": (84, 173, 201),
+        "fallback_unobserved": (224, 67, 67),
+        "fallback": (226, 164, 64),
+        "unknown": (162, 162, 156),
+    }
+    normalized_statuses = [
+        status if status in palette else "unknown"
+        for status in (face_statuses[:len(mesh.faces)] + ["unknown"] * max(0, len(mesh.faces) - len(face_statuses)))
+    ]
+    face_colors = [palette[status] for status in normalized_statuses]
+    report = build_coverage_debug_report(mesh, normalized_statuses)
+    if output_report_path is not None:
+        output_report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    glb_stats = write_mesh_glb(
+        mesh,
+        output_path,
+        name="coverage_debug",
+        face_colors=face_colors,
+        material_color=(1.0, 1.0, 1.0, 1.0),
+        double_sided=True,
+    )
+    glb_stats["coverageReport"] = report
+    return glb_stats
+
+
+def build_coverage_debug_report(mesh: FusedMesh, face_statuses: list[str]) -> dict:
+    category_stats: dict[str, dict] = {}
+    total_area = 0.0
+    for face, status in zip(mesh.faces, face_statuses):
+        area = triangle_area(mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]])
+        total_area += area
+        bucket = category_stats.setdefault(status, {"faceCount": 0, "surfaceAreaM2": 0.0})
+        bucket["faceCount"] += 1
+        bucket["surfaceAreaM2"] += area
+
+    for bucket in category_stats.values():
+        bucket["surfaceAreaM2"] = round(bucket["surfaceAreaM2"], 6)
+        bucket["faceRatio"] = round(bucket["faceCount"] / max(len(mesh.faces), 1), 6)
+        bucket["surfaceAreaRatio"] = round(bucket["surfaceAreaM2"] / max(total_area, 1e-12), 6)
+
+    projected_face_count = sum(
+        stats["faceCount"]
+        for status, stats in category_stats.items()
+        if status in {"projected", "projected_solid", "candidate"}
+    )
+    return {
+        "faceCount": len(mesh.faces),
+        "surfaceAreaM2": round(total_area, 6),
+        "projectedOrCandidateFaceCount": projected_face_count,
+        "projectedOrCandidateFaceRatio": round(projected_face_count / max(len(mesh.faces), 1), 6),
+        "categories": category_stats,
+        "legend": {
+            "projected": "Face received image-projected texels.",
+            "projected_solid": "Face received a direct projected solid color.",
+            "candidate": "Face has a coherent keyframe owner, but per-face raster stats were unavailable.",
+            "fallback_unobserved": "Face was rasterized with opaque unobserved fallback color.",
+            "fallback": "Face has fallback fill rather than image projection.",
+            "unknown": "Face status was not resolved by the texture pass.",
+        },
+    }
+
+
+def write_mesh_glb(
+    mesh: FusedMesh,
+    output_path: Path,
+    *,
+    name: str,
+    material_color: tuple[float, float, float, float],
+    double_sided: bool,
+    face_uvs: FaceUVs | None = None,
+    texture_png_bytes: bytes | None = None,
+    face_colors: list[tuple[int, int, int]] | None = None,
+) -> dict:
+    if not mesh.vertices or not mesh.faces:
+        return {
+            "format": "glb",
+            "path": output_path.name,
+            "available": False,
+            "reason": "Mesh has no vertices or triangle faces.",
+        }
+    if face_uvs is not None and len(face_uvs) != len(mesh.faces):
+        return {
+            "format": "glb",
+            "path": output_path.name,
+            "available": False,
+            "reason": "UV coordinate count does not match face count.",
+        }
+    if face_colors is not None and len(face_colors) != len(mesh.faces):
+        return {
+            "format": "glb",
+            "path": output_path.name,
+            "available": False,
+            "reason": "Face color count does not match face count.",
+        }
+
+    expanded = face_uvs is not None or face_colors is not None
+    if expanded:
+        vertices: list[tuple[float, float, float]] = []
+        normals: list[tuple[float, float, float]] = []
+        uvs: list[tuple[float, float]] = []
+        colors: list[tuple[int, int, int, int]] = []
+        indices: list[int] = []
+        for face_index, face in enumerate(mesh.faces):
+            face_vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
+            normal = triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2])
+            base_index = len(vertices)
+            vertices.extend(face_vertices)
+            normals.extend([normal] * 3)
+            indices.extend([base_index, base_index + 1, base_index + 2])
+            if face_uvs is not None:
+                uvs.extend(face_uvs[face_index])
+            if face_colors is not None:
+                r, g, b = face_colors[face_index]
+                colors.extend([(r, g, b, 255)] * 3)
+    else:
+        vertices = list(mesh.vertices)
+        normals = compute_vertex_normals(mesh.vertices, mesh.faces)
+        uvs = []
+        colors = []
+        indices = [index for face in mesh.faces for index in face]
+
+    validation = validate_glb_mesh_inputs(vertices, indices, uvs if face_uvs is not None else None)
+    if not validation["valid"]:
+        return {
+            "format": "glb",
+            "path": output_path.name,
+            "available": False,
+            "reason": validation["reason"],
+            "validation": validation,
+        }
+
+    binary = bytearray()
+    buffer_views: list[dict] = []
+    accessors: list[dict] = []
+
+    def append_buffer_view(data: bytes, target: int | None = None) -> int:
+        align_bytearray(binary, 4)
+        offset = len(binary)
+        binary.extend(data)
+        view = {"buffer": 0, "byteOffset": offset, "byteLength": len(data)}
+        if target is not None:
+            view["target"] = target
+        buffer_views.append(view)
+        return len(buffer_views) - 1
+
+    def append_accessor(
+        data: bytes,
+        *,
+        component_type: int,
+        accessor_type: str,
+        count: int,
+        target: int | None,
+        minimum: list[float] | None = None,
+        maximum: list[float] | None = None,
+        normalized: bool = False,
+    ) -> int:
+        view_index = append_buffer_view(data, target)
+        accessor = {
+            "bufferView": view_index,
+            "byteOffset": 0,
+            "componentType": component_type,
+            "count": count,
+            "type": accessor_type,
+        }
+        if minimum is not None:
+            accessor["min"] = minimum
+        if maximum is not None:
+            accessor["max"] = maximum
+        if normalized:
+            accessor["normalized"] = True
+        accessors.append(accessor)
+        return len(accessors) - 1
+
+    position_bytes = b"".join(struct.pack("<3f", *vertex) for vertex in vertices)
+    normal_bytes = b"".join(struct.pack("<3f", *normal) for normal in normals)
+    index_bytes = b"".join(struct.pack("<I", index) for index in indices)
+    position_min = [min(vertex[axis] for vertex in vertices) for axis in range(3)]
+    position_max = [max(vertex[axis] for vertex in vertices) for axis in range(3)]
+
+    position_accessor = append_accessor(
+        position_bytes,
+        component_type=5126,
+        accessor_type="VEC3",
+        count=len(vertices),
+        target=34962,
+        minimum=[round(value, 7) for value in position_min],
+        maximum=[round(value, 7) for value in position_max],
+    )
+    normal_accessor = append_accessor(
+        normal_bytes,
+        component_type=5126,
+        accessor_type="VEC3",
+        count=len(normals),
+        target=34962,
+    )
+    index_accessor = append_accessor(
+        index_bytes,
+        component_type=5125,
+        accessor_type="SCALAR",
+        count=len(indices),
+        target=34963,
+        minimum=[0],
+        maximum=[max(indices)],
+    )
+
+    attributes = {
+        "POSITION": position_accessor,
+        "NORMAL": normal_accessor,
+    }
+    if face_uvs is not None:
+        uv_bytes = b"".join(struct.pack("<2f", uv[0], uv[1]) for uv in uvs)
+        attributes["TEXCOORD_0"] = append_accessor(
+            uv_bytes,
+            component_type=5126,
+            accessor_type="VEC2",
+            count=len(uvs),
+            target=34962,
+        )
+    if face_colors is not None:
+        color_bytes = b"".join(struct.pack("<4B", *color) for color in colors)
+        attributes["COLOR_0"] = append_accessor(
+            color_bytes,
+            component_type=5121,
+            accessor_type="VEC4",
+            count=len(colors),
+            target=34962,
+            normalized=True,
+        )
+
+    material = {
+        "name": f"{name}_opaque_material",
+        "alphaMode": "OPAQUE",
+        "doubleSided": double_sided,
+        "pbrMetallicRoughness": {
+            "baseColorFactor": [float(component) for component in material_color],
+            "metallicFactor": 0.0,
+            "roughnessFactor": 0.88,
+        },
+    }
+    images = None
+    textures = None
+    samplers = None
+    if texture_png_bytes is not None:
+        image_view_index = append_buffer_view(texture_png_bytes)
+        images = [{"bufferView": image_view_index, "mimeType": "image/png", "name": f"{name}_texture"}]
+        samplers = [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}]
+        textures = [{"sampler": 0, "source": 0}]
+        material["pbrMetallicRoughness"]["baseColorTexture"] = {"index": 0}
+
+    gltf = {
+        "asset": {"version": "2.0", "generator": "LidarAI diagnostic GLB exporter"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"name": name, "mesh": 0}],
+        "meshes": [{
+            "name": name,
+            "primitives": [{
+                "attributes": attributes,
+                "indices": index_accessor,
+                "material": 0,
+                "mode": 4,
+            }],
+        }],
+        "materials": [material],
+        "buffers": [{"byteLength": len(binary)}],
+        "bufferViews": buffer_views,
+        "accessors": accessors,
+    }
+    if images is not None:
+        gltf["images"] = images
+        gltf["samplers"] = samplers
+        gltf["textures"] = textures
+
+    write_glb_file(output_path, gltf, bytes(binary))
+    return {
+        "format": "glb",
+        "path": output_path.name,
+        "available": True,
+        "primitiveMode": 4,
+        "primitiveType": "triangles",
+        "materialAlphaMode": "OPAQUE",
+        "doubleSided": double_sided,
+        "vertexCount": len(vertices),
+        "sourceVertexCount": len(mesh.vertices),
+        "faceCount": len(mesh.faces),
+        "indexCount": len(indices),
+        "expandedPerFace": expanded,
+        "hasTexture": texture_png_bytes is not None,
+        "hasVertexColors": face_colors is not None,
+        "hasUVs": face_uvs is not None,
+        "validation": validation,
+    }
+
+
+def validate_glb_mesh_inputs(
+    vertices: list[tuple[float, float, float]],
+    indices: list[int],
+    uvs: list[tuple[float, float]] | None,
+) -> dict:
+    if len(indices) % 3 != 0:
+        return {"valid": False, "reason": "Index count is not divisible by three."}
+    if not vertices or not indices:
+        return {"valid": False, "reason": "Mesh is empty."}
+    non_finite_vertex_count = sum(
+        1 for vertex in vertices
+        if len(vertex) != 3 or not all(math.isfinite(component) for component in vertex)
+    )
+    out_of_range_index_count = sum(1 for index in indices if index < 0 or index >= len(vertices))
+    degenerate_face_count = 0
+    for offset in range(0, len(indices), 3):
+        face = (indices[offset], indices[offset + 1], indices[offset + 2])
+        if len(set(face)) != 3:
+            degenerate_face_count += 1
+            continue
+        if out_of_range_index_count == 0 and triangle_area(vertices[face[0]], vertices[face[1]], vertices[face[2]]) <= 1e-10:
+            degenerate_face_count += 1
+    uv_non_finite_count = 0
+    uv_out_of_range_count = 0
+    if uvs is not None:
+        for u, v in uvs:
+            if not math.isfinite(u) or not math.isfinite(v):
+                uv_non_finite_count += 1
+            elif not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+                uv_out_of_range_count += 1
+
+    valid = (
+        non_finite_vertex_count == 0
+        and out_of_range_index_count == 0
+        and degenerate_face_count == 0
+        and uv_non_finite_count == 0
+        and uv_out_of_range_count == 0
+    )
+    return {
+        "valid": valid,
+        "reason": None if valid else "GLB validation failed.",
+        "nonFiniteVertexCount": non_finite_vertex_count,
+        "outOfRangeIndexCount": out_of_range_index_count,
+        "degenerateFaceCount": degenerate_face_count,
+        "uvNonFiniteCount": uv_non_finite_count,
+        "uvOutOfRangeCount": uv_out_of_range_count,
+        "primitiveMode": 4,
+        "materialAlphaMode": "OPAQUE",
+    }
+
+
+def align_bytearray(buffer: bytearray, alignment: int) -> None:
+    padding = (-len(buffer)) % alignment
+    if padding:
+        buffer.extend(b"\x00" * padding)
+
+
+def write_glb_file(output_path: Path, gltf: dict, binary: bytes) -> None:
+    json_chunk = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+    json_padding = (-len(json_chunk)) % 4
+    if json_padding:
+        json_chunk += b" " * json_padding
+    bin_padding = (-len(binary)) % 4
+    if bin_padding:
+        binary += b"\x00" * bin_padding
+
+    total_length = 12 + 8 + len(json_chunk) + 8 + len(binary)
+    with output_path.open("wb") as output:
+        output.write(struct.pack("<III", 0x46546C67, 2, total_length))
+        output.write(struct.pack("<II", len(json_chunk), 0x4E4F534A))
+        output.write(json_chunk)
+        output.write(struct.pack("<II", len(binary), 0x004E4942))
+        output.write(binary)
 
 
 def mesh_geometry_preservation_stats(source: FusedMesh, fused: FusedMesh) -> dict:
@@ -5968,6 +7328,10 @@ async def write_textured_obj(
     output_debug_path: Path | None = None,
     output_debug_preview_path: Path | None = None,
     output_projection_overlay_dir: Path | None = None,
+    output_textured_glb_path: Path | None = None,
+    output_uv_checker_glb_path: Path | None = None,
+    output_coverage_debug_glb_path: Path | None = None,
+    output_coverage_debug_report_path: Path | None = None,
     report_progress: Callable[[float, str], Awaitable[None]] | None = None,
     is_cancelled: CancellationCheck | None = None,
     profile: ProcessingProfile | None = None,
@@ -6001,6 +7365,7 @@ async def write_textured_obj(
     mask_pixels = texture_mask.load()
     vt_lines: list[str] = []
     face_lines: list[str] = []
+    face_uvs: FaceUVs = []
     textured_face_count = 0
     fallback_face_count = 0
     rasterized_pixel_count = 0
@@ -6031,7 +7396,14 @@ async def write_textured_obj(
     uv_max_v = -math.inf
     uv_out_of_range_count = 0
     uv_non_finite_count = 0
-    serial_texture_budget_enabled = atlas_layout_spec.planar_charts or profile.fallback_texture_face_limit is not None
+    coverage_face_statuses = ["unknown"] * face_count
+    visibility_stats = build_keyframe_mesh_visibility_masks(mesh, keyframes)
+    face_owner_labels, coherent_label_stats = assign_coherent_face_keyframes(mesh, keyframes)
+    serial_texture_budget_enabled = (
+        atlas_layout_spec.planar_charts
+        or profile.fallback_texture_face_limit is not None
+        or active_projection_mode in {"direct", "dense_single_view"}
+    )
     parallel_worker_count = 1 if serial_texture_budget_enabled else texture_parallel_worker_count(face_count)
     parallel_result = None
     if parallel_worker_count > 1:
@@ -6057,6 +7429,7 @@ async def write_textured_obj(
         texture_pixels = texture.load()
         vt_lines = parallel_result["vt_lines"]
         face_lines = parallel_result["face_lines"]
+        face_uvs = parallel_result["face_uvs"]
         textured_face_count = parallel_result["textured_face_count"]
         fallback_face_count = parallel_result["fallback_face_count"]
         rasterized_pixel_count = parallel_result["rasterized_pixel_count"]
@@ -6086,6 +7459,10 @@ async def write_textured_obj(
         uv_max_v = parallel_result["uv_max_v"]
         uv_out_of_range_count = parallel_result["uv_out_of_range_count"]
         uv_non_finite_count = parallel_result["uv_non_finite_count"]
+        coverage_face_statuses = [
+            "candidate" if label is not None else "fallback_unobserved"
+            for label in face_owner_labels
+        ]
     else:
         parallel_worker_count = 1
 
@@ -6197,8 +7574,13 @@ async def write_textured_obj(
             missing_depth_sample_count += raster_stats["missingDepthSampleCount"]
             if raster_stats["projectedPixelCount"] > 0:
                 textured_face_count += len(chart.face_indices)
+                chart_coverage_status = "projected"
             else:
                 fallback_face_count += len(chart.face_indices)
+                chart_coverage_status = "fallback_unobserved" if active_projection_mode == "direct" else "fallback"
+            for chart_face_index in chart.face_indices:
+                if 0 <= chart_face_index < len(coverage_face_statuses):
+                    coverage_face_statuses[chart_face_index] = chart_coverage_status
             owner_angle_degrees = None
             owner_depth_error_meters = None
             owner_depth_status = None
@@ -6249,9 +7631,11 @@ async def write_textured_obj(
             else [planar_chart_pixel_for_vertex(chart, vertex) for vertex in face_vertices]
         )
         uv_start = face_index * 3 + 1
+        current_face_uvs: list[tuple[float, float]] = []
         for point in atlas_triangle:
             u = (point[0] + 0.5) / atlas_width
             v = 1 - ((point[1] + 0.5) / atlas_height)
+            current_face_uvs.append((u, v))
             if not math.isfinite(u) or not math.isfinite(v):
                 uv_non_finite_count += 1
             else:
@@ -6262,6 +7646,7 @@ async def write_textured_obj(
                 if not (0 <= u <= 1 and 0 <= v <= 1):
                     uv_out_of_range_count += 1
             vt_lines.append(f"vt {u:.8f} {v:.8f}")
+        face_uvs.append((current_face_uvs[0], current_face_uvs[1], current_face_uvs[2]))
 
         if chart is not None:
             for point in atlas_triangle:
@@ -6277,7 +7662,9 @@ async def write_textured_obj(
                 face_vertices,
                 keyframes,
                 relaxed=active_projection_mode == "dense_single_view",
+                face_index=face_index,
             )
+            candidates = prioritize_owner_candidate(candidates, face_owner_labels[face_index])
             if candidates:
                 selected_key = candidates[0].keyframe_debug_id
                 selected_keyframe_face_counts[selected_key] = selected_keyframe_face_counts.get(selected_key, 0) + 1
@@ -6344,8 +7731,10 @@ async def write_textured_obj(
             if raster_stats["projectedPixelCount"] > 0:
                 textured_face_count += 1
                 fallback_projected_count += 1
+                coverage_face_statuses[face_index] = "projected"
             else:
                 fallback_face_count += 1
+                coverage_face_statuses[face_index] = "fallback_unobserved" if active_projection_mode == "direct" else "fallback"
         else:
             solid_color = solid_scene_color
             solid_is_projected = solid_scene_color_projected
@@ -6382,10 +7771,12 @@ async def write_textured_obj(
                 textured_face_count += 1
                 fallback_projected_count += 1
                 solid_projected_face_count += 1
+                coverage_face_statuses[face_index] = "projected_solid"
             else:
                 fallback_pixel_count += filled_pixels
                 fallback_face_count += 1
                 solid_fallback_face_count += 1
+                coverage_face_statuses[face_index] = "fallback_unobserved" if active_projection_mode == "direct" else "fallback"
 
         for point in atlas_triangle:
             uv_vertex_sample_stats.add(sample_texture_at_atlas_point(texture_pixels, atlas_width, atlas_height, point[0], point[1]))
@@ -6499,9 +7890,17 @@ async def write_textured_obj(
         "activeTextureKeyframeCount": len(keyframes),
         "denseSingleViewTexture": dense_single_view_enabled,
         "rgbdHeroPatchTexture": profile.rgbd_hero_patch_texture,
+        "cpuVisibility": {
+            "enabled": bool(visibility_stats),
+            "rasterMaxSize": TEXTURE_VISIBILITY_RASTER_MAX_SIZE,
+            "keyframeCount": len(visibility_stats),
+        },
+        "coherentLabeling": coherent_label_stats,
     }
     texture_diagnostics["geometry"] = texture_geometry_debug(mesh)
     texture_diagnostics["keyframes"] = projection_keyframe_debug_summaries(source_keyframes)
+    texture_diagnostics["visibility"] = visibility_stats
+    texture_diagnostics["coherentLabeling"] = coherent_label_stats
     if dense_single_view_stats is not None:
         texture_diagnostics["denseSingleViewTexture"] = dense_single_view_stats
     texture_diagnostics["poseDelta"] = (
@@ -6538,7 +7937,59 @@ async def write_textured_obj(
             output_projection_overlay_dir,
         )
 
+    glb_artifacts = {
+        "texturedMeshGlb": {
+            "format": "glb",
+            "path": "textured_mesh.glb",
+            "available": False,
+            "reason": "Textured GLB export was not requested.",
+        },
+        "uvCheckerGlb": {
+            "format": "glb",
+            "path": "uv_checker.glb",
+            "available": False,
+            "reason": "UV checker GLB export was not requested.",
+        },
+        "coverageDebugGlb": {
+            "format": "glb",
+            "path": "coverage_debug.glb",
+            "available": False,
+            "reason": "Coverage debug GLB export was not requested.",
+        },
+        "coverageDebugReport": {
+            "format": "json",
+            "path": "coverage_debug_report.json",
+            "available": False,
+            "reason": "Coverage debug report export was not requested.",
+        },
+    }
     texture.save(output_texture_path)
+    texture_png_bytes = output_texture_path.read_bytes()
+    if output_textured_glb_path is not None:
+        glb_artifacts["texturedMeshGlb"] = write_mesh_glb(
+            mesh,
+            output_textured_glb_path,
+            name="textured_mesh",
+            face_uvs=face_uvs,
+            texture_png_bytes=texture_png_bytes,
+            material_color=(1.0, 1.0, 1.0, 1.0),
+            double_sided=True,
+        )
+    if output_uv_checker_glb_path is not None:
+        glb_artifacts["uvCheckerGlb"] = write_uv_checker_glb(mesh, output_uv_checker_glb_path)
+    if output_coverage_debug_glb_path is not None:
+        glb_artifacts["coverageDebugGlb"] = write_coverage_debug_glb(
+            mesh,
+            output_coverage_debug_glb_path,
+            output_coverage_debug_report_path,
+            coverage_face_statuses,
+        )
+        glb_artifacts["coverageDebugReport"] = {
+            "format": "json",
+            "path": output_coverage_debug_report_path.name if output_coverage_debug_report_path else None,
+            "available": bool(output_coverage_debug_report_path and output_coverage_debug_report_path.exists()),
+        }
+    texture_diagnostics["glbDiagnostics"] = glb_artifacts
     if output_debug_preview_path is not None:
         write_texture_debug_preview(texture, output_debug_preview_path)
     if output_debug_path is not None:
@@ -6611,6 +8062,12 @@ async def write_textured_obj(
         "renderMesh": mesh.stats.get("textureRenderMesh", {}),
         "atlasLayout": atlas_layout_debug_stats,
         "textureWorkerCount": parallel_worker_count,
+        "glb": glb_artifacts["texturedMeshGlb"],
+        "diagnosticGlbs": {
+            "uvCheckerGlb": glb_artifacts["uvCheckerGlb"],
+            "coverageDebugGlb": glb_artifacts["coverageDebugGlb"],
+            "coverageDebugReport": glb_artifacts["coverageDebugReport"],
+        },
         "diagnostics": texture_diagnostics,
     }
 
@@ -6640,6 +8097,7 @@ async def rasterize_texture_atlas_parallel(
     texture = Image.new("RGB", (atlas_width, atlas_height), FALLBACK_COLOR)
     vt_lines: list[str] = []
     face_lines: list[str] = []
+    face_uvs: FaceUVs = []
     uv_vertex_sample_stats = ColorStatsAccumulator()
     uv_face_interior_sample_stats = ColorStatsAccumulator()
     selected_keyframe_face_counts: dict[str, int] = {}
@@ -6673,9 +8131,11 @@ async def rasterize_texture_atlas_parallel(
         tile = atlas_tile(face_index, tile_size, columns)
         atlas_triangle = atlas_triangle_points(tile, tile_size)
         uv_start = face_index * 3 + 1
+        current_face_uvs: list[tuple[float, float]] = []
         for point in atlas_triangle:
             u = (point[0] + 0.5) / atlas_width
             v = 1 - ((point[1] + 0.5) / atlas_height)
+            current_face_uvs.append((u, v))
             if not math.isfinite(u) or not math.isfinite(v):
                 uv_non_finite_count += 1
             else:
@@ -6686,6 +8146,7 @@ async def rasterize_texture_atlas_parallel(
                 if not (0 <= u <= 1 and 0 <= v <= 1):
                     uv_out_of_range_count += 1
             vt_lines.append(f"vt {u:.8f} {v:.8f}")
+        face_uvs.append((current_face_uvs[0], current_face_uvs[1], current_face_uvs[2]))
 
         face_lines.append(obj_face_line(face, uv_start))
 
@@ -6694,6 +8155,7 @@ async def rasterize_texture_atlas_parallel(
             "texture": texture,
             "vt_lines": vt_lines,
             "face_lines": face_lines,
+            "face_uvs": face_uvs,
             "textured_face_count": textured_face_count,
             "fallback_face_count": fallback_face_count,
             "rasterized_pixel_count": rasterized_pixel_count,
@@ -6808,6 +8270,7 @@ async def rasterize_texture_atlas_parallel(
         "texture": texture,
         "vt_lines": vt_lines,
         "face_lines": face_lines,
+        "face_uvs": face_uvs,
         "textured_face_count": textured_face_count,
         "fallback_face_count": fallback_face_count,
         "rasterized_pixel_count": rasterized_pixel_count,
@@ -6900,7 +8363,7 @@ def rasterize_texture_face_for_worker(face_index: int) -> TextureFaceResult:
     vertices = _TEXTURE_WORKER_VERTICES
     keyframes = _TEXTURE_WORKER_KEYFRAMES
     face_vertices = [vertices[face[0]], vertices[face[1]], vertices[face[2]]]
-    candidates = texture_projection_candidates(face_vertices, keyframes)
+    candidates = texture_projection_candidates(face_vertices, keyframes, face_index=face_index)
     selected_keyframe = candidates[0].keyframe_debug_id if candidates else None
     fallback_color: tuple[int, int, int] | None = None
 
@@ -7844,6 +9307,7 @@ def projection_keyframe_debug_summaries(keyframes: list[ProjectionKeyframe]) -> 
             "intrinsics": [round(float(value), 6) for value in keyframe.intrinsics[:9]],
             "cameraPosition": [round(value, 6) for value in keyframe.camera_position],
             "forwardVector": [round(value, 6) for value in camera_forward_from_world_to_camera(keyframe.world_to_camera_values)],
+            "meshVisibility": keyframe.mesh_visibility_stats,
             "depthFrame": (
                 {
                     "id": depth_frame.id,
@@ -7997,6 +9461,219 @@ def is_fallback_color(color: tuple[int, int, int], tolerance: int = 3) -> bool:
     return all(abs(int(color[index]) - FALLBACK_COLOR[index]) <= tolerance for index in range(3))
 
 
+def keyframe_mesh_face_visible(keyframe: ProjectionKeyframe, face_index: int) -> bool:
+    mask = keyframe.mesh_visibility_mask
+    if mask is None:
+        return True
+    return 0 <= face_index < len(mask) and mask[face_index] != 0
+
+
+def build_keyframe_mesh_visibility_masks(
+    mesh: FusedMesh,
+    keyframes: list[ProjectionKeyframe],
+    *,
+    raster_max_size: int = TEXTURE_VISIBILITY_RASTER_MAX_SIZE,
+) -> list[dict]:
+    if not mesh.faces or not keyframes:
+        return []
+
+    face_centers = [
+        triangle_center(mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]])
+        if valid_triangle_indices(face, len(mesh.vertices))
+        else (0.0, 0.0, 0.0)
+        for face in mesh.faces
+    ]
+    face_normals = [
+        triangle_normal(mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]])
+        if valid_triangle_indices(face, len(mesh.vertices))
+        else (0.0, 0.0, 0.0)
+        for face in mesh.faces
+    ]
+    summaries: list[dict] = []
+    for keyframe in keyframes:
+        scale = min(1.0, raster_max_size / max(keyframe.width, keyframe.height, 1))
+        raster_width = max(1, int(math.ceil(keyframe.width * scale)))
+        raster_height = max(1, int(math.ceil(keyframe.height * scale)))
+        pixel_count = raster_width * raster_height
+        depth_buffer = [math.inf] * pixel_count
+        face_buffer = [-1] * pixel_count
+        projected_count = 0
+        facing_rejected_count = 0
+        out_of_bounds_count = 0
+        for face_index, center in enumerate(face_centers):
+            projection = project_world_point(center, keyframe)
+            if projection is None:
+                out_of_bounds_count += 1
+                continue
+            normal = face_normals[face_index]
+            if normal != (0.0, 0.0, 0.0):
+                view_vector = normalize(subtract(keyframe.camera_position, center))
+                if abs(dot(normal, view_vector)) < TEXTURE_BLEND_MIN_FACING:
+                    facing_rejected_count += 1
+                    continue
+            u, v, depth = projection
+            x = min(raster_width - 1, max(0, int(u * scale)))
+            y = min(raster_height - 1, max(0, int(v * scale)))
+            buffer_index = y * raster_width + x
+            if depth < depth_buffer[buffer_index]:
+                depth_buffer[buffer_index] = depth
+                face_buffer[buffer_index] = face_index
+            projected_count += 1
+
+        visibility_mask = bytearray(len(mesh.faces))
+        visible_count = 0
+        for face_index, center in enumerate(face_centers):
+            projection = project_world_point(center, keyframe)
+            if projection is None:
+                continue
+            u, v, depth = projection
+            x = min(raster_width - 1, max(0, int(u * scale)))
+            y = min(raster_height - 1, max(0, int(v * scale)))
+            buffer_index = y * raster_width + x
+            nearest_face = face_buffer[buffer_index]
+            nearest_depth = depth_buffer[buffer_index]
+            if nearest_face == face_index or depth <= nearest_depth + TEXTURE_VISIBILITY_DEPTH_TOLERANCE_METERS:
+                visibility_mask[face_index] = 1
+                visible_count += 1
+
+        keyframe.mesh_visibility_mask = visibility_mask
+        keyframe.mesh_visibility_stats = {
+            "keyframeId": keyframe.debug_id,
+            "rasterSize": [raster_width, raster_height],
+            "faceCount": len(mesh.faces),
+            "projectedFaceCenterCount": projected_count,
+            "visibleFaceCenterCount": visible_count,
+            "outOfBoundsFaceCenterCount": out_of_bounds_count,
+            "facingRejectedFaceCenterCount": facing_rejected_count,
+            "visibleFaceCenterRatio": round(visible_count / max(len(mesh.faces), 1), 4),
+            "depthToleranceMeters": TEXTURE_VISIBILITY_DEPTH_TOLERANCE_METERS,
+            "algorithm": "cpu_reduced_resolution_face_center_z_buffer",
+        }
+        summaries.append(keyframe.mesh_visibility_stats)
+    return summaries
+
+
+def mesh_face_neighbors(faces: list[tuple[int, int, int]]) -> list[set[int]]:
+    edge_to_faces: dict[tuple[int, int], list[int]] = {}
+    for face_index, face in enumerate(faces):
+        for edge in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+            edge_to_faces.setdefault(tuple(sorted(edge)), []).append(face_index)
+    neighbors = [set() for _face in faces]
+    for face_indices in edge_to_faces.values():
+        if len(face_indices) < 2:
+            continue
+        for left in face_indices:
+            for right in face_indices:
+                if left != right:
+                    neighbors[left].add(right)
+    return neighbors
+
+
+def assign_coherent_face_keyframes(
+    mesh: FusedMesh,
+    keyframes: list[ProjectionKeyframe],
+) -> tuple[list[str | None], dict]:
+    face_count = len(mesh.faces)
+    if not face_count or not keyframes:
+        return [None] * face_count, {
+            "enabled": False,
+            "reason": "empty_mesh_or_keyframes",
+        }
+
+    face_candidates: list[list[TextureProjectionCandidate]] = []
+    labels: list[str | None] = []
+    initial_label_counts: dict[str, int] = {}
+    for face_index, face in enumerate(mesh.faces):
+        face_vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
+        candidates = texture_projection_candidates(
+            face_vertices,
+            keyframes,
+            max_candidates=TEXTURE_COHERENT_LABEL_MAX_CANDIDATES,
+            face_index=face_index,
+        )
+        face_candidates.append(candidates)
+        label = candidates[0].keyframe_debug_id if candidates else None
+        labels.append(label)
+        if label is not None:
+            initial_label_counts[label] = initial_label_counts.get(label, 0) + 1
+
+    neighbors = mesh_face_neighbors(mesh.faces)
+    changed_total = 0
+    for _iteration in range(TEXTURE_COHERENT_LABEL_ITERATIONS):
+        changed = 0
+        next_labels = list(labels)
+        for face_index, candidates in enumerate(face_candidates):
+            if not candidates:
+                continue
+            score_by_label = {candidate.keyframe_debug_id: candidate.score for candidate in candidates}
+            current_label = labels[face_index]
+            current_score = score_by_label.get(current_label or "", 0.0)
+            best_label = current_label
+            best_energy = -math.inf
+            for label, data_score in score_by_label.items():
+                neighbor_support = sum(1 for neighbor in neighbors[face_index] if labels[neighbor] == label)
+                energy = data_score + TEXTURE_COHERENT_LABEL_SMOOTHNESS_WEIGHT * neighbor_support
+                if energy > best_energy:
+                    best_energy = energy
+                    best_label = label
+            if best_label != current_label:
+                best_data_score = score_by_label.get(best_label or "", 0.0)
+                if current_score <= 0 or best_data_score >= current_score * TEXTURE_COHERENT_LABEL_SWITCH_TOLERANCE:
+                    next_labels[face_index] = best_label
+                    changed += 1
+        labels = next_labels
+        changed_total += changed
+        if changed == 0:
+            break
+
+    final_label_counts: dict[str, int] = {}
+    for label in labels:
+        if label is not None:
+            final_label_counts[label] = final_label_counts.get(label, 0) + 1
+    seam_edges = count_label_boundary_edges(mesh.faces, labels)
+    return labels, {
+        "enabled": True,
+        "algorithm": "adjacency_smoothed_face_owner_labels",
+        "faceCount": face_count,
+        "candidateRetentionPerFace": TEXTURE_COHERENT_LABEL_MAX_CANDIDATES,
+        "iterationLimit": TEXTURE_COHERENT_LABEL_ITERATIONS,
+        "changedLabelCount": changed_total,
+        "unlabeledFaceCount": sum(1 for label in labels if label is None),
+        "initialLabelCounts": top_keyframe_counts(initial_label_counts, value_label="faceCount"),
+        "finalLabelCounts": top_keyframe_counts(final_label_counts, value_label="faceCount"),
+        "seamEdgeCount": seam_edges,
+        "smoothnessWeight": TEXTURE_COHERENT_LABEL_SMOOTHNESS_WEIGHT,
+        "switchTolerance": TEXTURE_COHERENT_LABEL_SWITCH_TOLERANCE,
+    }
+
+
+def count_label_boundary_edges(faces: list[tuple[int, int, int]], labels: list[str | None]) -> int:
+    edge_to_faces: dict[tuple[int, int], list[int]] = {}
+    for face_index, face in enumerate(faces):
+        for edge in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0])):
+            edge_to_faces.setdefault(tuple(sorted(edge)), []).append(face_index)
+    seam_count = 0
+    for face_indices in edge_to_faces.values():
+        if len(face_indices) != 2:
+            continue
+        left, right = face_indices
+        if labels[left] != labels[right]:
+            seam_count += 1
+    return seam_count
+
+
+def prioritize_owner_candidate(
+    candidates: list[TextureProjectionCandidate],
+    owner_keyframe_id: str | None,
+) -> list[TextureProjectionCandidate]:
+    if not owner_keyframe_id or not candidates:
+        return candidates
+    owner = [candidate for candidate in candidates if candidate.keyframe_debug_id == owner_keyframe_id]
+    if not owner:
+        return candidates
+    return owner + [candidate for candidate in candidates if candidate.keyframe_debug_id != owner_keyframe_id]
+
+
 def select_face_keyframe(
     face_vertices: list[tuple[float, float, float]],
     keyframes: list[ProjectionKeyframe],
@@ -8141,6 +9818,7 @@ def texture_projection_candidates(
     keyframes: list[ProjectionKeyframe],
     max_candidates: int = TEXTURE_BLEND_MAX_FACE_CANDIDATES,
     relaxed: bool = False,
+    face_index: int | None = None,
 ) -> list[TextureProjectionCandidate]:
     if not keyframes:
         return []
@@ -8149,6 +9827,8 @@ def texture_projection_candidates(
     normal = triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2])
     candidates: list[TextureProjectionCandidate] = []
     for keyframe in keyframes:
+        if face_index is not None and not keyframe_mesh_face_visible(keyframe, face_index):
+            continue
         projection = project_world_point(center, keyframe)
         if projection is None:
             continue

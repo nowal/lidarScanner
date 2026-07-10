@@ -127,6 +127,16 @@ def make_centered_wall_grid(size: int, spacing: float = 0.04) -> pipeline.FusedM
     return pipeline.FusedMesh(vertices=vertices, faces=faces, stats={"geometrySource": "test_wall_grid"})
 
 
+def read_glb_json(path) -> dict:
+    data = path.read_bytes()
+    magic, version, _ = struct.unpack_from("<III", data, 0)
+    assert magic == 0x46546C67
+    assert version == 2
+    json_length, json_type = struct.unpack_from("<II", data, 12)
+    assert json_type == 0x4E4F534A
+    return json.loads(data[20:20 + json_length].decode("utf-8"))
+
+
 def make_disconnected_wall_grids(size: int, spacing: float = 0.04, gap: float = 1.0) -> pipeline.FusedMesh:
     vertices: list[tuple[float, float, float]] = []
     faces: list[tuple[int, int, int]] = []
@@ -199,6 +209,49 @@ def test_job_store_loads_job_created_by_another_process(tmp_path):
     assert loaded is not None
     assert loaded.job_id == record.job_id
     assert loaded.status == JobStatus.queued
+
+
+def test_diagnostic_glb_exports_triangle_opaque_meshes(tmp_path):
+    mesh = make_centered_wall_grid(size=1)
+
+    geometry_stats = pipeline.write_mesh_glb(
+        mesh,
+        tmp_path / "geometry_only.glb",
+        name="geometry_only",
+        material_color=(0.7, 0.7, 0.7, 1.0),
+        double_sided=True,
+    )
+    uv_stats = pipeline.write_uv_checker_glb(mesh, tmp_path / "uv_checker.glb")
+    coverage_stats = pipeline.write_coverage_debug_glb(
+        mesh,
+        tmp_path / "coverage_debug.glb",
+        tmp_path / "coverage_debug_report.json",
+        ["projected"] * len(mesh.faces),
+    )
+
+    for filename, stats in [
+        ("geometry_only.glb", geometry_stats),
+        ("uv_checker.glb", uv_stats),
+        ("coverage_debug.glb", coverage_stats),
+    ]:
+        assert stats["available"] is True
+        gltf = read_glb_json(tmp_path / filename)
+        primitive = gltf["meshes"][0]["primitives"][0]
+        assert primitive["mode"] == 4
+        assert gltf["materials"][0]["alphaMode"] == "OPAQUE"
+        assert gltf["accessors"][primitive["indices"]]["count"] == len(mesh.faces) * 3
+
+    uv_gltf = read_glb_json(tmp_path / "uv_checker.glb")
+    uv_primitive = uv_gltf["meshes"][0]["primitives"][0]
+    assert "TEXCOORD_0" in uv_primitive["attributes"]
+    assert uv_gltf["images"][0]["mimeType"] == "image/png"
+    assert uv_stats["validation"]["uvOutOfRangeCount"] == 0
+
+    coverage_gltf = read_glb_json(tmp_path / "coverage_debug.glb")
+    coverage_primitive = coverage_gltf["meshes"][0]["primitives"][0]
+    assert "COLOR_0" in coverage_primitive["attributes"]
+    coverage_report = json.loads((tmp_path / "coverage_debug_report.json").read_text(encoding="utf-8"))
+    assert coverage_report["categories"]["projected"]["faceCount"] == len(mesh.faces)
 
 
 def test_arkit_depth_backprojection_roundtrips_through_keyframe_projection():
@@ -596,6 +649,11 @@ async def test_raw_mesh_artifacts_are_exported_when_texturing_is_disabled():
         assert status["status"] == "complete"
         assert status["artifacts"]["previewMeshUrl"].endswith("/colored_mesh.ply")
         assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
+        assert status["artifacts"]["glbUrl"].endswith("/textured_mesh.glb")
+        assert status["artifacts"]["geometryOnlyGlbUrl"].endswith("/geometry_only.glb")
+        assert status["artifacts"]["geometryCulledGlbUrl"].endswith("/geometry_culled.glb")
+        assert status["artifacts"]["uvCheckerGlbUrl"].endswith("/uv_checker.glb")
+        assert status["artifacts"]["coverageDebugGlbUrl"].endswith("/coverage_debug.glb")
         assert status["artifacts"]["texturePngUrl"].endswith("/textured_mesh_texture.png")
         assert status["artifacts"]["usdzUrl"] is None
 
@@ -607,6 +665,14 @@ async def test_raw_mesh_artifacts_are_exported_when_texturing_is_disabled():
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
         assert manifest["preferredPhotorealArtifact"] == "textured_obj"
         assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
+        assert manifest["artifacts"]["glb"]["available"] is True
+        assert manifest["artifacts"]["glb"]["path"] == "textured_mesh.glb"
+        assert manifest["artifacts"]["geometryOnlyGlb"]["available"] is True
+        assert manifest["artifacts"]["geometryOnlyGlb"]["stats"]["primitiveMode"] == 4
+        assert manifest["artifacts"]["geometryCulledGlb"]["stats"]["doubleSided"] is False
+        assert manifest["artifacts"]["uvCheckerGlb"]["available"] is True
+        assert manifest["artifacts"]["coverageDebugGlb"]["available"] is True
+        assert manifest["artifacts"]["meshIntegrityReport"]["available"] is True
         assert manifest["artifacts"]["textureDebug"]["available"] is True
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["invalidFaceCount"] == 1
 
@@ -794,6 +860,10 @@ async def test_textured_obj_blends_multiple_valid_keyframes(tmp_path):
         output_texture_path=tmp_path / "texture.png",
         output_debug_path=tmp_path / "debug.json",
         output_debug_preview_path=tmp_path / "preview.png",
+        profile=pipeline.replace(
+            pipeline.PROCESSING_PROFILES["full_quality"],
+            planar_chart_projection_mode="blend",
+        ),
     )
     projection = stats["diagnostics"]["projection"]
 
@@ -1619,7 +1689,7 @@ def test_open3d_tsdf_postprocess_removes_small_components_when_available():
 
 
 @pytest.mark.asyncio
-async def test_depth_frames_are_decoded_and_rgbd_fallback_mesh_is_exported(monkeypatch):
+async def test_depth_frames_are_decoded_and_rgbd_geometry_is_not_used_for_full_quality(monkeypatch):
     def unavailable_open3d():
         raise pipeline.RGBDFusionUnavailable("Open3D intentionally unavailable in test.")
 
@@ -1716,23 +1786,19 @@ async def test_depth_frames_are_decoded_and_rgbd_fallback_mesh_is_exported(monke
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
         assert status["artifacts"]["arkitFusedMeshUrl"].endswith("/arkit_fused_mesh.obj")
-        assert status["artifacts"]["rgbdFusedMeshUrl"].endswith("/rgbd_fused_mesh.obj")
+        assert status["artifacts"]["rgbdFusedMeshUrl"] is None
 
         depth_manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_manifest.json", headers=headers)).json()
         assert len(depth_manifest) == 1
         assert depth_manifest[0]["depthResolution"] == [2, 2]
 
         rgbd_stats = (await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_fusion_stats.json", headers=headers)).json()
-        assert rgbd_stats["used"] is True
-        assert rgbd_stats["geometrySource"] == "rgbd_keyframe_depth_mesh"
-        assert rgbd_stats["tsdfUnavailableReason"] == "Open3D intentionally unavailable in test."
-
-        rgbd_mesh = await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_fused_mesh.obj", headers=headers)
-        assert rgbd_mesh.status_code == 200
-        assert "o fused_mesh" in rgbd_mesh.text
+        assert rgbd_stats["used"] is False
+        assert rgbd_stats["geometrySource"] == "arkit_mesh_anchor_fusion"
+        assert rgbd_stats["profile"]["useRgbdGeometry"] is False
 
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
-        assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is True
+        assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is False
 
 
 @pytest.mark.asyncio
@@ -1979,8 +2045,8 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert rgbd_stats["geometrySource"] == "arkit_mesh_anchor_fusion"
         assert rgbd_stats["geometryPreserved"] is True
         assert rgbd_stats["profile"]["name"] == "fast_onboarding"
-        assert rgbd_stats["profile"]["maxKeyframes"] == 12
-        assert rgbd_stats["profile"]["maxDepthFrames"] == 12
+        assert rgbd_stats["profile"]["maxKeyframes"] is None
+        assert rgbd_stats["profile"]["maxDepthFrames"] is None
         assert rgbd_stats["profile"]["maxRgbdFrames"] == 0
         assert rgbd_stats["profile"]["useRgbdGeometry"] is False
         assert rgbd_stats["profile"]["preserveTextureRenderMesh"] is True
@@ -1989,23 +2055,23 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert rgbd_stats["profile"]["rgbdHeroPatchTexture"] is False
         assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["profile"]["textureTsdfRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
-        assert rgbd_stats["depthFrameCount"] == 12
-        assert rgbd_stats["keyframeCount"] == 12
+        assert rgbd_stats["depthFrameCount"] == 55
+        assert rgbd_stats["keyframeCount"] == 55
 
         keyframe_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/keyframe_selection.json", headers=headers)).json()
         assert keyframe_selection["originalKeyframeCount"] == 55
-        assert keyframe_selection["selectedKeyframeCount"] == 12
-        assert keyframe_selection["strategy"] == "pose_diverse_backend_subset"
-        assert len(keyframe_selection["selectedKeyframeIds"]) == 12
+        assert keyframe_selection["selectedKeyframeCount"] == 55
+        assert keyframe_selection["strategy"] == "all_uploaded_keyframes_coverage_first"
+        assert len(keyframe_selection["selectedKeyframeIds"]) == 55
 
         depth_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_selection.json", headers=headers)).json()
         assert depth_selection["originalDepthFrameCount"] == 55
         assert depth_selection["geometryDepthSelection"] == "selected_keyframe_pairs"
-        assert depth_selection["selectedDepthFrameCount"] == 12
+        assert depth_selection["selectedDepthFrameCount"] == 55
         assert set(depth_selection["selectedDepthFrameIds"])
 
         depth_manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_manifest.json", headers=headers)).json()
-        assert len(depth_manifest) == 12
+        assert len(depth_manifest) == 55
         assert {frame["colorKeyframeId"] for frame in depth_manifest}.issubset(set(keyframe_selection["selectedKeyframeIds"]))
 
         fused_mesh = await client.get(f"/api/v1/jobs/{job_id}/result/fused_mesh.obj", headers=headers)
@@ -2042,14 +2108,17 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert texture_debug["geometry"]["faceCount"] == manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
         assert texture_debug["geometry"]["renderMesh"]["algorithm"] == "lidar_surface_edge_subdivision"
         assert texture_debug["geometry"]["renderMesh"]["geometryPreserved"] is False
-        assert len(texture_debug["perKeyframeProjection"]) == 12
+        assert len(texture_debug["perKeyframeProjection"]) == 55
         assert texture_debug["projection"]["projectionCoverage"] > 0
         assert texture_debug["projection"]["rejectedDepthEdgeSampleCount"] >= 0
         assert texture_debug["processing"]["denseSingleViewTexture"] is False
         assert texture_debug["processing"]["rgbdHeroPatchTexture"] is False
-        assert texture_debug["processing"]["sourceKeyframeCount"] == 12
-        assert texture_debug["processing"]["activeTextureKeyframeCount"] == 12
+        assert texture_debug["processing"]["sourceKeyframeCount"] == 55
+        assert texture_debug["processing"]["activeTextureKeyframeCount"] == 55
         assert texture_debug["processing"]["activeProjectionMode"] == "direct"
+        assert texture_debug["processing"]["cpuVisibility"]["enabled"] is True
+        assert texture_debug["processing"]["coherentLabeling"]["enabled"] is True
+        assert texture_debug["visibility"][0]["algorithm"] == "cpu_reduced_resolution_face_center_z_buffer"
         assert "rgbdHeroPatch" not in texture_debug
         assert texture_debug["summary"]["selectedTextureKeyframes"]
         assert texture_debug["summary"]["rejectedOccludedSampleCount"] == texture_debug["projection"]["rejectedOccludedSampleCount"]
@@ -2067,7 +2136,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert texture_png.headers["content-type"] == "image/png"
 
         overlay = await client.get(f"/api/v1/jobs/{job_id}/result/two_keyframe_projection_0.png", headers=headers)
-        assert overlay.status_code == 404
+        assert overlay.status_code == 200
 
         timings = (await client.get(f"/api/v1/jobs/{job_id}/result/stage_timings.json", headers=headers)).json()
         assert timings["jobId"] == job_id
