@@ -1054,6 +1054,75 @@ def test_rgbd_pair_selection_prefers_first_pair_plus_timed_supplements():
     assert [item["actualTimeDeltaSeconds"] for item in stats["supplementalSelections"]] == pytest.approx([2.5, 4.5])
 
 
+def test_rgbd_candidate_pool_keeps_alternates_around_timed_windows():
+    def make_pair(index: int, timestamp: float) -> dict:
+        return {
+            "keyframe": {"id": f"kf-{index}"},
+            "depthFrame": {"id": f"depth-{index}"},
+            "keyframeIndex": index,
+            "depthFrameIndex": index,
+            "pose": {
+                "position": (index * 0.01, 0.0, 0.0),
+                "forward": (0.0, 0.0, -1.0),
+                "timestamp": timestamp,
+            },
+        }
+
+    selected, stats = pipeline.select_rgbd_candidate_pool_pair_records([
+        make_pair(0, 0.0),
+        make_pair(1, 1.0),
+        make_pair(2, 2.2),
+        make_pair(3, 2.5),
+        make_pair(4, 2.9),
+        make_pair(5, 4.2),
+        make_pair(6, 4.5),
+        make_pair(7, 4.9),
+        make_pair(8, 7.0),
+    ], limit=8)
+
+    assert [pair["keyframe"]["id"] for pair in selected] == [
+        "kf-0",
+        "kf-2",
+        "kf-3",
+        "kf-4",
+        "kf-5",
+        "kf-6",
+        "kf-7",
+        "kf-8",
+    ]
+    assert stats["pairSelectionStrategy"] == "first_pair_plus_timed_rgbd_hero_patch_candidate_pool"
+    assert stats["candidatePoolLimit"] == 8
+    assert [item["selectedPairCount"] for item in stats["candidatePoolSelections"]] == [3, 3]
+
+
+def test_rgbd_hero_patch_candidate_selection_prefers_quality_within_timed_windows():
+    def make_candidate(index: int, timestamp: float, sharpness: float) -> dict:
+        return {
+            "index": index,
+            "keyframeId": f"kf-{index}",
+            "depthFrameId": f"depth-{index}",
+            "sourceTimestamp": timestamp,
+            "timestampDeltaSeconds": 0.0,
+            "validDepthRatio": 1.0,
+            "highConfidenceRatio": 1.0,
+            "rgbSharpnessScore": sharpness,
+            "score": 9.0 + min(sharpness / 28.0, 1.0),
+        }
+
+    selected, stats = pipeline.select_rgbd_hero_patch_candidates([
+        make_candidate(0, 0.0, 12.0),
+        make_candidate(1, 2.5, 2.0),
+        make_candidate(2, 2.7, 32.0),
+        make_candidate(3, 4.5, 2.0),
+        make_candidate(4, 4.8, 32.0),
+    ])
+
+    assert [candidate["keyframeId"] for candidate in selected] == ["kf-0", "kf-2", "kf-4"]
+    assert stats["strategy"] == "quality_aware_primary_plus_timed_supplemental_rgbd_hero_patches"
+    assert stats["candidatePoolCount"] == 5
+    assert [item["actualTimeDeltaSeconds"] for item in stats["supplementalSelections"]] == pytest.approx([2.7, 4.8])
+
+
 def test_rgbd_hero_patch_ownership_culls_supplemental_faces_when_primary_owns():
     primary_patch = make_rgbd_hero_patch_test_patch("primary", bytes([2] * 16))
     secondary_patch = make_rgbd_hero_patch_test_patch("secondary", bytes([2] * 16))
@@ -1888,29 +1957,30 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_three_paired_rgb
         assert rgbd_stats["profile"]["rgbdHeroPatchTexture"] is True
         assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["profile"]["textureTsdfRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
-        assert rgbd_stats["depthFrameCount"] == 3
-        assert rgbd_stats["keyframeCount"] == 3
+        assert rgbd_stats["depthFrameCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
+        assert rgbd_stats["keyframeCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
 
         keyframe_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/keyframe_selection.json", headers=headers)).json()
         assert keyframe_selection["originalKeyframeCount"] == 55
-        assert keyframe_selection["selectedKeyframeCount"] == 3
-        assert keyframe_selection["strategy"] == "rgbd_hero_patch_pairs"
-        assert len(keyframe_selection["selectedKeyframeIds"]) == 3
-        assert len(keyframe_selection["selectedPairDepthFrameIds"]) == 3
-        assert keyframe_selection["pairSelectionStrategy"] == "first_pair_plus_timed_rgbd_hero_patch_supplements"
+        assert keyframe_selection["selectedKeyframeCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
+        assert keyframe_selection["strategy"] == "rgbd_hero_patch_candidate_pool"
+        assert len(keyframe_selection["selectedKeyframeIds"]) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
+        assert len(keyframe_selection["selectedPairDepthFrameIds"]) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
+        assert keyframe_selection["pairSelectionStrategy"] == "first_pair_plus_timed_rgbd_hero_patch_candidate_pool"
+        assert keyframe_selection["candidatePoolLimit"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
         assert 2.0 <= keyframe_selection["poseDelta"]["timeDeltaSeconds"] <= 3.25
-        assert len(keyframe_selection["poseDeltas"]) == 2
-        assert keyframe_selection["poseDeltas"][1]["timeDeltaSeconds"] >= 3.75
+        assert len(keyframe_selection["poseDeltas"]) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE - 1
+        assert any(item["timeDeltaSeconds"] >= 3.75 for item in keyframe_selection["poseDeltas"])
 
         depth_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_selection.json", headers=headers)).json()
         assert depth_selection["originalDepthFrameCount"] == 55
         assert depth_selection["geometryDepthSelection"] == "selected_keyframe_pairs"
-        assert depth_selection["selectedDepthFrameCount"] == 3
+        assert depth_selection["selectedDepthFrameCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
         assert depth_selection["selectedKeyframeIds"] == keyframe_selection["selectedKeyframeIds"]
         assert depth_selection["selectedDepthFrameIds"] == keyframe_selection["selectedPairDepthFrameIds"]
 
         depth_manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_manifest.json", headers=headers)).json()
-        assert len(depth_manifest) == 3
+        assert len(depth_manifest) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
         assert [frame["colorKeyframeId"] for frame in depth_manifest] == keyframe_selection["selectedKeyframeIds"]
 
         fused_mesh = await client.get(f"/api/v1/jobs/{job_id}/result/fused_mesh.obj", headers=headers)
@@ -1935,18 +2005,20 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_three_paired_rgb
         assert [item["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedKeyframeIds"]
         assert [item["depthFrame"]["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedPairDepthFrameIds"]
         assert texture_debug["geometry"]["geometrySource"] == "rgbd_hero_patch_depth_mesh"
-        assert len(texture_debug["perKeyframeProjection"]) == 3
+        assert len(texture_debug["perKeyframeProjection"]) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
         assert texture_debug["projection"]["projectionCoverage"] > 0
         assert texture_debug["processing"]["denseSingleViewTexture"] is True
         assert texture_debug["processing"]["rgbdHeroPatchTexture"] is True
-        assert texture_debug["processing"]["sourceKeyframeCount"] == 3
+        assert texture_debug["processing"]["sourceKeyframeCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
         assert texture_debug["processing"]["activeTextureKeyframeCount"] == 3
         assert texture_debug["processing"]["activeProjectionMode"] == "rgbd_hero_patch"
         assert texture_debug["rgbdHeroPatch"]["patchCount"] == 3
-        assert texture_debug["rgbdHeroPatch"]["selectedKeyframeId"] == keyframe_selection["selectedKeyframeIds"][0]
-        assert texture_debug["rgbdHeroPatch"]["selectedDepthFrameId"] == keyframe_selection["selectedPairDepthFrameIds"][0]
-        assert texture_debug["rgbdHeroPatch"]["selectedKeyframeIds"] == keyframe_selection["selectedKeyframeIds"]
-        assert texture_debug["rgbdHeroPatch"]["selectedDepthFrameIds"] == keyframe_selection["selectedPairDepthFrameIds"]
+        assert len(texture_debug["rgbdHeroPatch"]["selectedKeyframeIds"]) == 3
+        assert len(texture_debug["rgbdHeroPatch"]["selectedDepthFrameIds"]) == 3
+        assert set(texture_debug["rgbdHeroPatch"]["selectedKeyframeIds"]).issubset(keyframe_selection["selectedKeyframeIds"])
+        assert set(texture_debug["rgbdHeroPatch"]["selectedDepthFrameIds"]).issubset(keyframe_selection["selectedPairDepthFrameIds"])
+        assert texture_debug["rgbdHeroPatch"]["selection"]["strategy"] == "quality_aware_primary_plus_timed_supplemental_rgbd_hero_patches"
+        assert texture_debug["rgbdHeroPatch"]["selection"]["candidatePoolCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
         assert texture_debug["rgbdHeroPatch"]["depthPreparation"]["confidenceThreshold"] == "accept_all_nonzero_depth_values"
         assert texture_debug["rgbdHeroPatch"]["mesh"]["acceptedFaceCount"] > 0
         assert len(texture_debug["rgbdHeroPatch"]["patches"]) == 3
