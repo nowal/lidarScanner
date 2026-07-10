@@ -997,6 +997,34 @@ async def test_fast_dense_single_view_projects_white_pixels_even_when_depth_occl
     assert dense_stats["candidates"][0]["occludedFaceCenterCount"] == 1
 
 
+def test_rgbd_hero_patch_depth_preparation_accepts_low_confidence_and_fills_holes():
+    depth_values = array("f", [
+        1.0, 1.0, 1.0,
+        1.0, 0.0, 1.0,
+        1.0, 1.0, 1.0,
+    ])
+    confidence_values = bytes([
+        2, 0, 2,
+        0, 0, 0,
+        2, 0, 2,
+    ])
+
+    prepared = pipeline.prepare_rgbd_hero_patch_depth_grid(
+        depth_values=depth_values,
+        confidence_values=confidence_values,
+        width=3,
+        height=3,
+    )
+    stats = prepared["stats"]
+
+    assert stats["originalValidDepthCount"] == 8
+    assert stats["acceptedLowConfidenceDepthCount"] == 4
+    assert stats["filledDepthHoleCount"] == 1
+    assert stats["remainingInvalidDepthCount"] == 0
+    assert stats["finalValidDepthRatio"] == 1.0
+    assert prepared["depthValues"][4] == pytest.approx(1.0)
+
+
 def test_planar_chart_local_fill_repairs_small_holes():
     chart = make_test_planar_chart(width=7, height=5)
     texture = Image.new("RGB", (7, 5), pipeline.FALLBACK_COLOR)
@@ -1699,6 +1727,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_two_paired_rgbd_
         assert rgbd_stats["profile"]["useRgbdGeometry"] is False
         assert rgbd_stats["profile"]["preserveTextureRenderMesh"] is True
         assert rgbd_stats["profile"]["denseSingleViewTexture"] is True
+        assert rgbd_stats["profile"]["rgbdHeroPatchTexture"] is True
         assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["profile"]["textureTsdfRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["depthFrameCount"] == 2
@@ -1733,23 +1762,33 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_two_paired_rgbd_
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["geometryPreserved"] is True
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
         assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
+        assert manifest["artifacts"]["texturedObj"]["stats"]["uvStrategy"] == "rgbd_hero_patch_direct_image_uv"
+        assert manifest["artifacts"]["texturedObj"]["stats"]["faceCount"] > manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
         assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["used"] is False
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
 
         texture_debug = (await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug.json", headers=headers)).json()
         assert [item["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedKeyframeIds"]
         assert [item["depthFrame"]["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedPairDepthFrameIds"]
-        assert texture_debug["geometry"]["geometryPreserved"] is True
+        assert texture_debug["geometry"]["geometrySource"] == "rgbd_hero_patch_depth_mesh"
         assert len(texture_debug["perKeyframeProjection"]) == 2
         assert texture_debug["projection"]["projectionCoverage"] > 0
         assert texture_debug["processing"]["denseSingleViewTexture"] is True
+        assert texture_debug["processing"]["rgbdHeroPatchTexture"] is True
         assert texture_debug["processing"]["sourceKeyframeCount"] == 2
         assert texture_debug["processing"]["activeTextureKeyframeCount"] == 1
-        assert texture_debug["processing"]["activeProjectionMode"] == "dense_single_view"
-        assert texture_debug["denseSingleViewTexture"]["selectedKeyframeId"] in keyframe_selection["selectedKeyframeIds"]
-        assert texture_debug["denseSingleViewTexture"]["bakedKeyframeIds"] == [
-            texture_debug["denseSingleViewTexture"]["selectedKeyframeId"]
-        ]
+        assert texture_debug["processing"]["activeProjectionMode"] == "rgbd_hero_patch"
+        assert texture_debug["rgbdHeroPatch"]["selectedKeyframeId"] in keyframe_selection["selectedKeyframeIds"]
+        assert texture_debug["rgbdHeroPatch"]["selectedDepthFrameId"] in keyframe_selection["selectedPairDepthFrameIds"]
+        assert texture_debug["rgbdHeroPatch"]["depthPreparation"]["confidenceThreshold"] == "accept_all_nonzero_depth_values"
+        assert texture_debug["rgbdHeroPatch"]["mesh"]["acceptedFaceCount"] > 0
+
+        textured_obj = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.obj", headers=headers)
+        textured_mtl = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.mtl", headers=headers)
+        texture_png = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh_texture.png", headers=headers)
+        assert "o rgbd_hero_patch_mesh" in textured_obj.text
+        assert "map_Kd textured_mesh_texture.png" in textured_mtl.text
+        assert texture_png.headers["content-type"] == "image/png"
 
         overlay = await client.get(f"/api/v1/jobs/{job_id}/result/two_keyframe_projection_0.png", headers=headers)
         assert overlay.status_code == 200

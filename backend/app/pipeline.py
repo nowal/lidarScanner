@@ -305,6 +305,11 @@ RGBD_DEPTH_MESH_VERTEX_QUANTIZATION = 0.006
 RGBD_DIAGNOSTIC_MAX_POINT_SAMPLES = 180_000
 RGBD_DIAGNOSTIC_OVERLAY_MAX_SAMPLES = 16_000
 RGBD_DIAGNOSTIC_MESH_TARGET_SAMPLES = 40_000
+RGBD_HERO_PATCH_TARGET_SAMPLES = 120_000
+RGBD_HERO_PATCH_HOLE_FILL_PASSES = 3
+RGBD_HERO_PATCH_HOLE_FILL_RADIUS = 2
+RGBD_HERO_PATCH_FACE_ABSOLUTE_TOLERANCE_METERS = 0.35
+RGBD_HERO_PATCH_FACE_RELATIVE_TOLERANCE = 0.45
 
 
 @dataclass(frozen=True)
@@ -324,6 +329,7 @@ class ProcessingProfile:
     single_frame_diagnostic: bool = False
     preserve_texture_render_mesh: bool = False
     dense_single_view_texture: bool = False
+    rgbd_hero_patch_texture: bool = False
 
 
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
@@ -342,6 +348,7 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         fallback_texture_face_limit=FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT,
         preserve_texture_render_mesh=True,
         dense_single_view_texture=True,
+        rgbd_hero_patch_texture=True,
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",
@@ -737,6 +744,94 @@ class TexturedMeshStage:
         if not loaded_keyframes:
             await report(self.name, 72, "Texture projection skipped because no keyframes decoded successfully")
             return
+
+        if profile.rgbd_hero_patch_texture:
+            try:
+                await report(self.name, 80, "Building permissive RGB-D hero patch texture")
+                textured_stats = write_rgbd_hero_patch_textured_obj(
+                    keyframes=keyframes,
+                    depth_frames=depth_frames,
+                    loaded_keyframes=loaded_keyframes,
+                    work_dir=job_dir / "work",
+                    output_obj_path=job_dir / "work" / "textured_mesh.obj",
+                    output_mtl_path=job_dir / "work" / "textured_mesh.mtl",
+                    output_texture_path=job_dir / "work" / "textured_mesh_texture.png",
+                    output_debug_path=job_dir / "work" / "texture_debug.json",
+                    output_projection_overlay_dir=(
+                        job_dir / "work"
+                        if is_two_keyframe_rgbd_texture_profile(profile)
+                        else None
+                    ),
+                    profile=profile,
+                )
+                colored_stats = {
+                    "available": False,
+                    "vertexCount": len(mesh.vertices),
+                    "faceCount": len(mesh.faces),
+                    "coloredVertexCount": 0,
+                    "coverage": 0,
+                    "reason": f"Vertex-colored debug PLY skipped because {profile.name} emitted an RGB-D hero patch.",
+                }
+                (job_dir / "work" / "uv_map.json").write_text(json.dumps({
+                    "strategy": textured_stats["uvStrategy"],
+                    "atlasWidth": textured_stats["atlasWidth"],
+                    "atlasHeight": textured_stats["atlasHeight"],
+                    "tileSize": textured_stats["tileSize"],
+                    "tilePadding": textured_stats["tilePadding"],
+                    "uvCoordinateCount": textured_stats["uvCoordinateCount"],
+                    "renderMesh": textured_stats["renderMesh"],
+                    "atlasLayout": textured_stats.get("atlasLayout", {}),
+                    "debugPath": "texture_debug.json",
+                    "note": "Fast photoreal OBJ is a permissive RGB-D hero patch with direct source-image UVs. Raw LiDAR mesh artifacts remain available separately.",
+                }, indent=2), encoding="utf-8")
+                (job_dir / "work" / "texture_manifest.json").write_text(json.dumps({
+                    "sourceKeyframes": len(keyframes),
+                    "usableProjectionKeyframes": len(loaded_keyframes),
+                    "processingProfile": processing_profile_stats(profile),
+                    "debugVertexColorPreview": {
+                        "format": "ply",
+                        "path": "colored_mesh.ply",
+                        "available": False,
+                        "coloredVertexCount": colored_stats["coloredVertexCount"],
+                        "coverage": colored_stats["coverage"],
+                        "reason": colored_stats.get("reason"),
+                    },
+                    "texturedMesh": {
+                        **textured_stats,
+                        "format": "obj",
+                        "objPath": "textured_mesh.obj",
+                        "mtlPath": "textured_mesh.mtl",
+                        "texturePath": "textured_mesh_texture.png",
+                    },
+                    "textureDebug": {
+                        "format": "json",
+                        "path": "texture_debug.json",
+                        "previewPath": None,
+                        "stats": textured_stats["diagnostics"],
+                    },
+                    "usdz": {
+                        "available": False,
+                        "path": None,
+                        "reason": "USDZ conversion is represented in the manifest but not enabled in this backend milestone.",
+                    },
+                    "glb": {
+                        "available": False,
+                        "path": None,
+                        "reason": "GLB export is not supported by the current iOS viewer.",
+                    },
+                }, indent=2), encoding="utf-8")
+                await report(
+                    self.name,
+                    94,
+                    (
+                        "Textured RGB-D hero patch "
+                        f"({textured_stats['faceCount']} faces, direct source-image UVs)"
+                    ),
+                )
+                return
+            except RGBDFusionUnavailable as exc:
+                logger.warning("RGB-D hero patch texture unavailable; falling back to LiDAR atlas: %s", exc)
+                await report(self.name, 80, f"RGB-D hero patch unavailable; falling back to LiDAR atlas: {exc}")
 
         if profile.write_vertex_colored_debug:
             colored_stats = await write_vertex_colored_ply(
@@ -1686,6 +1781,505 @@ def write_rgbd_single_frame_mesh_obj(
     }
 
 
+def write_rgbd_hero_patch_textured_obj(
+    *,
+    keyframes: list[dict],
+    depth_frames: list[dict],
+    loaded_keyframes: list[ProjectionKeyframe],
+    work_dir: Path,
+    output_obj_path: Path,
+    output_mtl_path: Path,
+    output_texture_path: Path,
+    output_debug_path: Path,
+    output_projection_overlay_dir: Path | None = None,
+    profile: ProcessingProfile,
+) -> dict:
+    paired_frames = pair_rgbd_frames(keyframes, depth_frames, work_dir)
+    if not paired_frames:
+        raise RGBDFusionUnavailable("No RGB/depth frame pair could be matched for RGB-D hero patch texturing.")
+
+    timestamps = [
+        float(frame[1].get("timestamp") or frame[0].get("timestamp") or 0.0)
+        for frame in paired_frames
+    ]
+    scan_midpoint = (min(timestamps) + max(timestamps)) / 2 if timestamps else 0.0
+    scan_span = max(max(timestamps) - min(timestamps), 1e-6) if timestamps else 1.0
+    candidates = [
+        rgbd_diagnostic_candidate_metrics(
+            index=index,
+            pair=pair,
+            work_dir=work_dir,
+            scan_midpoint=scan_midpoint,
+            scan_span=scan_span,
+        )
+        for index, pair in enumerate(paired_frames)
+    ]
+    if not candidates:
+        raise RGBDFusionUnavailable("No RGB-D hero patch candidate had valid depth bytes, transforms, and intrinsics.")
+
+    candidates.sort(
+        key=lambda item: (
+            float(item["validDepthRatio"]),
+            float(item["highConfidenceRatio"]),
+            float(item["score"]),
+        ),
+        reverse=True,
+    )
+    selected = candidates[0]
+    keyframe, depth_frame, color_path, depth_path = selected["pair"]
+    width, height = [int(value) for value in depth_frame["depthResolution"]]
+    rgb_image = Image.open(color_path).convert("RGB")
+    depth_values = read_float32_depth_values(depth_path, width, height)
+    confidence_values = read_confidence_values(depth_frame, work_dir, width, height)
+    projection_keyframe = diagnostic_projection_keyframe(keyframe, rgb_image)
+    prepared_depth = prepare_rgbd_hero_patch_depth_grid(
+        depth_values=depth_values,
+        confidence_values=confidence_values,
+        width=width,
+        height=height,
+    )
+    mesh_result = build_rgbd_hero_patch_textured_mesh(
+        keyframe=keyframe,
+        depth_frame=depth_frame,
+        projection_keyframe=projection_keyframe,
+        depth_values=prepared_depth["depthValues"],
+        width=width,
+        height=height,
+    )
+    mesh = mesh_result["mesh"]
+    uv_coordinates = mesh_result["uvCoordinates"]
+    if not mesh.faces:
+        raise RGBDFusionUnavailable("RGB-D hero patch did not produce connected textured faces.")
+
+    rgb_image.save(output_texture_path)
+    output_mtl_path.write_text("\n".join([
+        "newmtl LidarAI_RGBD_Hero_Patch",
+        "Ka 1.000000 1.000000 1.000000",
+        "Kd 1.000000 1.000000 1.000000",
+        "Ks 0.000000 0.000000 0.000000",
+        "d 1.0",
+        "illum 1",
+        f"map_Kd {output_texture_path.name}",
+        "",
+    ]), encoding="utf-8")
+    write_textured_mesh_obj_with_uvs(
+        mesh=mesh,
+        uv_coordinates=uv_coordinates,
+        output_obj_path=output_obj_path,
+        output_mtl_path=output_mtl_path,
+        object_name="rgbd_hero_patch_mesh",
+    )
+
+    texture_diagnostics = build_rgbd_hero_patch_texture_diagnostics(
+        keyframes=loaded_keyframes,
+        selected_keyframe=keyframe,
+        selected_depth_frame=depth_frame,
+        mesh=mesh,
+        uv_coordinates=uv_coordinates,
+        rgb_image=rgb_image,
+        candidate_stats=candidates,
+        prepared_depth_stats=prepared_depth["stats"],
+        mesh_stats=mesh_result["stats"],
+        profile=profile,
+    )
+    if output_projection_overlay_dir is not None:
+        texture_diagnostics["projectionOverlays"] = write_two_keyframe_projection_overlays(
+            mesh,
+            loaded_keyframes,
+            output_projection_overlay_dir,
+        )
+    output_debug_path.write_text(json.dumps(texture_diagnostics, indent=2), encoding="utf-8")
+
+    return {
+        "uvStrategy": "rgbd_hero_patch_direct_image_uv",
+        "atlasWidth": rgb_image.width,
+        "atlasHeight": rgb_image.height,
+        "atlasMaxSize": max(rgb_image.width, rgb_image.height),
+        "tileSize": 0,
+        "tilePadding": 0,
+        "dilationPixels": 0,
+        "uvCoordinateCount": len(uv_coordinates),
+        "faceCount": len(mesh.faces),
+        "texturedFaceCount": len(mesh.faces),
+        "fallbackFaceCount": 0,
+        "projectionCoverage": 1.0,
+        "renderMesh": mesh.stats.get("textureRenderMesh", {}),
+        "atlasLayout": {
+            "strategy": "rgbd_hero_patch_direct_image_uv",
+            "enabled": False,
+            "reason": "Hero RGB-D patch uses source RGB image UVs directly instead of atlas baking.",
+        },
+        "textureWorkerCount": 1,
+        "diagnostics": texture_diagnostics,
+    }
+
+
+def prepare_rgbd_hero_patch_depth_grid(
+    *,
+    depth_values: array,
+    confidence_values: bytes | None,
+    width: int,
+    height: int,
+) -> dict:
+    total = width * height
+    prepared = array("f", [0.0] * total)
+    original_valid_count = 0
+    accepted_low_confidence_count = 0
+    invalid_depth_count = 0
+
+    for index in range(total):
+        depth = float(depth_values[index])
+        if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+            invalid_depth_count += 1
+            continue
+
+        prepared[index] = depth
+        original_valid_count += 1
+        if confidence_values is not None and int(confidence_values[index]) == 0:
+            accepted_low_confidence_count += 1
+
+    fill_updates_total = 0
+    for _pass_index in range(RGBD_HERO_PATCH_HOLE_FILL_PASSES):
+        updates: list[tuple[int, float]] = []
+        for y in range(height):
+            for x in range(width):
+                index = y * width + x
+                if prepared[index] > 0:
+                    continue
+
+                neighbor_depths: list[float] = []
+                for offset_y in range(-RGBD_HERO_PATCH_HOLE_FILL_RADIUS, RGBD_HERO_PATCH_HOLE_FILL_RADIUS + 1):
+                    ny = y + offset_y
+                    if ny < 0 or ny >= height:
+                        continue
+                    for offset_x in range(-RGBD_HERO_PATCH_HOLE_FILL_RADIUS, RGBD_HERO_PATCH_HOLE_FILL_RADIUS + 1):
+                        if offset_x == 0 and offset_y == 0:
+                            continue
+                        nx = x + offset_x
+                        if nx < 0 or nx >= width:
+                            continue
+                        neighbor_depth = float(prepared[ny * width + nx])
+                        if neighbor_depth > 0:
+                            neighbor_depths.append(neighbor_depth)
+
+                if not neighbor_depths:
+                    continue
+                updates.append((index, median_float(neighbor_depths)))
+
+        if not updates:
+            break
+
+        for index, depth in updates:
+            prepared[index] = float(depth)
+        fill_updates_total += len(updates)
+
+    remaining_invalid_count = sum(1 for value in prepared if float(value) <= 0)
+    return {
+        "depthValues": prepared,
+        "stats": {
+            "width": width,
+            "height": height,
+            "totalPixelCount": total,
+            "originalValidDepthCount": original_valid_count,
+            "originalValidDepthRatio": round(original_valid_count / total if total else 0, 4),
+            "acceptedLowConfidenceDepthCount": accepted_low_confidence_count,
+            "invalidDepthSampleCount": invalid_depth_count,
+            "filledDepthHoleCount": fill_updates_total,
+            "remainingInvalidDepthCount": remaining_invalid_count,
+            "finalValidDepthCount": total - remaining_invalid_count,
+            "finalValidDepthRatio": round((total - remaining_invalid_count) / total if total else 0, 4),
+            "holeFillPasses": RGBD_HERO_PATCH_HOLE_FILL_PASSES,
+            "holeFillRadius": RGBD_HERO_PATCH_HOLE_FILL_RADIUS,
+            "confidenceThreshold": "accept_all_nonzero_depth_values",
+        },
+    }
+
+
+def build_rgbd_hero_patch_textured_mesh(
+    *,
+    keyframe: dict,
+    depth_frame: dict,
+    projection_keyframe: ProjectionKeyframe,
+    depth_values: array,
+    width: int,
+    height: int,
+) -> dict:
+    intrinsics = depth_frame.get("intrinsics") or []
+    transform = depth_frame.get("cameraTransform") or []
+    total_pixels = width * height
+    sample_step = max(1, int(math.ceil(math.sqrt(total_pixels / RGBD_HERO_PATCH_TARGET_SAMPLES))))
+    x_samples = sampled_depth_indices(width, sample_step)
+    y_samples = sampled_depth_indices(height, sample_step)
+    vertices: list[tuple[float, float, float]] = []
+    uv_coordinates: list[tuple[float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+    seen_faces: set[tuple[int, int, int]] = set()
+    grid: list[list[int | None]] = []
+    depth_grid: list[list[float]] = []
+    invalid_depth_count = 0
+    out_of_bounds_color_count = 0
+    rejected_face_count = 0
+
+    for source_y in y_samples:
+        row: list[int | None] = []
+        depth_row: list[float] = []
+        for source_x in x_samples:
+            source_index = source_y * width + source_x
+            depth = float(depth_values[source_index])
+            if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+                invalid_depth_count += 1
+                row.append(None)
+                depth_row.append(0)
+                continue
+
+            world = backproject_depth_sample_to_world(
+                source_x=source_x,
+                source_y=source_y,
+                depth=depth,
+                intrinsics=intrinsics,
+                camera_transform=transform,
+            )
+            projection = project_world_point(world, projection_keyframe)
+            if projection is None:
+                out_of_bounds_color_count += 1
+                row.append(None)
+                depth_row.append(0)
+                continue
+
+            u, v, _projected_depth = projection
+            row.append(len(vertices))
+            depth_row.append(depth)
+            vertices.append(world)
+            uv_coordinates.append((
+                clamp_float(u / max(projection_keyframe.width - 1, 1), 0.0, 1.0),
+                1.0 - clamp_float(v / max(projection_keyframe.height - 1, 1), 0.0, 1.0),
+            ))
+        grid.append(row)
+        depth_grid.append(depth_row)
+
+    for y in range(len(grid) - 1):
+        for x in range(len(grid[y]) - 1):
+            top_left = grid[y][x]
+            top_right = grid[y][x + 1]
+            bottom_left = grid[y + 1][x]
+            bottom_right = grid[y + 1][x + 1]
+            d_tl = depth_grid[y][x]
+            d_tr = depth_grid[y][x + 1]
+            d_bl = depth_grid[y + 1][x]
+            d_br = depth_grid[y + 1][x + 1]
+            rejected_face_count += add_depth_mesh_face(
+                vertices,
+                faces,
+                seen_faces,
+                (top_left, bottom_left, top_right),
+                (d_tl, d_bl, d_tr),
+                absolute_tolerance=RGBD_HERO_PATCH_FACE_ABSOLUTE_TOLERANCE_METERS,
+                relative_tolerance=RGBD_HERO_PATCH_FACE_RELATIVE_TOLERANCE,
+            )
+            rejected_face_count += add_depth_mesh_face(
+                vertices,
+                faces,
+                seen_faces,
+                (top_right, bottom_left, bottom_right),
+                (d_tr, d_bl, d_br),
+                absolute_tolerance=RGBD_HERO_PATCH_FACE_ABSOLUTE_TOLERANCE_METERS,
+                relative_tolerance=RGBD_HERO_PATCH_FACE_RELATIVE_TOLERANCE,
+            )
+
+    mesh = FusedMesh(vertices=vertices, faces=faces, stats={
+        "geometrySource": "rgbd_hero_patch_depth_mesh",
+        "vertexCount": len(vertices),
+        "faceCount": len(faces),
+        "selectedKeyframeId": keyframe.get("id"),
+        "selectedDepthFrameId": depth_frame.get("id"),
+        "sampleStep": sample_step,
+        "sourceDepthResolution": [width, height],
+        "targetSamples": RGBD_HERO_PATCH_TARGET_SAMPLES,
+        "depthConnectionAbsoluteToleranceMeters": RGBD_HERO_PATCH_FACE_ABSOLUTE_TOLERANCE_METERS,
+        "depthConnectionRelativeTolerance": RGBD_HERO_PATCH_FACE_RELATIVE_TOLERANCE,
+        "textureRenderMesh": {
+            "used": False,
+            "reason": "Fast RGB-D hero patch is already the render mesh.",
+        },
+    })
+    return {
+        "mesh": mesh,
+        "uvCoordinates": uv_coordinates,
+        "stats": {
+            "vertexCount": len(vertices),
+            "faceCount": len(faces),
+            "sampleStep": sample_step,
+            "sampledColumnCount": len(x_samples),
+            "sampledRowCount": len(y_samples),
+            "invalidDepthSampleCount": invalid_depth_count,
+            "outOfBoundsColorSampleCount": out_of_bounds_color_count,
+            "rejectedFaceCount": rejected_face_count,
+            "acceptedFaceCount": len(faces),
+            "depthConnectionAbsoluteToleranceMeters": RGBD_HERO_PATCH_FACE_ABSOLUTE_TOLERANCE_METERS,
+            "depthConnectionRelativeTolerance": RGBD_HERO_PATCH_FACE_RELATIVE_TOLERANCE,
+        },
+    }
+
+
+def sampled_depth_indices(count: int, step: int) -> list[int]:
+    indices = list(range(0, count, max(1, step)))
+    if count > 0 and (not indices or indices[-1] != count - 1):
+        indices.append(count - 1)
+    return indices
+
+
+def write_textured_mesh_obj_with_uvs(
+    *,
+    mesh: FusedMesh,
+    uv_coordinates: list[tuple[float, float]],
+    output_obj_path: Path,
+    output_mtl_path: Path,
+    object_name: str,
+) -> None:
+    lines = [
+        "# LidarAI RGB-D hero patch textured mesh",
+        "# Geometry comes from one permissive RGB-D depth grid; texture uses the paired RGB image directly.",
+        f"mtllib {output_mtl_path.name}",
+        f"o {object_name}",
+        "usemtl LidarAI_RGBD_Hero_Patch",
+    ]
+    for x, y, z in mesh.vertices:
+        lines.append(f"v {x:.6f} {y:.6f} {z:.6f}")
+    for u, v in uv_coordinates:
+        lines.append(f"vt {u:.8f} {v:.8f}")
+    vertex_normals = compute_vertex_normals(mesh.vertices, mesh.faces)
+    for x, y, z in vertex_normals:
+        lines.append(f"vn {x:.6f} {y:.6f} {z:.6f}")
+    for face in mesh.faces:
+        a, b, c = (index + 1 for index in face)
+        lines.append(f"f {a}/{a}/{a} {b}/{b}/{b} {c}/{c}/{c}")
+    output_obj_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def build_rgbd_hero_patch_texture_diagnostics(
+    *,
+    keyframes: list[ProjectionKeyframe],
+    selected_keyframe: dict,
+    selected_depth_frame: dict,
+    mesh: FusedMesh,
+    uv_coordinates: list[tuple[float, float]],
+    rgb_image: Image.Image,
+    candidate_stats: list[dict],
+    prepared_depth_stats: dict,
+    mesh_stats: dict,
+    profile: ProcessingProfile,
+) -> dict:
+    face_count = len(mesh.faces)
+    return {
+        "version": "v3_rgbd_hero_patch",
+        "uvStrategy": "rgbd_hero_patch_direct_image_uv",
+        "renderMesh": mesh.stats.get("textureRenderMesh", {}),
+        "processing": {
+            "textureWorkerCount": 1,
+            "parallelEnabled": False,
+            "activeProjectionMode": "rgbd_hero_patch",
+            "rgbdHeroPatchTexture": True,
+            "denseSingleViewTexture": profile.dense_single_view_texture,
+            "sourceKeyframeCount": len(keyframes),
+            "activeTextureKeyframeCount": 1,
+            "confidenceThreshold": "accept_all_nonzero_depth_values",
+            "holeFillPasses": RGBD_HERO_PATCH_HOLE_FILL_PASSES,
+            "holeFillRadius": RGBD_HERO_PATCH_HOLE_FILL_RADIUS,
+        },
+        "geometry": texture_geometry_debug(mesh),
+        "keyframes": projection_keyframe_debug_summaries(keyframes),
+        "poseDelta": (
+            projection_keyframe_pose_delta(keyframes[0], keyframes[1])
+            if len(keyframes) >= 2
+            else None
+        ),
+        "perKeyframeProjection": per_keyframe_mesh_projection_stats(mesh, keyframes),
+        "rgbdHeroPatch": {
+            "enabled": True,
+            "strategy": "best_paired_depth_coverage_with_permissive_depth_hole_fill",
+            "selectedKeyframeId": selected_keyframe.get("id"),
+            "selectedDepthFrameId": selected_depth_frame.get("id"),
+            "sourceDepthResolution": selected_depth_frame.get("depthResolution"),
+            "sourceRgbResolution": [rgb_image.width, rgb_image.height],
+            "depthPreparation": prepared_depth_stats,
+            "mesh": mesh_stats,
+            "candidateSummary": [
+                {
+                    key: candidate[key]
+                    for key in [
+                        "keyframeId",
+                        "depthFrameId",
+                        "colorKeyframeIdMatched",
+                        "validDepthRatio",
+                        "highConfidenceRatio",
+                        "rgbSharpnessScore",
+                        "score",
+                    ]
+                }
+                for candidate in candidate_stats[:8]
+            ],
+        },
+        "objSyntax": {
+            "faceCount": face_count,
+            "faceWithUVIndexCount": face_count,
+            "faceWithoutUVIndexCount": 0,
+            "uvCoordinateCount": len(uv_coordinates),
+            "expectedUVCoordinateCount": len(mesh.vertices),
+            "normalCoordinateCount": len(mesh.vertices),
+            "expectedNormalCoordinateCount": len(mesh.vertices),
+            "invalidUVReferenceCount": 0,
+        },
+        "textureAtlas": {
+            "width": rgb_image.width,
+            "height": rgb_image.height,
+            "maxSize": max(rgb_image.width, rgb_image.height),
+            "tileSize": 0,
+            "tilePadding": 0,
+            "dilationPixels": 0,
+            "fallbackColor": list(FALLBACK_COLOR),
+            "unobservedColor": list(TEXTURE_UNOBSERVED_COLOR),
+            "rasterizedPixelCount": rgb_image.width * rgb_image.height,
+            "projectedPixelCount": rgb_image.width * rgb_image.height,
+            "fallbackPixelCount": 0,
+            "projectedRasterPixelRatio": 1.0,
+            "sampledPixels": sampled_texture_stats(rgb_image),
+        },
+        "projection": {
+            "texturedFaceCount": face_count,
+            "fallbackFaceCount": 0,
+            "projectionCoverage": 1.0 if face_count else 0.0,
+            "selectedKeyframeFaceCounts": [
+                {"keyframe": selected_keyframe.get("id"), "faceCount": face_count}
+            ],
+            "keyframeContributionCounts": [
+                {"keyframe": selected_keyframe.get("id"), "sampleCount": rgb_image.width * rgb_image.height}
+            ],
+            "singleSamplePixelCount": rgb_image.width * rgb_image.height,
+            "blendedPixelCount": 0,
+            "acceptedProjectionSampleCount": rgb_image.width * rgb_image.height,
+            "meanSamplesPerProjectedPixel": 1.0,
+            "faceRejectionReasons": {
+                "overexposedSampleCount": 0,
+                "underexposedSampleCount": 0,
+                "edgeSampleCount": 0,
+                "grazingSampleCount": 0,
+                "invalidProjectionSampleCount": int(mesh_stats.get("outOfBoundsColorSampleCount", 0)),
+                "occludedSampleCount": 0,
+            },
+            "depthVisibilityStats": {
+                "depthTestedSampleCount": int(prepared_depth_stats.get("finalValidDepthCount", 0)),
+                "missingDepthSampleCount": int(prepared_depth_stats.get("remainingInvalidDepthCount", 0)),
+                "occludedSampleCount": 0,
+                "depthVisibilityDecisionCount": int(prepared_depth_stats.get("totalPixelCount", 0)),
+            },
+        },
+        "colorCorrection": texture_color_correction_for_keyframes(keyframes),
+        "hints": [
+            "Fast photoreal output is a permissive one-frame RGB-D hero patch; raw LiDAR mesh remains available as fused_mesh.obj.",
+        ],
+    }
+
+
 def write_rgbd_overlay_png(
     *,
     rgb_image: Image.Image,
@@ -1972,6 +2566,7 @@ def processing_profile_stats(profile: ProcessingProfile) -> dict:
         "singleFrameDiagnostic": profile.single_frame_diagnostic,
         "preserveTextureRenderMesh": profile.preserve_texture_render_mesh,
         "denseSingleViewTexture": profile.dense_single_view_texture,
+        "rgbdHeroPatchTexture": profile.rgbd_hero_patch_texture,
     }
 
 
@@ -2610,8 +3205,15 @@ def add_depth_mesh_face(
     seen_faces: set[tuple[int, int, int]],
     indices: tuple[int | None, int | None, int | None],
     depths: tuple[float, float, float],
+    *,
+    absolute_tolerance: float = 0.08,
+    relative_tolerance: float = 0.08,
 ) -> int:
-    if any(index is None for index in indices) or not should_connect_depth_samples(depths):
+    if any(index is None for index in indices) or not should_connect_depth_samples(
+        depths,
+        absolute_tolerance=absolute_tolerance,
+        relative_tolerance=relative_tolerance,
+    ):
         return 1
 
     face = (int(indices[0]), int(indices[1]), int(indices[2]))
@@ -2630,13 +3232,18 @@ def add_depth_mesh_face(
     return 0
 
 
-def should_connect_depth_samples(depths: tuple[float, float, float]) -> bool:
+def should_connect_depth_samples(
+    depths: tuple[float, float, float],
+    *,
+    absolute_tolerance: float = 0.08,
+    relative_tolerance: float = 0.08,
+) -> bool:
     min_depth = min(depths)
     max_depth = max(depths)
     if min_depth <= 0:
         return False
 
-    return (max_depth - min_depth) <= max(0.08, min_depth * 0.08)
+    return (max_depth - min_depth) <= max(absolute_tolerance, min_depth * relative_tolerance)
 
 
 def write_rgbd_tsdf_mesh(
