@@ -1025,7 +1025,7 @@ def test_rgbd_hero_patch_depth_preparation_accepts_low_confidence_and_fills_hole
     assert prepared["depthValues"][4] == pytest.approx(1.0)
 
 
-def test_two_rgbd_pair_selection_prefers_first_pair_plus_timed_supplement():
+def test_rgbd_pair_selection_prefers_first_pair_plus_timed_supplements():
     def make_pair(index: int, timestamp: float) -> dict:
         return {
             "keyframe": {"id": f"kf-{index}"},
@@ -1039,16 +1039,19 @@ def test_two_rgbd_pair_selection_prefers_first_pair_plus_timed_supplement():
             },
         }
 
-    selected, stats = pipeline.select_two_rgbd_pair_records([
+    selected, stats = pipeline.select_rgbd_pair_records([
         make_pair(0, 0.0),
         make_pair(1, 0.8),
         make_pair(2, 2.5),
-        make_pair(3, 5.0),
-    ])
+        make_pair(3, 4.5),
+        make_pair(4, 6.0),
+    ], limit=3)
 
-    assert [pair["keyframe"]["id"] for pair in selected] == ["kf-0", "kf-2"]
-    assert stats["pairSelectionStrategy"] == "first_pair_plus_best_2_to_3_second_supplement"
+    assert [pair["keyframe"]["id"] for pair in selected] == ["kf-0", "kf-2", "kf-3"]
+    assert stats["pairSelectionStrategy"] == "first_pair_plus_timed_rgbd_hero_patch_supplements"
     assert stats["poseDelta"]["timeDeltaSeconds"] == pytest.approx(2.5)
+    assert [item["timeDeltaSeconds"] for item in stats["poseDeltas"]] == pytest.approx([2.5, 4.5])
+    assert [item["actualTimeDeltaSeconds"] for item in stats["supplementalSelections"]] == pytest.approx([2.5, 4.5])
 
 
 def test_rgbd_hero_patch_ownership_culls_supplemental_faces_when_primary_owns():
@@ -1081,7 +1084,36 @@ def test_rgbd_hero_patch_ownership_replaces_low_confidence_primary_faces():
     assert cull_stats["patches"][1]["primaryMissingOrLowConfidenceCount"] == 2
 
 
-def make_rgbd_hero_patch_test_patch(name: str, confidence_values: bytes) -> dict:
+def test_rgbd_hero_patch_ownership_replaces_stretched_primary_depth_edges():
+    edge_depth_values = array("f", [
+        1.0, 1.0, 1.0, 1.0,
+        1.0, 1.0, 1.6, 1.6,
+        1.0, 1.0, 1.6, 1.6,
+        1.0, 1.0, 1.6, 1.6,
+    ])
+    primary_patch = make_rgbd_hero_patch_test_patch(
+        "primary",
+        bytes([2] * 16),
+        depth_values=edge_depth_values,
+    )
+    secondary_patch = make_rgbd_hero_patch_test_patch("secondary", bytes([2] * 16))
+
+    combined = pipeline.combine_rgbd_hero_patch_meshes([primary_patch, secondary_patch])
+    cull_stats = combined["mesh"].stats["ownershipCull"]
+
+    assert len(combined["mesh"].faces) == 2
+    assert combined["patches"][0]["keptFaceCount"] == 0
+    assert combined["patches"][0]["ownershipCull"]["replacedBySupplementalCount"] == 2
+    assert combined["patches"][1]["keptFaceCount"] == 2
+    assert cull_stats["patches"][1]["primaryStretchedDepthEdgeCount"] == 2
+
+
+def make_rgbd_hero_patch_test_patch(
+    name: str,
+    confidence_values: bytes,
+    *,
+    depth_values: array | None = None,
+) -> dict:
     vertices = [
         (-0.2, -0.2, -1.0),
         (0.2, -0.2, -1.0),
@@ -1124,7 +1156,7 @@ def make_rgbd_hero_patch_test_patch(name: str, confidence_values: bytes) -> dict
                 0, 4, 0,
                 2, 2, 1,
             ],
-            depth_values=array("f", [1.0] * 16),
+            depth_values=depth_values or array("f", [1.0] * 16),
             confidence_values=confidence_values,
         ),
         "preparedDepthStats": {
@@ -1742,7 +1774,7 @@ async def test_rgbd_one_keyframe_diagnostic_exports_alignment_artifacts():
 
 
 @pytest.mark.asyncio
-async def test_fast_onboarding_profile_textures_arkit_mesh_with_two_paired_rgbd_frames():
+async def test_fast_onboarding_profile_textures_arkit_mesh_with_three_paired_rgbd_frames():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = auth_headers()
@@ -1847,36 +1879,38 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_two_paired_rgbd_
         assert rgbd_stats["geometrySource"] == "arkit_mesh_anchor_fusion"
         assert rgbd_stats["geometryPreserved"] is True
         assert rgbd_stats["profile"]["name"] == "fast_onboarding"
-        assert rgbd_stats["profile"]["maxKeyframes"] == 2
-        assert rgbd_stats["profile"]["maxDepthFrames"] == 2
-        assert rgbd_stats["profile"]["maxRgbdFrames"] == 2
+        assert rgbd_stats["profile"]["maxKeyframes"] == 3
+        assert rgbd_stats["profile"]["maxDepthFrames"] == 3
+        assert rgbd_stats["profile"]["maxRgbdFrames"] == 3
         assert rgbd_stats["profile"]["useRgbdGeometry"] is False
         assert rgbd_stats["profile"]["preserveTextureRenderMesh"] is True
         assert rgbd_stats["profile"]["denseSingleViewTexture"] is True
         assert rgbd_stats["profile"]["rgbdHeroPatchTexture"] is True
         assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["profile"]["textureTsdfRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
-        assert rgbd_stats["depthFrameCount"] == 2
-        assert rgbd_stats["keyframeCount"] == 2
+        assert rgbd_stats["depthFrameCount"] == 3
+        assert rgbd_stats["keyframeCount"] == 3
 
         keyframe_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/keyframe_selection.json", headers=headers)).json()
         assert keyframe_selection["originalKeyframeCount"] == 55
-        assert keyframe_selection["selectedKeyframeCount"] == 2
-        assert keyframe_selection["strategy"] == "two_keyframe_rgbd_pairs"
-        assert len(keyframe_selection["selectedKeyframeIds"]) == 2
-        assert len(keyframe_selection["selectedPairDepthFrameIds"]) == 2
-        assert keyframe_selection["pairSelectionStrategy"] == "first_pair_plus_best_2_to_3_second_supplement"
+        assert keyframe_selection["selectedKeyframeCount"] == 3
+        assert keyframe_selection["strategy"] == "rgbd_hero_patch_pairs"
+        assert len(keyframe_selection["selectedKeyframeIds"]) == 3
+        assert len(keyframe_selection["selectedPairDepthFrameIds"]) == 3
+        assert keyframe_selection["pairSelectionStrategy"] == "first_pair_plus_timed_rgbd_hero_patch_supplements"
         assert 2.0 <= keyframe_selection["poseDelta"]["timeDeltaSeconds"] <= 3.25
+        assert len(keyframe_selection["poseDeltas"]) == 2
+        assert keyframe_selection["poseDeltas"][1]["timeDeltaSeconds"] >= 3.75
 
         depth_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_selection.json", headers=headers)).json()
         assert depth_selection["originalDepthFrameCount"] == 55
         assert depth_selection["geometryDepthSelection"] == "selected_keyframe_pairs"
-        assert depth_selection["selectedDepthFrameCount"] == 2
+        assert depth_selection["selectedDepthFrameCount"] == 3
         assert depth_selection["selectedKeyframeIds"] == keyframe_selection["selectedKeyframeIds"]
         assert depth_selection["selectedDepthFrameIds"] == keyframe_selection["selectedPairDepthFrameIds"]
 
         depth_manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_manifest.json", headers=headers)).json()
-        assert len(depth_manifest) == 2
+        assert len(depth_manifest) == 3
         assert [frame["colorKeyframeId"] for frame in depth_manifest] == keyframe_selection["selectedKeyframeIds"]
 
         fused_mesh = await client.get(f"/api/v1/jobs/{job_id}/result/fused_mesh.obj", headers=headers)
@@ -1894,31 +1928,32 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_two_paired_rgbd_
         assert manifest["artifacts"]["texturedObj"]["stats"]["faceCount"] > manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
         assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["used"] is False
         assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["enabled"] is True
-        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["patchCount"] == 2
+        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["patchCount"] == 3
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
 
         texture_debug = (await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug.json", headers=headers)).json()
         assert [item["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedKeyframeIds"]
         assert [item["depthFrame"]["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedPairDepthFrameIds"]
         assert texture_debug["geometry"]["geometrySource"] == "rgbd_hero_patch_depth_mesh"
-        assert len(texture_debug["perKeyframeProjection"]) == 2
+        assert len(texture_debug["perKeyframeProjection"]) == 3
         assert texture_debug["projection"]["projectionCoverage"] > 0
         assert texture_debug["processing"]["denseSingleViewTexture"] is True
         assert texture_debug["processing"]["rgbdHeroPatchTexture"] is True
-        assert texture_debug["processing"]["sourceKeyframeCount"] == 2
-        assert texture_debug["processing"]["activeTextureKeyframeCount"] == 2
+        assert texture_debug["processing"]["sourceKeyframeCount"] == 3
+        assert texture_debug["processing"]["activeTextureKeyframeCount"] == 3
         assert texture_debug["processing"]["activeProjectionMode"] == "rgbd_hero_patch"
-        assert texture_debug["rgbdHeroPatch"]["patchCount"] == 2
+        assert texture_debug["rgbdHeroPatch"]["patchCount"] == 3
         assert texture_debug["rgbdHeroPatch"]["selectedKeyframeId"] == keyframe_selection["selectedKeyframeIds"][0]
         assert texture_debug["rgbdHeroPatch"]["selectedDepthFrameId"] == keyframe_selection["selectedPairDepthFrameIds"][0]
         assert texture_debug["rgbdHeroPatch"]["selectedKeyframeIds"] == keyframe_selection["selectedKeyframeIds"]
         assert texture_debug["rgbdHeroPatch"]["selectedDepthFrameIds"] == keyframe_selection["selectedPairDepthFrameIds"]
         assert texture_debug["rgbdHeroPatch"]["depthPreparation"]["confidenceThreshold"] == "accept_all_nonzero_depth_values"
         assert texture_debug["rgbdHeroPatch"]["mesh"]["acceptedFaceCount"] > 0
-        assert len(texture_debug["rgbdHeroPatch"]["patches"]) == 2
+        assert len(texture_debug["rgbdHeroPatch"]["patches"]) == 3
         assert texture_debug["textureAtlas"]["width"] == 100
-        assert texture_debug["textureAtlas"]["height"] == 200
+        assert texture_debug["textureAtlas"]["height"] == 300
         assert texture_debug["rgbdHeroPatch"]["atlasLayout"]["patches"][1]["atlasRect"]["y"] == 100
+        assert texture_debug["rgbdHeroPatch"]["atlasLayout"]["patches"][2]["atlasRect"]["y"] == 200
 
         textured_obj = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.obj", headers=headers)
         textured_mtl = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.mtl", headers=headers)

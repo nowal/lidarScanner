@@ -306,18 +306,22 @@ RGBD_DIAGNOSTIC_MAX_POINT_SAMPLES = 180_000
 RGBD_DIAGNOSTIC_OVERLAY_MAX_SAMPLES = 16_000
 RGBD_DIAGNOSTIC_MESH_TARGET_SAMPLES = 40_000
 RGBD_HERO_PATCH_TARGET_SAMPLES = 120_000
-RGBD_HERO_PATCH_MAX_PATCHES = 2
+RGBD_HERO_PATCH_MAX_PATCHES = 3
 RGBD_HERO_PATCH_HOLE_FILL_PASSES = 3
 RGBD_HERO_PATCH_HOLE_FILL_RADIUS = 2
 RGBD_HERO_PATCH_FACE_ABSOLUTE_TOLERANCE_METERS = 0.35
 RGBD_HERO_PATCH_FACE_RELATIVE_TOLERANCE = 0.45
 RGBD_HERO_PATCH_SUPPLEMENT_MIN_TIME_DELTA_SECONDS = 2.0
 RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS = 2.5
+RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTAS_SECONDS = (2.5, 4.5)
 RGBD_HERO_PATCH_SUPPLEMENT_MAX_PREFERRED_TIME_DELTA_SECONDS = 3.25
 RGBD_HERO_PATCH_PRIMARY_OWNER_CONFIDENCE_MIN = 1
 RGBD_HERO_PATCH_PRIMARY_OWNER_ABSOLUTE_TOLERANCE_METERS = 0.12
 RGBD_HERO_PATCH_PRIMARY_OWNER_RELATIVE_TOLERANCE = 0.10
 RGBD_HERO_PATCH_SECONDARY_CLAIM_RADIUS_PIXELS = 1
+RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_ABSOLUTE_METERS = 0.18
+RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_RELATIVE = 0.16
+RGBD_HERO_PATCH_PRIMARY_OWNER_MIN_VALID_NEIGHBORS = 3
 
 
 @dataclass(frozen=True)
@@ -343,9 +347,9 @@ class ProcessingProfile:
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
     "fast_onboarding": ProcessingProfile(
         name="fast_onboarding",
-        max_keyframes=2,
-        max_depth_frames=2,
-        max_rgbd_frames=2,
+        max_keyframes=3,
+        max_depth_frames=3,
+        max_rgbd_frames=3,
         use_rgbd_geometry=False,
         write_vertex_colored_debug=False,
         write_texture_debug_preview=False,
@@ -767,7 +771,7 @@ class TexturedMeshStage:
                     output_debug_path=job_dir / "work" / "texture_debug.json",
                     output_projection_overlay_dir=(
                         job_dir / "work"
-                        if is_two_keyframe_rgbd_texture_profile(profile)
+                        if is_fast_rgbd_hero_patch_profile(profile)
                         else None
                     ),
                     profile=profile,
@@ -880,7 +884,7 @@ class TexturedMeshStage:
             ),
             output_projection_overlay_dir=(
                 job_dir / "work"
-                if is_two_keyframe_rgbd_texture_profile(profile)
+                if is_fast_rgbd_hero_patch_profile(profile)
                 else None
             ),
             report_progress=lambda progress, message: report(self.name, progress, message),
@@ -1992,15 +1996,6 @@ def select_rgbd_hero_patch_candidates(candidates: list[dict]) -> tuple[list[dict
             int(item.get("index") or 0),
         ),
     )
-    ranked_by_quality = sorted(
-        candidates,
-        key=lambda item: (
-            float(item.get("validDepthRatio") or 0),
-            float(item.get("highConfidenceRatio") or 0),
-            float(item.get("score") or 0),
-        ),
-        reverse=True,
-    )
     if not ordered:
         return [], {
             "strategy": "no_rgbd_hero_patch_candidates",
@@ -2016,58 +2011,91 @@ def select_rgbd_hero_patch_candidates(candidates: list[dict]) -> tuple[list[dict
             "supplementalSelection": None,
         }
 
-    secondary = max(
-        (candidate for candidate in ranked_by_quality if candidate is not primary),
-        key=lambda candidate: supplemental_rgbd_hero_patch_candidate_score(candidate, primary),
-        default=None,
-    )
     selected = [primary]
-    supplemental_selection = None
-    if secondary is not None:
-        selected.append(secondary)
-        delta = abs(rgbd_hero_patch_candidate_timestamp(secondary) - rgbd_hero_patch_candidate_timestamp(primary))
-        supplemental_selection = {
-            "minTimeDeltaSeconds": RGBD_HERO_PATCH_SUPPLEMENT_MIN_TIME_DELTA_SECONDS,
-            "targetTimeDeltaSeconds": RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS,
-            "maxPreferredTimeDeltaSeconds": RGBD_HERO_PATCH_SUPPLEMENT_MAX_PREFERRED_TIME_DELTA_SECONDS,
+    remaining = [candidate for candidate in ordered if candidate is not primary]
+    supplemental_selections = []
+    max_patch_count = min(RGBD_HERO_PATCH_MAX_PATCHES, len(ordered))
+    while len(selected) < max_patch_count and remaining:
+        target_delta = rgbd_hero_patch_supplement_target_for_index(len(selected))
+        supplemental = max(
+            remaining,
+            key=lambda candidate: supplemental_rgbd_hero_patch_candidate_score(
+                candidate,
+                primary,
+                selected,
+                target_delta,
+            ),
+        )
+        remaining = [candidate for candidate in remaining if candidate is not supplemental]
+        supplemental_score = supplemental_rgbd_hero_patch_candidate_score(
+            supplemental,
+            primary,
+            selected,
+            target_delta,
+        )
+        selected.append(supplemental)
+        delta = max(
+            0.0,
+            rgbd_hero_patch_candidate_timestamp(supplemental) - rgbd_hero_patch_candidate_timestamp(primary),
+        )
+        supplemental_selections.append({
+            "targetTimeDeltaSeconds": target_delta,
             "actualTimeDeltaSeconds": round(delta, 4),
-            "score": round(supplemental_rgbd_hero_patch_candidate_score(secondary, primary), 6),
-            "selectedKeyframeId": secondary.get("keyframeId"),
-            "selectedDepthFrameId": secondary.get("depthFrameId"),
-        }
+            "score": round(supplemental_score, 6),
+            "selectedKeyframeId": supplemental.get("keyframeId"),
+            "selectedDepthFrameId": supplemental.get("depthFrameId"),
+        })
 
     return selected, {
-        "strategy": "first_primary_plus_timed_supplemental_rgbd_hero_patch",
+        "strategy": "first_primary_plus_timed_supplemental_rgbd_hero_patches",
         "selectedPatchCount": len(selected),
         "selectedCandidateIndexes": [candidate.get("index") for candidate in selected],
         "selectedKeyframeIds": [candidate.get("keyframeId") for candidate in selected],
         "selectedDepthFrameIds": [candidate.get("depthFrameId") for candidate in selected],
-        "supplementalSelection": supplemental_selection,
+        "supplementalSelection": supplemental_selections[0] if supplemental_selections else None,
+        "supplementalSelections": supplemental_selections,
+        "targetSupplementTimeDeltaSeconds": RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS,
+        "targetSupplementTimeDeltasSeconds": list(RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTAS_SECONDS),
     }
 
 
-def supplemental_rgbd_hero_patch_candidate_score(candidate: dict, primary: dict) -> float:
-    delta = abs(rgbd_hero_patch_candidate_timestamp(candidate) - rgbd_hero_patch_candidate_timestamp(primary))
-    if (
-        RGBD_HERO_PATCH_SUPPLEMENT_MIN_TIME_DELTA_SECONDS
-        <= delta
-        <= RGBD_HERO_PATCH_SUPPLEMENT_MAX_PREFERRED_TIME_DELTA_SECONDS
-    ):
-        time_score = 2.0 - min(
-            abs(delta - RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS),
-            1.0,
-        )
-    else:
-        time_score = max(
-            0.0,
-            1.0 - abs(delta - RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS) / 4.0,
-        )
+def supplemental_rgbd_hero_patch_candidate_score(
+    candidate: dict,
+    primary: dict,
+    selected: list[dict] | None = None,
+    target_delta: float | None = None,
+) -> float:
+    target_delta = target_delta or RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS
+    delta = max(0.0, rgbd_hero_patch_candidate_timestamp(candidate) - rgbd_hero_patch_candidate_timestamp(primary))
+    time_score = timed_supplement_score(delta, target_delta)
+    selected = selected or [primary]
+    selected_indexes = {item.get("index") for item in selected if item.get("index") is not None}
+    candidate_index = candidate.get("index")
+    already_selected_penalty = -10.0 if candidate_index is not None and candidate_index in selected_indexes else 0.0
     return (
         time_score * 2.0
         + float(candidate.get("validDepthRatio") or 0) * 1.5
         + float(candidate.get("highConfidenceRatio") or 0) * 0.75
         + min(float(candidate.get("rgbSharpnessScore") or 0) / 28.0, 1.0) * 0.5
+        + already_selected_penalty
     )
+
+
+def rgbd_hero_patch_supplement_target_for_index(selected_count: int) -> float:
+    target_index = max(0, selected_count - 1)
+    if target_index < len(RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTAS_SECONDS):
+        return RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTAS_SECONDS[target_index]
+    last_target = RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTAS_SECONDS[-1]
+    return last_target + 2.0 * (target_index - len(RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTAS_SECONDS) + 1)
+
+
+def timed_supplement_score(time_delta: float, target_delta: float) -> float:
+    preferred_half_width = 0.75
+    preferred_min = max(RGBD_HERO_PATCH_SUPPLEMENT_MIN_TIME_DELTA_SECONDS, target_delta - preferred_half_width)
+    preferred_max = target_delta + preferred_half_width
+    if preferred_min <= time_delta <= preferred_max:
+        return 2.0 - min(abs(time_delta - target_delta), 1.0)
+    return max(0.0, 1.0 - abs(time_delta - target_delta) / 4.0)
 
 
 def rgbd_hero_patch_candidate_timestamp(candidate: dict) -> float:
@@ -2186,6 +2214,7 @@ def rgbd_hero_patch_owned_face_sets(patches: list[dict]) -> tuple[list[list[tupl
             "primaryOwnedDepthAgreementCount": 0,
             "primaryOwnedDepthDisagreementCount": 0,
             "primaryMissingOrLowConfidenceCount": 0,
+            "primaryStretchedDepthEdgeCount": 0,
             "outsidePrimaryFrustumCount": 0,
             "replacedBySupplementalCount": 0,
         }
@@ -2197,6 +2226,9 @@ def rgbd_hero_patch_owned_face_sets(patches: list[dict]) -> tuple[list[list[tupl
         "primaryOwnerConfidenceMin": RGBD_HERO_PATCH_PRIMARY_OWNER_CONFIDENCE_MIN,
         "primaryOwnerAbsoluteToleranceMeters": RGBD_HERO_PATCH_PRIMARY_OWNER_ABSOLUTE_TOLERANCE_METERS,
         "primaryOwnerRelativeTolerance": RGBD_HERO_PATCH_PRIMARY_OWNER_RELATIVE_TOLERANCE,
+        "primaryOwnerDepthEdgeAbsoluteMeters": RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_ABSOLUTE_METERS,
+        "primaryOwnerDepthEdgeRelative": RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_RELATIVE,
+        "primaryOwnerMinValidNeighbors": RGBD_HERO_PATCH_PRIMARY_OWNER_MIN_VALID_NEIGHBORS,
         "secondaryClaimRadiusPixels": RGBD_HERO_PATCH_SECONDARY_CLAIM_RADIUS_PIXELS,
         "patches": patch_stats,
     }
@@ -2220,6 +2252,8 @@ def rgbd_hero_patch_owned_face_sets(patches: list[dict]) -> tuple[list[list[tupl
                 patch_stat["primaryOwnedDepthDisagreementCount"] += 1
             elif status == "primary_missing_or_low_confidence":
                 patch_stat["primaryMissingOrLowConfidenceCount"] += 1
+            elif status == "primary_stretched_depth_edge":
+                patch_stat["primaryStretchedDepthEdgeCount"] += 1
             elif status == "outside_primary_frustum":
                 patch_stat["outsidePrimaryFrustumCount"] += 1
 
@@ -2254,6 +2288,8 @@ def rgbd_hero_patch_owned_face_sets(patches: list[dict]) -> tuple[list[list[tupl
                 primary_stat["primaryOwnedDepthDisagreementCount"] += 1
             elif status == "primary_missing_or_low_confidence":
                 primary_stat["primaryMissingOrLowConfidenceCount"] += 1
+            elif status == "primary_stretched_depth_edge":
+                primary_stat["primaryStretchedDepthEdgeCount"] += 1
             elif status == "outside_primary_frustum":
                 primary_stat["outsidePrimaryFrustumCount"] += 1
 
@@ -2325,6 +2361,25 @@ def rgbd_hero_patch_primary_ownership_for_face(
             "confidence": confidence,
         }
 
+    neighborhood = rgbd_hero_patch_depth_neighborhood_stats(primary_depth_frame, u, v)
+    if neighborhood and neighborhood["validDepthCount"] >= RGBD_HERO_PATCH_PRIMARY_OWNER_MIN_VALID_NEIGHBORS:
+        edge_tolerance = max(
+            RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_ABSOLUTE_METERS,
+            sampled_depth * RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_RELATIVE,
+        )
+        if neighborhood["depthSpanMeters"] > edge_tolerance:
+            return {
+                "status": "primary_stretched_depth_edge",
+                "primaryOwns": False,
+                "cell": cell,
+                "projectedDepth": round(projected_depth, 4),
+                "sampledDepth": round(sampled_depth, 4),
+                "confidence": confidence,
+                "depthSpanMeters": round(neighborhood["depthSpanMeters"], 4),
+                "validNeighborCount": neighborhood["validDepthCount"],
+                "depthEdgeToleranceMeters": round(edge_tolerance, 4),
+            }
+
     tolerance = max(
         RGBD_HERO_PATCH_PRIMARY_OWNER_ABSOLUTE_TOLERANCE_METERS,
         projected_depth * RGBD_HERO_PATCH_PRIMARY_OWNER_RELATIVE_TOLERANCE,
@@ -2343,6 +2398,49 @@ def rgbd_hero_patch_primary_ownership_for_face(
         "confidence": confidence,
         "depthErrorMeters": round(depth_error, 4),
         "toleranceMeters": round(tolerance, 4),
+    }
+
+
+def rgbd_hero_patch_depth_neighborhood_stats(
+    depth_frame: ProjectionDepthFrame,
+    u: float,
+    v: float,
+) -> dict | None:
+    center_x = int(round(u))
+    center_y = int(round(v))
+    radius = TEXTURE_DEPTH_NEIGHBORHOOD_RADIUS
+    values: list[float] = []
+    confidence_values: list[int] = []
+
+    for y in range(center_y - radius, center_y + radius + 1):
+        if y < 0 or y >= depth_frame.height:
+            continue
+        for x in range(center_x - radius, center_x + radius + 1):
+            if x < 0 or x >= depth_frame.width:
+                continue
+            index = y * depth_frame.width + x
+            if depth_frame.confidence_values is not None:
+                confidence = int(depth_frame.confidence_values[index])
+                if confidence == 0:
+                    continue
+                confidence_values.append(confidence)
+            depth = float(depth_frame.depth_values[index])
+            if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+                continue
+            values.append(depth)
+
+    if not values:
+        return None
+
+    min_depth = min(values)
+    max_depth = max(values)
+    return {
+        "validDepthCount": len(values),
+        "minDepth": min_depth,
+        "maxDepth": max_depth,
+        "medianDepth": median_float(values),
+        "confidence": max(confidence_values) if confidence_values else None,
+        "depthSpanMeters": max_depth - min_depth,
     }
 
 
@@ -3171,13 +3269,17 @@ def select_keyframes_for_profile(
     *,
     depth_frames: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
-    if is_two_keyframe_rgbd_texture_profile(profile):
-        selected_pairs, pair_stats = select_two_rgbd_payload_pairs(keyframes, depth_frames or [])
+    if is_fast_rgbd_hero_patch_profile(profile):
+        selected_pairs, pair_stats = select_rgbd_payload_pairs_for_fast_profile(
+            keyframes,
+            depth_frames or [],
+            limit=fast_rgbd_hero_patch_pair_limit(profile),
+        )
         if selected_pairs:
             selected = [pair["keyframe"] for pair in selected_pairs]
             selected_ids = [item.get("id") for item in selected if item.get("id")]
             return selected, {
-                "strategy": "two_keyframe_rgbd_pairs",
+                "strategy": "rgbd_hero_patch_pairs",
                 "profile": profile.name,
                 "originalKeyframeCount": len(keyframes),
                 "selectedKeyframeCount": len(selected),
@@ -3188,7 +3290,7 @@ def select_keyframes_for_profile(
         selected = center_biased_items(keyframes, limit=profile.max_keyframes)
         selected_ids = [item.get("id") for item in selected if item.get("id")]
         return selected, {
-            "strategy": "two_keyframe_rgbd_pairs_fallback",
+            "strategy": "rgbd_hero_patch_pairs_fallback",
             "profile": profile.name,
             "originalKeyframeCount": len(keyframes),
             "selectedKeyframeCount": len(selected),
@@ -3223,7 +3325,7 @@ def select_depth_frames_for_profile(
         frame for frame in depth_frames
         if frame.get("colorKeyframeId") and str(frame.get("colorKeyframeId")) in selected_keyframe_id_set
     ]
-    if is_two_keyframe_rgbd_texture_profile(profile):
+    if is_fast_rgbd_hero_patch_profile(profile):
         selected = best_depth_frame_per_selected_keyframe(selected_keyframes, paired)
         selected_ids = [item.get("id") for item in selected if item.get("id")]
         fallback_reason = None
@@ -3234,7 +3336,7 @@ def select_depth_frames_for_profile(
         elif len(selected) < min(len(selected_keyframes), profile.max_depth_frames or len(selected_keyframes)):
             fallback_reason = "fewer_paired_depth_frames_than_selected_keyframes"
         return selected, {
-            "strategy": "two_keyframe_rgbd_pairs" if fallback_reason is None else "two_keyframe_rgbd_pairs_fallback",
+            "strategy": "rgbd_hero_patch_pairs" if fallback_reason is None else "rgbd_hero_patch_pairs_fallback",
             "profile": profile.name,
             "originalDepthFrameCount": len(depth_frames),
             "pairedDepthFrameCount": len(paired),
@@ -3275,8 +3377,11 @@ def select_rgbd_pairs_for_profile(
     paired_frames: list[tuple[dict, dict, Path, Path]],
     profile: ProcessingProfile,
 ) -> list[tuple[dict, dict, Path, Path]]:
-    if is_two_keyframe_rgbd_texture_profile(profile):
-        selected_pairs, _stats = select_two_rgbd_loaded_pairs(paired_frames)
+    if is_fast_rgbd_hero_patch_profile(profile):
+        selected_pairs, _stats = select_rgbd_loaded_pairs_for_fast_profile(
+            paired_frames,
+            limit=fast_rgbd_hero_patch_pair_limit(profile),
+        )
         return selected_pairs
 
     return pose_diverse_items(
@@ -3287,19 +3392,40 @@ def select_rgbd_pairs_for_profile(
     )
 
 
-def is_two_keyframe_rgbd_texture_profile(profile: ProcessingProfile) -> bool:
+def is_fast_rgbd_hero_patch_profile(profile: ProcessingProfile) -> bool:
     return (
         profile.name == "fast_onboarding"
-        and profile.max_keyframes == 2
-        and profile.max_depth_frames == 2
-        and profile.max_rgbd_frames == 2
+        and profile.max_keyframes is not None
+        and profile.max_depth_frames is not None
+        and profile.max_rgbd_frames is not None
         and not profile.use_rgbd_geometry
+        and profile.rgbd_hero_patch_texture
     )
 
 
-def select_two_rgbd_payload_pairs(keyframes: list[dict], depth_frames: list[dict]) -> tuple[list[dict], dict]:
+def is_two_keyframe_rgbd_texture_profile(profile: ProcessingProfile) -> bool:
+    return is_fast_rgbd_hero_patch_profile(profile)
+
+
+def fast_rgbd_hero_patch_pair_limit(profile: ProcessingProfile) -> int:
+    limits = [
+        limit for limit in (profile.max_keyframes, profile.max_depth_frames, profile.max_rgbd_frames)
+        if limit is not None and limit > 0
+    ]
+    return min([RGBD_HERO_PATCH_MAX_PATCHES, *limits]) if limits else RGBD_HERO_PATCH_MAX_PATCHES
+
+
+def select_rgbd_payload_pairs_for_fast_profile(
+    keyframes: list[dict],
+    depth_frames: list[dict],
+    *,
+    limit: int | None = None,
+) -> tuple[list[dict], dict]:
     pairs = build_payload_rgbd_pairs(keyframes, depth_frames)
-    selected_pairs, selection_stats = select_two_rgbd_pair_records(pairs)
+    selected_pairs, selection_stats = select_rgbd_pair_records(
+        pairs,
+        limit=limit or RGBD_HERO_PATCH_MAX_PATCHES,
+    )
     return selected_pairs, {
         "originalDepthFrameCount": len(depth_frames),
         "pairedDepthFrameCount": len(pairs),
@@ -3310,6 +3436,10 @@ def select_two_rgbd_payload_pairs(keyframes: list[dict], depth_frames: list[dict
         ],
         **selection_stats,
     }
+
+
+def select_two_rgbd_payload_pairs(keyframes: list[dict], depth_frames: list[dict]) -> tuple[list[dict], dict]:
+    return select_rgbd_payload_pairs_for_fast_profile(keyframes, depth_frames, limit=2)
 
 
 def build_payload_rgbd_pairs(keyframes: list[dict], depth_frames: list[dict]) -> list[dict]:
@@ -3371,6 +3501,14 @@ def best_depth_frame_per_selected_keyframe(selected_keyframes: list[dict], paire
 def select_two_rgbd_loaded_pairs(
     paired_frames: list[tuple[dict, dict, Path, Path]],
 ) -> tuple[list[tuple[dict, dict, Path, Path]], dict]:
+    return select_rgbd_loaded_pairs_for_fast_profile(paired_frames, limit=2)
+
+
+def select_rgbd_loaded_pairs_for_fast_profile(
+    paired_frames: list[tuple[dict, dict, Path, Path]],
+    *,
+    limit: int | None = None,
+) -> tuple[list[tuple[dict, dict, Path, Path]], dict]:
     records = [
         {
             "pair": pair,
@@ -3385,60 +3523,100 @@ def select_two_rgbd_loaded_pairs(
         }
         for index, pair in enumerate(paired_frames)
     ]
-    selected_records, stats = select_two_rgbd_pair_records(records)
+    selected_records, stats = select_rgbd_pair_records(records, limit=limit or RGBD_HERO_PATCH_MAX_PATCHES)
     return [record["pair"] for record in selected_records], stats
 
 
 def select_two_rgbd_pair_records(pairs: list[dict]) -> tuple[list[dict], dict]:
+    return select_rgbd_pair_records(pairs, limit=2)
+
+
+def select_rgbd_pair_records(pairs: list[dict], *, limit: int | None = None) -> tuple[list[dict], dict]:
+    limit = min(max(int(limit or RGBD_HERO_PATCH_MAX_PATCHES), 1), RGBD_HERO_PATCH_MAX_PATCHES)
     if not pairs:
         return [], {
             "fallbackReason": "no_valid_rgbd_pairs",
             "selectedPairCount": 0,
             "poseDelta": None,
         }
-    if len(pairs) == 1:
-        return pairs, {
-            "fallbackReason": "only_one_valid_rgbd_pair",
-            "selectedPairCount": 1,
+    if len(pairs) == 1 or limit <= 1:
+        selected = [min(pairs, key=lambda pair: int(pair["keyframeIndex"]))]
+        return selected, {
+            "fallbackReason": "only_one_valid_rgbd_pair" if len(pairs) == 1 else None,
+            "selectedPairCount": len(selected),
+            "pairSelectionStrategy": "first_rgbd_hero_patch_pair",
+            "selectedPairKeyframeIds": [pair["keyframe"].get("id") for pair in selected if pair["keyframe"].get("id")],
+            "selectedPairDepthFrameIds": [pair["depthFrame"].get("id") for pair in selected if pair["depthFrame"].get("id")],
             "poseDelta": None,
         }
 
     primary = min(pairs, key=lambda pair: int(pair["keyframeIndex"]))
-    secondary = max(
-        (pair for pair in pairs if pair is not primary),
-        key=lambda pair: timed_supplemental_rgbd_pair_score(pair, primary),
-    )
-    selected = sorted([primary, secondary], key=lambda pair: int(pair["keyframeIndex"]))
+    selected = [primary]
+    remaining = [pair for pair in pairs if pair is not primary]
+    supplemental_selections = []
+    while len(selected) < min(limit, len(pairs)) and remaining:
+        target_delta = rgbd_hero_patch_supplement_target_for_index(len(selected))
+        supplemental = max(
+            remaining,
+            key=lambda pair: timed_supplemental_rgbd_pair_score(
+                pair,
+                primary,
+                selected=selected,
+                target_delta=target_delta,
+            ),
+        )
+        score = timed_supplemental_rgbd_pair_score(
+            supplemental,
+            primary,
+            selected=selected,
+            target_delta=target_delta,
+        )
+        remaining = [pair for pair in remaining if pair is not supplemental]
+        selected.append(supplemental)
+        supplemental_selections.append({
+            "targetTimeDeltaSeconds": target_delta,
+            "actualTimeDeltaSeconds": round(
+                max(0.0, float(supplemental["pose"]["timestamp"]) - float(primary["pose"]["timestamp"])),
+                4,
+            ),
+            "score": round(score, 6),
+            "selectedKeyframeId": supplemental["keyframe"].get("id"),
+            "selectedDepthFrameId": supplemental["depthFrame"].get("id"),
+        })
+    selected = sorted(selected, key=lambda pair: int(pair["keyframeIndex"]))
+    pose_deltas = [
+        pose_delta_summary(primary["pose"], pair["pose"])
+        for pair in selected
+        if pair is not primary
+    ]
     return selected, {
         "fallbackReason": None,
         "selectedPairCount": len(selected),
-        "pairSelectionStrategy": "first_pair_plus_best_2_to_3_second_supplement",
+        "pairSelectionStrategy": "first_pair_plus_timed_rgbd_hero_patch_supplements",
         "targetSupplementTimeDeltaSeconds": RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS,
+        "targetSupplementTimeDeltasSeconds": list(RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTAS_SECONDS),
         "minSupplementTimeDeltaSeconds": RGBD_HERO_PATCH_SUPPLEMENT_MIN_TIME_DELTA_SECONDS,
         "maxPreferredSupplementTimeDeltaSeconds": RGBD_HERO_PATCH_SUPPLEMENT_MAX_PREFERRED_TIME_DELTA_SECONDS,
         "selectedPairKeyframeIds": [pair["keyframe"].get("id") for pair in selected if pair["keyframe"].get("id")],
         "selectedPairDepthFrameIds": [pair["depthFrame"].get("id") for pair in selected if pair["depthFrame"].get("id")],
-        "poseDelta": pose_delta_summary(selected[0]["pose"], selected[1]["pose"]),
+        "supplementalSelections": supplemental_selections,
+        "poseDelta": pose_deltas[0] if pose_deltas else None,
+        "poseDeltas": pose_deltas,
     }
 
 
-def timed_supplemental_rgbd_pair_score(candidate: dict, primary: dict) -> float:
+def timed_supplemental_rgbd_pair_score(
+    candidate: dict,
+    primary: dict,
+    *,
+    selected: list[dict] | None = None,
+    target_delta: float | None = None,
+) -> float:
+    selected = selected or [primary]
+    target_delta = target_delta or RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS
     time_delta = max(0.0, float(candidate["pose"]["timestamp"]) - float(primary["pose"]["timestamp"]))
-    if (
-        RGBD_HERO_PATCH_SUPPLEMENT_MIN_TIME_DELTA_SECONDS
-        <= time_delta
-        <= RGBD_HERO_PATCH_SUPPLEMENT_MAX_PREFERRED_TIME_DELTA_SECONDS
-    ):
-        time_score = 2.0 - min(
-            abs(time_delta - RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS),
-            1.0,
-        )
-    else:
-        time_score = max(
-            0.0,
-            1.0 - abs(time_delta - RGBD_HERO_PATCH_SUPPLEMENT_TARGET_TIME_DELTA_SECONDS) / 4.0,
-        )
-    diversity = pose_novelty_score(candidate["pose"], [primary["pose"]])
+    time_score = timed_supplement_score(time_delta, target_delta)
+    diversity = pose_novelty_score(candidate["pose"], [pair["pose"] for pair in selected])
     diversity_score = min(diversity / 0.85, 1.0)
     capture_order_score = 1.0 / max(int(candidate["keyframeIndex"]) - int(primary["keyframeIndex"]), 1)
     return time_score * 2.0 + diversity_score * 0.5 + capture_order_score * 0.05
