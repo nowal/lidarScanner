@@ -231,6 +231,8 @@ TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT = 150_000
 FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT = 45_000
 FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT = 50_000
 FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT = 10_000
+FAST_ONBOARDING_TEXTURE_SURFACE_DENSIFY_MAX_EDGE_METERS = 0.045
+FAST_ONBOARDING_TEXTURE_SURFACE_DENSIFY_MAX_ITERATIONS = 10
 DENSE_SINGLE_VIEW_HERO_MAX_FACE_SAMPLES = 20_000
 DENSE_SINGLE_VIEW_EDGE_MARGIN_PIXELS = 1.0
 DENSE_SINGLE_VIEW_MIN_FACING = 0.02
@@ -347,6 +349,7 @@ class ProcessingProfile:
     fallback_texture_face_limit: int | None = None
     single_frame_diagnostic: bool = False
     preserve_texture_render_mesh: bool = False
+    densify_texture_render_mesh: bool = False
     dense_single_view_texture: bool = False
     rgbd_hero_patch_texture: bool = False
 
@@ -366,6 +369,7 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         planar_chart_projection_mode="direct",
         fallback_texture_face_limit=FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT,
         preserve_texture_render_mesh=True,
+        densify_texture_render_mesh=True,
         dense_single_view_texture=False,
         rgbd_hero_patch_texture=False,
     ),
@@ -3300,6 +3304,7 @@ def processing_profile_stats(profile: ProcessingProfile) -> dict:
         "fallbackTextureFaceLimit": profile.fallback_texture_face_limit,
         "singleFrameDiagnostic": profile.single_frame_diagnostic,
         "preserveTextureRenderMesh": profile.preserve_texture_render_mesh,
+        "densifyTextureRenderMesh": profile.densify_texture_render_mesh,
         "denseSingleViewTexture": profile.dense_single_view_texture,
         "rgbdHeroPatchTexture": profile.rgbd_hero_patch_texture,
     }
@@ -4972,6 +4977,216 @@ def project_vertex_color(vertex: tuple[float, float, float], keyframes: list[Pro
     return (clamp_color(r), clamp_color(g), clamp_color(b))
 
 
+def densify_lidar_surface_render_mesh(
+    mesh: FusedMesh,
+    *,
+    max_edge_meters: float,
+    max_face_count: int,
+    max_iterations: int,
+) -> tuple[FusedMesh, dict]:
+    source_vertex_count = len(mesh.vertices)
+    source_face_count = len(mesh.faces)
+    source_edge_stats = mesh_edge_length_stats(mesh.vertices, mesh.faces)
+    if (
+        source_face_count == 0
+        or source_face_count >= max_face_count
+        or max_edge_meters <= 0
+        or max_iterations <= 0
+    ):
+        stats = {
+            "enabled": True,
+            "algorithm": "lidar_surface_edge_subdivision",
+            "used": False,
+            "sourceVertexCount": source_vertex_count,
+            "sourceFaceCount": source_face_count,
+            "renderVertexCount": source_vertex_count,
+            "renderFaceCount": source_face_count,
+            "targetFaceCount": max_face_count,
+            "targetMaxEdgeMeters": max_edge_meters,
+            "iterations": 0,
+            "splitFaceCount": 0,
+            "midpointVertexCount": 0,
+            "capReached": source_face_count >= max_face_count,
+            "sourceEdgeLengthMeters": source_edge_stats,
+            "renderEdgeLengthMeters": source_edge_stats,
+            "reason": (
+                "source render mesh is already at or above the densification face budget"
+                if source_face_count >= max_face_count
+                else "source render mesh has no faces to densify"
+                if source_face_count == 0
+                else "surface densification disabled by invalid limits"
+            ),
+        }
+        return mesh, stats
+
+    vertices = list(mesh.vertices)
+    faces = list(mesh.faces)
+    midpoint_cache: dict[tuple[int, int], int] = {}
+    split_face_count = 0
+    iterations = 0
+    cap_reached = False
+
+    for iteration in range(max_iterations):
+        projected_face_count = len(faces)
+        new_faces: list[tuple[int, int, int]] = []
+        iteration_split_count = 0
+
+        for face in faces:
+            a, b, c = face
+            if not valid_triangle_indices(face, len(vertices)):
+                new_faces.append(face)
+                continue
+
+            edge_lengths = (
+                length(subtract(vertices[b], vertices[a])),
+                length(subtract(vertices[c], vertices[b])),
+                length(subtract(vertices[a], vertices[c])),
+            )
+            longest_edge = max(edge_lengths)
+            if longest_edge <= max_edge_meters:
+                new_faces.append(face)
+                continue
+
+            if projected_face_count >= max_face_count:
+                cap_reached = True
+                new_faces.append(face)
+                continue
+
+            edge_index = edge_lengths.index(longest_edge)
+            if edge_index == 0:
+                midpoint = midpoint_vertex_index(vertices, midpoint_cache, a, b)
+                new_faces.append((a, midpoint, c))
+                new_faces.append((midpoint, b, c))
+            elif edge_index == 1:
+                midpoint = midpoint_vertex_index(vertices, midpoint_cache, b, c)
+                new_faces.append((a, b, midpoint))
+                new_faces.append((a, midpoint, c))
+            else:
+                midpoint = midpoint_vertex_index(vertices, midpoint_cache, c, a)
+                new_faces.append((a, b, midpoint))
+                new_faces.append((midpoint, b, c))
+            projected_face_count += 1
+            iteration_split_count += 1
+
+        faces = new_faces
+        if iteration_split_count == 0:
+            break
+        split_face_count += iteration_split_count
+        iterations = iteration + 1
+
+    render_edge_stats = mesh_edge_length_stats(vertices, faces)
+    used = len(faces) > source_face_count
+    stats = {
+        "enabled": True,
+        "algorithm": "lidar_surface_edge_subdivision",
+        "used": used,
+        "surfaceConstrained": True,
+        "geometrySource": mesh.stats.get("geometrySource"),
+        "sourceVertexCount": source_vertex_count,
+        "sourceFaceCount": source_face_count,
+        "renderVertexCount": len(vertices),
+        "renderFaceCount": len(faces),
+        "targetFaceCount": max_face_count,
+        "targetMaxEdgeMeters": max_edge_meters,
+        "iterations": iterations,
+        "maxIterations": max_iterations,
+        "splitFaceCount": split_face_count,
+        "midpointVertexCount": len(vertices) - source_vertex_count,
+        "capReached": cap_reached or len(faces) >= max_face_count,
+        "faceIncreaseRatio": round(len(faces) / source_face_count, 4) if source_face_count else 0,
+        "sourceEdgeLengthMeters": source_edge_stats,
+        "renderEdgeLengthMeters": render_edge_stats,
+        "reason": (
+            "subdivided sparse LiDAR triangles for denser texture coverage"
+            if used
+            else "all LiDAR triangle edges already fit the densification threshold"
+        ),
+    }
+    return FusedMesh(vertices=vertices, faces=faces, stats=mesh.stats), stats
+
+
+def midpoint_vertex_index(
+    vertices: list[tuple[float, float, float]],
+    midpoint_cache: dict[tuple[int, int], int],
+    first_index: int,
+    second_index: int,
+) -> int:
+    key = (first_index, second_index) if first_index < second_index else (second_index, first_index)
+    cached_index = midpoint_cache.get(key)
+    if cached_index is not None:
+        return cached_index
+
+    first = vertices[first_index]
+    second = vertices[second_index]
+    midpoint = (
+        (first[0] + second[0]) / 2,
+        (first[1] + second[1]) / 2,
+        (first[2] + second[2]) / 2,
+    )
+    vertices.append(midpoint)
+    midpoint_index = len(vertices) - 1
+    midpoint_cache[key] = midpoint_index
+    return midpoint_index
+
+
+def valid_triangle_indices(face: tuple[int, int, int], vertex_count: int) -> bool:
+    return (
+        0 <= face[0] < vertex_count
+        and 0 <= face[1] < vertex_count
+        and 0 <= face[2] < vertex_count
+        and face[0] != face[1]
+        and face[1] != face[2]
+        and face[0] != face[2]
+    )
+
+
+def mesh_edge_length_stats(
+    vertices: list[tuple[float, float, float]],
+    faces: list[tuple[int, int, int]],
+) -> dict:
+    edge_keys: set[tuple[int, int]] = set()
+    edge_lengths: list[float] = []
+    invalid_edge_count = 0
+    for face in faces:
+        for first_index, second_index in (
+            (face[0], face[1]),
+            (face[1], face[2]),
+            (face[2], face[0]),
+        ):
+            if not (0 <= first_index < len(vertices) and 0 <= second_index < len(vertices)):
+                invalid_edge_count += 1
+                continue
+            if first_index == second_index:
+                invalid_edge_count += 1
+                continue
+            key = (
+                (first_index, second_index)
+                if first_index < second_index
+                else (second_index, first_index)
+            )
+            if key in edge_keys:
+                continue
+            edge_keys.add(key)
+            edge_lengths.append(length(subtract(vertices[second_index], vertices[first_index])))
+
+    if not edge_lengths:
+        return {
+            "edgeCount": 0,
+            "invalidEdgeCount": invalid_edge_count,
+            "min": 0,
+            "mean": 0,
+            "max": 0,
+        }
+
+    return {
+        "edgeCount": len(edge_lengths),
+        "invalidEdgeCount": invalid_edge_count,
+        "min": round(min(edge_lengths), 5),
+        "mean": round(sum(edge_lengths) / len(edge_lengths), 5),
+        "max": round(max(edge_lengths), 5),
+    }
+
+
 def make_texture_render_mesh(mesh: FusedMesh, profile: ProcessingProfile | None = None) -> FusedMesh:
     profile = profile or current_full_quality_profile()
     source_face_count = len(mesh.faces)
@@ -4993,6 +5208,33 @@ def make_texture_render_mesh(mesh: FusedMesh, profile: ProcessingProfile | None 
         "atlasMaxSize": atlas_max_size,
     }
 
+    if profile.densify_texture_render_mesh and not is_open3d_tsdf_mesh(mesh):
+        densified_mesh, densify_stats = densify_lidar_surface_render_mesh(
+            mesh,
+            max_edge_meters=FAST_ONBOARDING_TEXTURE_SURFACE_DENSIFY_MAX_EDGE_METERS,
+            max_face_count=target_face_count,
+            max_iterations=FAST_ONBOARDING_TEXTURE_SURFACE_DENSIFY_MAX_ITERATIONS,
+        )
+        if len(densified_mesh.faces) > source_face_count:
+            render_stats = {
+                **base_stats,
+                **densify_stats,
+                "used": True,
+                "renderVertexCount": len(densified_mesh.vertices),
+                "renderFaceCount": len(densified_mesh.faces),
+                "geometryPreserved": False,
+                "rawGeometryPreserved": bool(mesh.stats.get("geometryPreserved")),
+                "smoothing": {
+                    "enabled": False,
+                    "scope": "surface subdivision preserves LiDAR triangle planes",
+                },
+            }
+            return FusedMesh(
+                vertices=densified_mesh.vertices,
+                faces=densified_mesh.faces,
+                stats={**mesh.stats, "textureRenderMesh": render_stats},
+            )
+
     if profile.preserve_texture_render_mesh:
         render_stats = {
             **base_stats,
@@ -5001,6 +5243,12 @@ def make_texture_render_mesh(mesh: FusedMesh, profile: ProcessingProfile | None 
             "renderVertexCount": len(mesh.vertices),
             "renderFaceCount": source_face_count,
             "geometryPreserved": True,
+            "rawGeometryPreserved": bool(mesh.stats.get("geometryPreserved")),
+            "surfaceDensify": {
+                "enabled": profile.densify_texture_render_mesh,
+                "used": False,
+                "reason": "no sparse LiDAR triangle subdivision was applied",
+            },
             "smoothing": {
                 "enabled": False,
                 "scope": "disabled by profile",

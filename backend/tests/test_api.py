@@ -652,6 +652,37 @@ def test_tsdf_texture_render_mesh_prefers_open3d_quadric_decimation(monkeypatch)
     assert render_stats["smoothing"]["scope"] == "photoreal render mesh only"
 
 
+def test_fast_texture_render_mesh_densifies_sparse_lidar_surface():
+    mesh = pipeline.FusedMesh(
+        vertices=[
+            (-0.2, -0.2, -1.0),
+            (0.2, -0.2, -1.0),
+            (-0.2, 0.2, -1.0),
+        ],
+        faces=[(0, 1, 2)],
+        stats={"geometrySource": "arkit_mesh_anchor_fusion", "geometryPreserved": True},
+    )
+
+    render_mesh = pipeline.make_texture_render_mesh(
+        mesh,
+        profile=pipeline.PROCESSING_PROFILES["fast_onboarding"],
+    )
+    render_stats = render_mesh.stats["textureRenderMesh"]
+
+    assert len(render_mesh.faces) > len(mesh.faces)
+    assert len(render_mesh.vertices) > len(mesh.vertices)
+    assert render_stats["used"] is True
+    assert render_stats["algorithm"] == "lidar_surface_edge_subdivision"
+    assert render_stats["surfaceConstrained"] is True
+    assert render_stats["geometrySource"] == "arkit_mesh_anchor_fusion"
+    assert render_stats["geometryPreserved"] is False
+    assert render_stats["rawGeometryPreserved"] is True
+    assert render_stats["splitFaceCount"] > 0
+    assert render_stats["sourceEdgeLengthMeters"]["max"] > render_stats["renderEdgeLengthMeters"]["max"]
+    assert render_stats["renderFaceCount"] == len(render_mesh.faces)
+    assert render_stats["renderFaceCount"] <= pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
+
+
 def test_texture_render_smoothing_reduces_spiky_vertices():
     mesh = pipeline.FusedMesh(
         vertices=[
@@ -1953,6 +1984,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert rgbd_stats["profile"]["maxRgbdFrames"] == 0
         assert rgbd_stats["profile"]["useRgbdGeometry"] is False
         assert rgbd_stats["profile"]["preserveTextureRenderMesh"] is True
+        assert rgbd_stats["profile"]["densifyTextureRenderMesh"] is True
         assert rgbd_stats["profile"]["denseSingleViewTexture"] is False
         assert rgbd_stats["profile"]["rgbdHeroPatchTexture"] is False
         assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
@@ -1988,10 +2020,17 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
         assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
         assert manifest["artifacts"]["texturedObj"]["stats"]["uvStrategy"] == "render_mesh_per_face_atlas_padded"
-        assert manifest["artifacts"]["texturedObj"]["stats"]["faceCount"] == manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
+        assert manifest["artifacts"]["texturedObj"]["stats"]["faceCount"] > manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
         assert manifest["artifacts"]["texturedObj"]["stats"]["texturedFaceCount"] <= manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
-        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["used"] is False
-        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["geometryPreserved"] is True
+        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["used"] is True
+        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["algorithm"] == "lidar_surface_edge_subdivision"
+        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["surfaceConstrained"] is True
+        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["geometryPreserved"] is False
+        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["rawGeometryPreserved"] is True
+        assert (
+            manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["renderFaceCount"]
+            == manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
+        )
         assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["enabled"] is False
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
 
@@ -2000,6 +2039,9 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert [item["depthFrame"]["id"] for item in texture_debug["keyframes"]] == depth_selection["selectedDepthFrameIds"]
         assert texture_debug["geometry"]["geometrySource"] == "arkit_mesh_anchor_fusion"
         assert texture_debug["geometry"]["geometryPreserved"] is True
+        assert texture_debug["geometry"]["faceCount"] == manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
+        assert texture_debug["geometry"]["renderMesh"]["algorithm"] == "lidar_surface_edge_subdivision"
+        assert texture_debug["geometry"]["renderMesh"]["geometryPreserved"] is False
         assert len(texture_debug["perKeyframeProjection"]) == 12
         assert texture_debug["projection"]["projectionCoverage"] > 0
         assert texture_debug["projection"]["rejectedDepthEdgeSampleCount"] >= 0
@@ -2019,7 +2061,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         textured_mtl = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.mtl", headers=headers)
         texture_png = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh_texture.png", headers=headers)
         assert "o textured_mesh" in textured_obj.text
-        assert textured_obj.text.count("\nf ") == manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
+        assert textured_obj.text.count("\nf ") == manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
         assert "rgbd_hero_patch" not in textured_obj.text
         assert "map_Kd textured_mesh_texture.png" in textured_mtl.text
         assert texture_png.headers["content-type"] == "image/png"
