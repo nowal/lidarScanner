@@ -229,6 +229,9 @@ TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT = 150_000
 FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT = 45_000
 FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT = 50_000
 FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT = 10_000
+DENSE_SINGLE_VIEW_HERO_MAX_FACE_SAMPLES = 20_000
+DENSE_SINGLE_VIEW_EDGE_MARGIN_PIXELS = 1.0
+DENSE_SINGLE_VIEW_MIN_FACING = 0.02
 TEXTURE_RENDER_MIN_CLUSTER_METERS = 0.006
 TEXTURE_RENDER_MAX_CLUSTER_METERS = 0.08
 TEXTURE_RENDER_SMOOTHING_ITERATIONS = 8
@@ -320,6 +323,7 @@ class ProcessingProfile:
     fallback_texture_face_limit: int | None = None
     single_frame_diagnostic: bool = False
     preserve_texture_render_mesh: bool = False
+    dense_single_view_texture: bool = False
 
 
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
@@ -337,6 +341,7 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         planar_chart_projection_mode="direct",
         fallback_texture_face_limit=FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT,
         preserve_texture_render_mesh=True,
+        dense_single_view_texture=True,
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",
@@ -1966,6 +1971,7 @@ def processing_profile_stats(profile: ProcessingProfile) -> dict:
         "fallbackTextureFaceLimit": profile.fallback_texture_face_limit,
         "singleFrameDiagnostic": profile.single_frame_diagnostic,
         "preserveTextureRenderMesh": profile.preserve_texture_render_mesh,
+        "denseSingleViewTexture": profile.dense_single_view_texture,
     }
 
 
@@ -4156,6 +4162,19 @@ async def write_textured_obj(
     profile: ProcessingProfile | None = None,
 ) -> dict:
     profile = profile or current_full_quality_profile()
+    source_keyframes = list(keyframes)
+    dense_single_view_enabled = profile.dense_single_view_texture and bool(source_keyframes)
+    dense_single_view_stats: dict | None = None
+    active_projection_mode = (
+        "dense_single_view"
+        if dense_single_view_enabled
+        else profile.planar_chart_projection_mode
+    )
+    if dense_single_view_enabled:
+        keyframes, dense_single_view_stats = select_dense_single_view_texture_keyframe(
+            mesh,
+            source_keyframes,
+        )
     face_count = len(mesh.faces)
     atlas_max_size = texture_atlas_max_size_for_mesh(mesh)
     atlas_layout_spec = build_texture_atlas_layout(mesh, atlas_max_size=atlas_max_size)
@@ -4268,7 +4287,7 @@ async def write_textured_obj(
     fallback_projected_count = 0
     solid_projected_face_count = 0
     solid_fallback_face_count = 0
-    if profile.planar_chart_projection_mode == "direct":
+    if active_projection_mode in {"direct", "dense_single_view"}:
         solid_scene_color = TEXTURE_UNOBSERVED_COLOR
         solid_scene_color_projected = False
     else:
@@ -4283,7 +4302,7 @@ async def write_textured_obj(
                 82.5,
                 (
                     f"Texturing {len(atlas_layout_spec.planar_charts)} planar room charts "
-                    f"({profile.planar_chart_projection_mode}, stride {max(1, profile.planar_chart_raster_stride)})"
+                    f"({active_projection_mode}, stride {max(1, profile.planar_chart_raster_stride)})"
                 ),
             )
             await asyncio.sleep(0)
@@ -4293,10 +4312,15 @@ async def write_textured_obj(
                 raise asyncio.CancelledError
 
             region_points = chart_region_points(chart)
-            all_candidates = texture_projection_candidates_for_region(region_points, chart.normal, keyframes)
+            all_candidates = texture_projection_candidates_for_region(
+                region_points,
+                chart.normal,
+                keyframes,
+                relaxed=active_projection_mode == "dense_single_view",
+            )
             owner_candidate = (
                 all_candidates[0]
-                if profile.planar_chart_projection_mode == "direct" and all_candidates
+                if active_projection_mode in {"direct", "dense_single_view"} and all_candidates
                 else None
             )
             candidates = [owner_candidate] if owner_candidate is not None else all_candidates
@@ -4311,7 +4335,12 @@ async def write_textured_obj(
             def resolve_chart_fallback_color() -> tuple[int, int, int]:
                 nonlocal fallback_color
                 if fallback_color is None:
-                    if profile.planar_chart_projection_mode == "direct":
+                    if active_projection_mode == "dense_single_view":
+                        fallback_color = (
+                            average_dense_single_view_surface_color(region_points, chart.normal, keyframes)
+                            or TEXTURE_UNOBSERVED_COLOR
+                        )
+                    elif active_projection_mode == "direct":
                         fallback_color = (
                             average_direct_projected_surface_color(region_points, chart.normal, keyframes)
                             or TEXTURE_UNOBSERVED_COLOR
@@ -4328,7 +4357,7 @@ async def write_textured_obj(
                 resolve_chart_fallback_color,
                 secondary_candidates=all_candidates[1:] if owner_candidate is not None else [],
                 sample_stride=max(1, profile.planar_chart_raster_stride),
-                projection_mode=profile.planar_chart_projection_mode,
+                projection_mode=active_projection_mode,
             )
             planar_chart_contexts[chart.chart_id] = {
                 "regionPoints": region_points,
@@ -4365,7 +4394,7 @@ async def write_textured_obj(
                 "rasterCandidateKeyframeCount": len(candidates),
                 "ownerKeyframeId": owner_candidate.keyframe_debug_id if owner_candidate is not None else None,
                 "sampleStride": max(1, profile.planar_chart_raster_stride),
-                "projectionMode": profile.planar_chart_projection_mode,
+                "projectionMode": active_projection_mode,
             })
             if report_progress is not None:
                 await report_progress(
@@ -4411,7 +4440,11 @@ async def write_textured_obj(
 
         fallback_processed_count += 1
         if face_index in fallback_high_quality_faces:
-            candidates = texture_projection_candidates(face_vertices, keyframes)
+            candidates = texture_projection_candidates(
+                face_vertices,
+                keyframes,
+                relaxed=active_projection_mode == "dense_single_view",
+            )
             if candidates:
                 selected_key = candidates[0].keyframe_debug_id
                 selected_keyframe_face_counts[selected_key] = selected_keyframe_face_counts.get(selected_key, 0) + 1
@@ -4421,20 +4454,32 @@ async def write_textured_obj(
                 nonlocal fallback_color
                 if fallback_color is None:
                     face_normal = triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2])
-                    fallback_color = (
-                        average_direct_projected_surface_color(
-                            [
-                                face_vertices[0],
-                                face_vertices[1],
-                                face_vertices[2],
-                                triangle_center(face_vertices[0], face_vertices[1], face_vertices[2]),
-                            ],
-                            face_normal,
-                            keyframes,
-                        ) or TEXTURE_UNOBSERVED_COLOR
-                        if profile.planar_chart_projection_mode == "direct"
-                        else average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
-                    )
+                    sample_points = [
+                        face_vertices[0],
+                        face_vertices[1],
+                        face_vertices[2],
+                        triangle_center(face_vertices[0], face_vertices[1], face_vertices[2]),
+                    ]
+                    if active_projection_mode == "dense_single_view":
+                        fallback_color = (
+                            average_dense_single_view_surface_color(
+                                sample_points,
+                                face_normal,
+                                keyframes,
+                            )
+                            or TEXTURE_UNOBSERVED_COLOR
+                        )
+                    elif active_projection_mode == "direct":
+                        fallback_color = (
+                            average_direct_projected_surface_color(
+                                sample_points,
+                                face_normal,
+                                keyframes,
+                            )
+                            or TEXTURE_UNOBSERVED_COLOR
+                        )
+                    else:
+                        fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
                 return fallback_color
 
             raster_stats = rasterize_face_texture(
@@ -4444,6 +4489,7 @@ async def write_textured_obj(
                 face_vertices,
                 candidates,
                 resolve_fallback_color,
+                projection_mode=active_projection_mode,
             )
             for key, value in raster_stats["keyframeContributionCounts"].items():
                 keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + value
@@ -4476,11 +4522,19 @@ async def write_textured_obj(
         else:
             solid_color = solid_scene_color
             solid_is_projected = solid_scene_color_projected
-            if profile.planar_chart_projection_mode == "direct":
-                direct_sample = direct_projected_surface_color(
-                    triangle_center(face_vertices[0], face_vertices[1], face_vertices[2]),
-                    triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2]),
-                    keyframes,
+            if active_projection_mode in {"direct", "dense_single_view"}:
+                direct_sample = (
+                    dense_single_view_surface_color(
+                        triangle_center(face_vertices[0], face_vertices[1], face_vertices[2]),
+                        triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2]),
+                        keyframes,
+                    )
+                    if active_projection_mode == "dense_single_view"
+                    else direct_projected_surface_color(
+                        triangle_center(face_vertices[0], face_vertices[1], face_vertices[2]),
+                        triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2]),
+                        keyframes,
+                    )
                 )
                 if direct_sample is not None:
                     solid_color = direct_sample[0]
@@ -4605,6 +4659,7 @@ async def write_textured_obj(
         "parallelEnabled": parallel_worker_count > 1,
         "planarChartRasterStride": max(1, profile.planar_chart_raster_stride),
         "planarChartProjectionMode": profile.planar_chart_projection_mode,
+        "activeProjectionMode": active_projection_mode,
         "planarChartCount": len(atlas_layout_spec.planar_charts),
         "fallbackTextureFaceLimit": profile.fallback_texture_face_limit,
         "fallbackHighQualityFaceCount": fallback_budget_stats.get("fallbackHighQualityFaceCount", 0),
@@ -4612,15 +4667,20 @@ async def write_textured_obj(
         "solidFallbackFaceCount": solid_fallback_face_count,
         "solidSceneColor": list(solid_scene_color),
         "solidSceneColorProjected": solid_scene_color_projected,
+        "sourceKeyframeCount": len(source_keyframes),
+        "activeTextureKeyframeCount": len(keyframes),
+        "denseSingleViewTexture": dense_single_view_enabled,
     }
     texture_diagnostics["geometry"] = texture_geometry_debug(mesh)
-    texture_diagnostics["keyframes"] = projection_keyframe_debug_summaries(keyframes)
+    texture_diagnostics["keyframes"] = projection_keyframe_debug_summaries(source_keyframes)
+    if dense_single_view_stats is not None:
+        texture_diagnostics["denseSingleViewTexture"] = dense_single_view_stats
     texture_diagnostics["poseDelta"] = (
-        projection_keyframe_pose_delta(keyframes[0], keyframes[1])
-        if len(keyframes) >= 2
+        projection_keyframe_pose_delta(source_keyframes[0], source_keyframes[1])
+        if len(source_keyframes) >= 2
         else None
     )
-    texture_diagnostics["perKeyframeProjection"] = per_keyframe_mesh_projection_stats(mesh, keyframes)
+    texture_diagnostics["perKeyframeProjection"] = per_keyframe_mesh_projection_stats(mesh, source_keyframes)
     texture_diagnostics["projection"]["faceRejectionReasons"] = {
         "overexposedSampleCount": rejected_overexposed_sample_count,
         "underexposedSampleCount": rejected_underexposed_sample_count,
@@ -4642,7 +4702,7 @@ async def write_textured_obj(
     if output_projection_overlay_dir is not None:
         texture_diagnostics["projectionOverlays"] = write_two_keyframe_projection_overlays(
             mesh,
-            keyframes,
+            source_keyframes,
             output_projection_overlay_dir,
         )
 
@@ -6053,10 +6113,142 @@ def select_face_keyframe(
     return candidates[0].keyframe if candidates else None
 
 
+def select_dense_single_view_texture_keyframe(
+    mesh: FusedMesh,
+    keyframes: list[ProjectionKeyframe],
+) -> tuple[list[ProjectionKeyframe], dict]:
+    sampled_face_count = 0
+    if not keyframes:
+        return [], {
+            "enabled": True,
+            "strategy": "max_visible_projected_face_centers",
+            "sourceKeyframeCount": 0,
+            "activeKeyframeCount": 0,
+            "selectedKeyframeId": None,
+            "fallbackReason": "no usable keyframes",
+            "sampledFaceCenterCount": 0,
+            "candidates": [],
+        }
+    if not mesh.faces:
+        keyframe = keyframes[0]
+        return [keyframe], {
+            "enabled": True,
+            "strategy": "max_visible_projected_face_centers",
+            "sourceKeyframeCount": len(keyframes),
+            "activeKeyframeCount": 1,
+            "selectedKeyframeId": keyframe.debug_id,
+            "selectedKeyframeIndex": 0,
+            "fallbackReason": "mesh has no faces",
+            "sampledFaceCenterCount": 0,
+            "candidates": [],
+        }
+
+    stride = max(1, math.ceil(len(mesh.faces) / DENSE_SINGLE_VIEW_HERO_MAX_FACE_SAMPLES))
+    candidate_stats: list[dict] = [
+        {
+            "index": index,
+            "id": keyframe.id,
+            "debugId": keyframe.debug_id,
+            "score": 0.0,
+            "projectedFaceCenterCount": 0,
+            "edgeRejectedFaceCenterCount": 0,
+            "invalidProjectionFaceCenterCount": 0,
+            "occludedFaceCenterCount": 0,
+            "visibleDepthFaceCenterCount": 0,
+            "unknownDepthFaceCenterCount": 0,
+            "meanEdgeMarginPixels": 0.0,
+            "meanFacing": 0.0,
+        }
+        for index, keyframe in enumerate(keyframes)
+    ]
+    edge_margin_sums = [0.0 for _keyframe in keyframes]
+    facing_sums = [0.0 for _keyframe in keyframes]
+
+    for face_index in range(0, len(mesh.faces), stride):
+        sampled_face_count += 1
+        face = mesh.faces[face_index]
+        vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
+        center = triangle_center(vertices[0], vertices[1], vertices[2])
+        normal = triangle_normal(vertices[0], vertices[1], vertices[2])
+        for keyframe_index, keyframe in enumerate(keyframes):
+            stats = candidate_stats[keyframe_index]
+            projection = project_world_point(center, keyframe)
+            if projection is None:
+                stats["invalidProjectionFaceCenterCount"] += 1
+                continue
+
+            u, v, depth = projection
+            edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
+            if edge_margin < DENSE_SINGLE_VIEW_EDGE_MARGIN_PIXELS:
+                stats["edgeRejectedFaceCenterCount"] += 1
+                continue
+
+            view_vector = normalize(subtract(keyframe.camera_position, center))
+            facing = abs(dot(normal, view_vector)) if normal != (0.0, 0.0, 0.0) else 0.25
+            depth_visibility = depth_visibility_for_world_point(center, keyframe)
+            if depth_visibility.status == "occluded":
+                stats["occludedFaceCenterCount"] += 1
+                depth_weight = 0.7
+            elif depth_visibility.status == "visible":
+                stats["visibleDepthFaceCenterCount"] += 1
+                depth_weight = depth_visibility.weight
+            else:
+                stats["unknownDepthFaceCenterCount"] += 1
+                depth_weight = TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT
+
+            center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
+            score = center_bias * max(facing, 0.12) * depth_weight / max(depth, 0.2)
+            stats["score"] += score
+            stats["projectedFaceCenterCount"] += 1
+            edge_margin_sums[keyframe_index] += edge_margin
+            facing_sums[keyframe_index] += facing
+
+    for index, stats in enumerate(candidate_stats):
+        projected_count = max(int(stats["projectedFaceCenterCount"]), 1)
+        stats["sampledFaceCenterCount"] = sampled_face_count
+        stats["projectionRatio"] = round(
+            int(stats["projectedFaceCenterCount"]) / max(sampled_face_count, 1),
+            4,
+        )
+        stats["score"] = round(float(stats["score"]), 6)
+        stats["meanEdgeMarginPixels"] = round(edge_margin_sums[index] / projected_count, 3)
+        stats["meanFacing"] = round(facing_sums[index] / projected_count, 4)
+
+    best_index = max(
+        range(len(keyframes)),
+        key=lambda index: (
+            float(candidate_stats[index]["score"]),
+            int(candidate_stats[index]["projectedFaceCenterCount"]),
+            -index,
+        ),
+    )
+    selected_keyframe = keyframes[best_index]
+    fallback_reason = None
+    if not candidate_stats[best_index]["projectedFaceCenterCount"]:
+        fallback_reason = "no projected sampled face centers; using first uploaded keyframe"
+        best_index = 0
+        selected_keyframe = keyframes[0]
+
+    return [selected_keyframe], {
+        "enabled": True,
+        "strategy": "max_visible_projected_face_centers",
+        "sourceKeyframeCount": len(keyframes),
+        "activeKeyframeCount": 1,
+        "selectedKeyframeId": selected_keyframe.debug_id,
+        "selectedKeyframeIndex": best_index,
+        "bakedKeyframeIds": [selected_keyframe.debug_id],
+        "fallbackReason": fallback_reason,
+        "sampledFaceCenterCount": sampled_face_count,
+        "faceSampleStride": stride,
+        "candidates": candidate_stats,
+    }
+
+
 def texture_projection_candidates(
     face_vertices: list[tuple[float, float, float]],
     keyframes: list[ProjectionKeyframe],
     max_candidates: int = TEXTURE_BLEND_MAX_FACE_CANDIDATES,
+    relaxed: bool = False,
 ) -> list[TextureProjectionCandidate]:
     if not keyframes:
         return []
@@ -6075,24 +6267,27 @@ def texture_projection_candidates(
             continue
 
         edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
-        if edge_margin < keyframe.edge_margin_threshold:
+        edge_threshold = DENSE_SINGLE_VIEW_EDGE_MARGIN_PIXELS if relaxed else keyframe.edge_margin_threshold
+        if edge_margin < edge_threshold:
             continue
 
         center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
         view_vector = normalize(subtract(keyframe.camera_position, center))
         facing = abs(dot(normal, view_vector)) if normal != (0.0, 0.0, 0.0) else 0.25
-        if facing < TEXTURE_BLEND_MIN_FACING:
+        min_facing = DENSE_SINGLE_VIEW_MIN_FACING if relaxed else TEXTURE_BLEND_MIN_FACING
+        if facing < min_facing:
             continue
 
         depth_visibility = depth_visibility_for_world_point(center, keyframe)
-        if depth_visibility.status == "occluded":
+        if depth_visibility.status == "occluded" and not relaxed:
             continue
+        depth_weight = 0.7 if depth_visibility.status == "occluded" else depth_visibility.weight
 
         score = (
             center_bias
             * (visible_vertex_count / 3)
             * max(facing, 0.15)
-            * depth_visibility.weight
+            * depth_weight
             / max(depth, 0.2)
         )
         candidates.append(TextureProjectionCandidate(
@@ -6114,6 +6309,7 @@ def texture_projection_candidates_for_region(
     normal: tuple[float, float, float],
     keyframes: list[ProjectionKeyframe],
     max_candidates: int = TEXTURE_BLEND_MAX_FACE_CANDIDATES,
+    relaxed: bool = False,
 ) -> list[TextureProjectionCandidate]:
     if not keyframes or not region_points:
         return []
@@ -6140,7 +6336,11 @@ def texture_projection_candidates_for_region(
         best_edge_margin = max(edge_margins)
         region_edge_threshold = max(
             1.0,
-            keyframe.edge_margin_threshold * TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE,
+            (
+                DENSE_SINGLE_VIEW_EDGE_MARGIN_PIXELS
+                if relaxed
+                else keyframe.edge_margin_threshold * TEXTURE_PLANAR_CHART_DIRECT_EDGE_MARGIN_SCALE
+            ),
         )
         if best_edge_margin < region_edge_threshold:
             continue
@@ -6151,7 +6351,8 @@ def texture_projection_candidates_for_region(
         center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
         view_vector = normalize(subtract(keyframe.camera_position, center))
         facing = abs(dot(normal, view_vector)) if normal != (0.0, 0.0, 0.0) else 0.25
-        if facing < TEXTURE_BLEND_MIN_FACING:
+        min_facing = DENSE_SINGLE_VIEW_MIN_FACING if relaxed else TEXTURE_BLEND_MIN_FACING
+        if facing < min_facing:
             continue
 
         depth_visibility = (
@@ -6159,15 +6360,16 @@ def texture_projection_candidates_for_region(
             if project_world_point(center, keyframe) is not None
             else DepthVisibilityResult("unknown", TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT, None, None, None)
         )
-        if depth_visibility.status == "occluded":
+        if depth_visibility.status == "occluded" and not relaxed:
             continue
+        depth_weight = 0.7 if depth_visibility.status == "occluded" else depth_visibility.weight
 
         visible_point_count = len(projected_points)
         score = (
             center_bias
             * (visible_point_count / len(region_points))
             * max(facing, 0.15)
-            * depth_visibility.weight
+            * depth_weight
             / max(depth, 0.2)
         )
         candidates.append(TextureProjectionCandidate(
@@ -6330,6 +6532,63 @@ def direct_projected_texture_sample(
     )
 
 
+def dense_single_view_texture_sample(
+    world_point: tuple[float, float, float],
+    candidates: list[TextureProjectionCandidate],
+) -> TextureBlendResult:
+    rejected_edge_count = 0
+    rejected_invalid_projection_count = 0
+    depth_tested_count = 0
+    missing_depth_count = 0
+
+    for candidate in candidates[:1]:
+        keyframe = candidate.keyframe
+        projection = project_world_point(world_point, keyframe)
+        if projection is None:
+            rejected_invalid_projection_count += 1
+            continue
+
+        u, v, _depth = projection
+        edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
+        if edge_margin < DENSE_SINGLE_VIEW_EDGE_MARGIN_PIXELS:
+            rejected_edge_count += 1
+            continue
+
+        depth_visibility = depth_visibility_for_world_point(world_point, keyframe)
+        if depth_visibility.status == "unknown":
+            missing_depth_count += 1
+        else:
+            depth_tested_count += 1
+
+        return TextureBlendResult(
+            sample_image_bilinear(keyframe, u, v),
+            1,
+            (candidate.keyframe_debug_id,),
+            0,
+            0,
+            rejected_edge_count,
+            0,
+            rejected_invalid_projection_count,
+            0,
+            depth_tested_count,
+            missing_depth_count,
+        )
+
+    return TextureBlendResult(
+        FALLBACK_COLOR,
+        0,
+        (),
+        0,
+        0,
+        rejected_edge_count,
+        0,
+        rejected_invalid_projection_count,
+        0,
+        depth_tested_count,
+        missing_depth_count,
+    )
+
+
 def direct_projected_color_for_point(
     world_point: tuple[float, float, float],
     keyframes: list[ProjectionKeyframe],
@@ -6415,6 +6674,64 @@ def direct_projected_surface_color(
     return best_color, best_key
 
 
+def dense_single_view_surface_color(
+    world_point: tuple[float, float, float],
+    normal: tuple[float, float, float],
+    keyframes: list[ProjectionKeyframe],
+) -> tuple[tuple[int, int, int], str] | None:
+    best_score = -math.inf
+    best_color: tuple[int, int, int] | None = None
+    best_key: str | None = None
+    surface_normal = normalize(normal)
+    for keyframe in keyframes:
+        projection = project_world_point(world_point, keyframe)
+        if projection is None:
+            continue
+
+        u, v, depth = projection
+        edge_margin = min(u, v, keyframe.width - u, keyframe.height - v)
+        if edge_margin < DENSE_SINGLE_VIEW_EDGE_MARGIN_PIXELS:
+            continue
+
+        facing = 0.25
+        if surface_normal != (0.0, 0.0, 0.0):
+            view_vector = normalize(subtract(keyframe.camera_position, world_point))
+            facing = abs(dot(surface_normal, view_vector))
+            if facing < DENSE_SINGLE_VIEW_MIN_FACING:
+                continue
+
+        center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
+        score = center_bias * max(facing, 0.12) / max(depth, 0.2)
+        if score > best_score:
+            best_score = score
+            best_color = sample_image_bilinear(keyframe, u, v)
+            best_key = keyframe.debug_id
+
+    if best_color is None or best_key is None:
+        return None
+    return best_color, best_key
+
+
+def average_dense_single_view_surface_color(
+    points: list[tuple[float, float, float]],
+    normal: tuple[float, float, float],
+    keyframes: list[ProjectionKeyframe],
+) -> tuple[int, int, int] | None:
+    colors = [
+        sample[0] for point in points
+        if (sample := dense_single_view_surface_color(point, normal, keyframes)) is not None
+    ]
+    if not colors:
+        return None
+
+    count = len(colors)
+    return (
+        clamp_color(sum(color[0] for color in colors) / count),
+        clamp_color(sum(color[1] for color in colors) / count),
+        clamp_color(sum(color[2] for color in colors) / count),
+    )
+
+
 def average_direct_projected_surface_color(
     points: list[tuple[float, float, float]],
     normal: tuple[float, float, float],
@@ -6475,11 +6792,12 @@ def rasterize_planar_chart_texture(
             accepted_count = 0
             if candidates:
                 world_point = planar_chart_point(chart, x + 0.5, y + 0.5)
-                blend = (
-                    direct_projected_texture_sample(world_point, candidates)
-                    if projection_mode == "direct"
-                    else blend_projected_texture_sample(world_point, candidates)
-                )
+                if projection_mode == "dense_single_view":
+                    blend = dense_single_view_texture_sample(world_point, candidates)
+                elif projection_mode == "direct":
+                    blend = direct_projected_texture_sample(world_point, candidates)
+                else:
+                    blend = blend_projected_texture_sample(world_point, candidates)
                 accepted_count = blend.accepted_sample_count
                 if accepted_count > 0:
                     color = blend.color
@@ -6852,6 +7170,7 @@ def rasterize_face_texture(
     face_vertices: list[tuple[float, float, float]],
     candidates: list[TextureProjectionCandidate],
     fallback_color: Callable[[], tuple[int, int, int]],
+    projection_mode: str = "blend",
 ) -> dict:
     min_x = max(0, int(math.floor(min(point[0] for point in atlas_triangle))))
     max_x = int(math.ceil(max(point[0] for point in atlas_triangle)))
@@ -6882,7 +7201,12 @@ def rasterize_face_texture(
             color: tuple[int, int, int] | None = None
             if candidates:
                 world_point = interpolate_triangle(face_vertices, bary)
-                blend = blend_projected_texture_sample(world_point, candidates)
+                if projection_mode == "dense_single_view":
+                    blend = dense_single_view_texture_sample(world_point, candidates)
+                elif projection_mode == "direct":
+                    blend = direct_projected_texture_sample(world_point, candidates)
+                else:
+                    blend = blend_projected_texture_sample(world_point, candidates)
                 accepted_count = blend.accepted_sample_count
                 if accepted_count > 0:
                     color = blend.color
@@ -6942,7 +7266,7 @@ def rasterize_face_texture(
 def blend_projected_texture_sample(
     world_point: tuple[float, float, float],
     candidates: list[TextureProjectionCandidate],
-) -> dict:
+) -> TextureBlendResult:
     samples: list[tuple[float, tuple[int, int, int], str]] = []
     rejected_overexposed_count = 0
     rejected_underexposed_count = 0

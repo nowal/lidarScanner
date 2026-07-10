@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import struct
+from array import array
 from io import BytesIO
 
 import pytest
@@ -826,12 +827,15 @@ async def test_textured_obj_uses_planar_chart_for_large_wall(monkeypatch, tmp_pa
     assert atlas["enabled"] is True
     assert atlas["chartedFaceCount"] == stats["faceCount"]
     assert chart["sampleStride"] == 2
-    assert chart["projectionMode"] == "direct"
+    assert chart["projectionMode"] == "dense_single_view"
     assert chart["rasterizedPixelCount"] > 0
     assert stats["diagnostics"]["textureAtlas"]["unobservedColor"] == list(pipeline.TEXTURE_UNOBSERVED_COLOR)
     assert stats["diagnostics"]["processing"]["planarChartCount"] == 1
     assert stats["diagnostics"]["processing"]["planarChartRasterStride"] == 2
     assert stats["diagnostics"]["processing"]["planarChartProjectionMode"] == "direct"
+    assert stats["diagnostics"]["processing"]["activeProjectionMode"] == "dense_single_view"
+    assert stats["diagnostics"]["processing"]["denseSingleViewTexture"] is True
+    assert stats["diagnostics"]["denseSingleViewTexture"]["selectedKeyframeId"] == "wall"
     assert stats["projectionCoverage"] == 1.0
 
 
@@ -908,10 +912,89 @@ async def test_fast_planar_chart_uses_single_owner_keyframe(monkeypatch, tmp_pat
     chart = stats["atlasLayout"]["charts"][0]
     contributions = stats["diagnostics"]["projection"]["keyframeContributionCounts"]
 
-    assert chart["candidateKeyframeCount"] == 2
+    assert chart["candidateKeyframeCount"] == 1
     assert chart["rasterCandidateKeyframeCount"] == 1
     assert chart["ownerKeyframeId"] == "red-owner"
+    assert chart["projectionMode"] == "dense_single_view"
+    assert [item["id"] for item in stats["diagnostics"]["keyframes"]] == ["red-owner", "green-secondary"]
+    assert stats["diagnostics"]["processing"]["sourceKeyframeCount"] == 2
+    assert stats["diagnostics"]["processing"]["activeTextureKeyframeCount"] == 1
+    assert stats["diagnostics"]["denseSingleViewTexture"]["selectedKeyframeId"] == "red-owner"
     assert {item["keyframe"] for item in contributions} == {"red-owner"}
+
+
+@pytest.mark.asyncio
+async def test_fast_dense_single_view_projects_white_pixels_even_when_depth_occludes(tmp_path):
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    image_intrinsics = [
+        100, 0, 0,
+        0, 100, 0,
+        50, 50, 1,
+    ]
+    depth_intrinsics = [
+        4, 0, 0,
+        0, 4, 0,
+        2, 2, 1,
+    ]
+    image = Image.new("RGB", (100, 100), (250, 250, 250))
+    depth_frame = pipeline.ProjectionDepthFrame(
+        id="white-depth",
+        color_keyframe_id="white-keyframe",
+        width=4,
+        height=4,
+        world_to_camera=pipeline.invert_rigid_transform(transform),
+        intrinsics=depth_intrinsics,
+        depth_values=array("f", [0.1] * 16),
+        confidence_values=bytes([2] * 16),
+    )
+    keyframes = [
+        pipeline.ProjectionKeyframe(
+            image=image,
+            width=image.width,
+            height=image.height,
+            world_to_camera=pipeline.invert_rigid_transform(transform),
+            camera_position=(0, 0, 0),
+            intrinsics=image_intrinsics,
+            pixels=image.load(),
+            id="white-keyframe",
+            depth_frame=depth_frame,
+        )
+    ]
+    mesh = pipeline.FusedMesh(
+        vertices=[
+            (-0.2, -0.2, -1.0),
+            (0.2, -0.2, -1.0),
+            (-0.2, 0.2, -1.0),
+        ],
+        faces=[(0, 1, 2)],
+        stats={"geometrySource": "white_occluded_test"},
+    )
+
+    stats = await pipeline.write_textured_obj(
+        mesh=mesh,
+        keyframes=keyframes,
+        output_obj_path=tmp_path / "textured.obj",
+        output_mtl_path=tmp_path / "textured.mtl",
+        output_texture_path=tmp_path / "texture.png",
+        output_debug_path=tmp_path / "debug.json",
+        profile=pipeline.PROCESSING_PROFILES["fast_onboarding"],
+    )
+
+    projection = stats["diagnostics"]["projection"]
+    dense_stats = stats["diagnostics"]["denseSingleViewTexture"]
+
+    assert stats["projectionCoverage"] == 1.0
+    assert projection["singleSamplePixelCount"] > 0
+    assert projection["rejectedOverexposedSampleCount"] == 0
+    assert projection["rejectedOccludedSampleCount"] == 0
+    assert projection["depthTestedSampleCount"] > 0
+    assert dense_stats["selectedKeyframeId"] == "white-keyframe"
+    assert dense_stats["candidates"][0]["occludedFaceCenterCount"] == 1
 
 
 def test_planar_chart_local_fill_repairs_small_holes():
@@ -1615,6 +1698,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_two_paired_rgbd_
         assert rgbd_stats["profile"]["maxRgbdFrames"] == 2
         assert rgbd_stats["profile"]["useRgbdGeometry"] is False
         assert rgbd_stats["profile"]["preserveTextureRenderMesh"] is True
+        assert rgbd_stats["profile"]["denseSingleViewTexture"] is True
         assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["profile"]["textureTsdfRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["depthFrameCount"] == 2
@@ -1658,6 +1742,14 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_two_paired_rgbd_
         assert texture_debug["geometry"]["geometryPreserved"] is True
         assert len(texture_debug["perKeyframeProjection"]) == 2
         assert texture_debug["projection"]["projectionCoverage"] > 0
+        assert texture_debug["processing"]["denseSingleViewTexture"] is True
+        assert texture_debug["processing"]["sourceKeyframeCount"] == 2
+        assert texture_debug["processing"]["activeTextureKeyframeCount"] == 1
+        assert texture_debug["processing"]["activeProjectionMode"] == "dense_single_view"
+        assert texture_debug["denseSingleViewTexture"]["selectedKeyframeId"] in keyframe_selection["selectedKeyframeIds"]
+        assert texture_debug["denseSingleViewTexture"]["bakedKeyframeIds"] == [
+            texture_debug["denseSingleViewTexture"]["selectedKeyframeId"]
+        ]
 
         overlay = await client.get(f"/api/v1/jobs/{job_id}/result/two_keyframe_projection_0.png", headers=headers)
         assert overlay.status_code == 200
