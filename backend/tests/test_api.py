@@ -827,15 +827,16 @@ async def test_textured_obj_uses_planar_chart_for_large_wall(monkeypatch, tmp_pa
     assert atlas["enabled"] is True
     assert atlas["chartedFaceCount"] == stats["faceCount"]
     assert chart["sampleStride"] == 2
-    assert chart["projectionMode"] == "dense_single_view"
+    assert chart["projectionMode"] == "direct"
     assert chart["rasterizedPixelCount"] > 0
     assert stats["diagnostics"]["textureAtlas"]["unobservedColor"] == list(pipeline.TEXTURE_UNOBSERVED_COLOR)
     assert stats["diagnostics"]["processing"]["planarChartCount"] == 1
     assert stats["diagnostics"]["processing"]["planarChartRasterStride"] == 2
     assert stats["diagnostics"]["processing"]["planarChartProjectionMode"] == "direct"
-    assert stats["diagnostics"]["processing"]["activeProjectionMode"] == "dense_single_view"
-    assert stats["diagnostics"]["processing"]["denseSingleViewTexture"] is True
-    assert stats["diagnostics"]["denseSingleViewTexture"]["selectedKeyframeId"] == "wall"
+    assert stats["diagnostics"]["processing"]["activeProjectionMode"] == "direct"
+    assert stats["diagnostics"]["processing"]["denseSingleViewTexture"] is False
+    assert stats["diagnostics"]["summary"]["selectedTextureKeyframes"] == ["wall"]
+    assert stats["diagnostics"]["summary"]["perChartOwnerFrames"][0]["ownerKeyframeId"] == "wall"
     assert stats["projectionCoverage"] == 1.0
 
 
@@ -912,19 +913,20 @@ async def test_fast_planar_chart_uses_single_owner_keyframe(monkeypatch, tmp_pat
     chart = stats["atlasLayout"]["charts"][0]
     contributions = stats["diagnostics"]["projection"]["keyframeContributionCounts"]
 
-    assert chart["candidateKeyframeCount"] == 1
+    assert chart["candidateKeyframeCount"] == 2
     assert chart["rasterCandidateKeyframeCount"] == 1
     assert chart["ownerKeyframeId"] == "red-owner"
-    assert chart["projectionMode"] == "dense_single_view"
+    assert chart["projectionMode"] == "direct"
     assert [item["id"] for item in stats["diagnostics"]["keyframes"]] == ["red-owner", "green-secondary"]
     assert stats["diagnostics"]["processing"]["sourceKeyframeCount"] == 2
-    assert stats["diagnostics"]["processing"]["activeTextureKeyframeCount"] == 1
-    assert stats["diagnostics"]["denseSingleViewTexture"]["selectedKeyframeId"] == "red-owner"
+    assert stats["diagnostics"]["processing"]["activeTextureKeyframeCount"] == 2
+    assert stats["diagnostics"]["processing"]["denseSingleViewTexture"] is False
+    assert stats["diagnostics"]["summary"]["perChartOwnerFrames"][0]["ownerKeyframeId"] == "red-owner"
     assert {item["keyframe"] for item in contributions} == {"red-owner"}
 
 
 @pytest.mark.asyncio
-async def test_fast_dense_single_view_projects_white_pixels_even_when_depth_occludes(tmp_path):
+async def test_fast_direct_projection_rejects_occluded_samples_and_stays_neutral(tmp_path):
     transform = [
         1, 0, 0, 0,
         0, 1, 0, 0,
@@ -986,15 +988,16 @@ async def test_fast_dense_single_view_projects_white_pixels_even_when_depth_occl
     )
 
     projection = stats["diagnostics"]["projection"]
-    dense_stats = stats["diagnostics"]["denseSingleViewTexture"]
+    texture = Image.open(tmp_path / "texture.png")
+    pixels = texture.load()
 
-    assert stats["projectionCoverage"] == 1.0
-    assert projection["singleSamplePixelCount"] > 0
-    assert projection["rejectedOverexposedSampleCount"] == 0
-    assert projection["rejectedOccludedSampleCount"] == 0
-    assert projection["depthTestedSampleCount"] > 0
-    assert dense_stats["selectedKeyframeId"] == "white-keyframe"
-    assert dense_stats["candidates"][0]["occludedFaceCenterCount"] == 1
+    assert stats["projectionCoverage"] == 0.0
+    assert projection["singleSamplePixelCount"] == 0
+    assert projection["rejectedOccludedSampleCount"] > 0
+    assert projection["depthVisibilityDecisionCount"] >= projection["rejectedOccludedSampleCount"]
+    assert stats["diagnostics"]["summary"]["rejectedOccludedSampleCount"] == projection["rejectedOccludedSampleCount"]
+    assert stats["diagnostics"]["summary"]["unobservedTexelRatio"] > 0
+    assert pixels[stats["tilePadding"] + 1, stats["tilePadding"] + 1] == pipeline.TEXTURE_UNOBSERVED_COLOR
 
 
 def test_rgbd_hero_patch_depth_preparation_accepts_low_confidence_and_fills_holes():
@@ -1315,7 +1318,7 @@ def test_planar_chart_local_fill_does_not_smear_across_large_holes():
     assert texture_pixels[47, 4] == fallback_color
 
 
-def test_direct_planar_chart_fills_far_owner_projection_holes_with_chart_color():
+def test_direct_planar_chart_leaves_far_owner_projection_holes_neutral():
     transform = [
         1, 0, 0, 0,
         0, 1, 0, 0,
@@ -1367,11 +1370,7 @@ def test_direct_planar_chart_fills_far_owner_projection_holes_with_chart_color()
         mask.load(),
         chart,
         candidates,
-        lambda: pipeline.average_direct_projected_surface_color(
-            pipeline.chart_region_points(chart),
-            chart.normal,
-            [keyframe],
-        ) or pipeline.TEXTURE_UNOBSERVED_COLOR,
+        lambda: pipeline.TEXTURE_UNOBSERVED_COLOR,
         sample_stride=1,
         projection_mode="direct",
     )
@@ -1382,7 +1381,7 @@ def test_direct_planar_chart_fills_far_owner_projection_holes_with_chart_color()
     assert stats["unresolvedFallbackPixelCount"] > 0
     assert stats["fallbackPixelCount"] == stats["unresolvedFallbackPixelCount"]
     assert stats["maxFillRadius"] == pipeline.TEXTURE_PLANAR_CHART_LOCAL_FILL_MAX_RADIUS_PIXELS
-    assert texture.load()[0, 6] == (190, 130, 80)
+    assert texture.load()[0, 6] == pipeline.TEXTURE_UNOBSERVED_COLOR
 
 
 def test_direct_planar_chart_secondary_keyframe_fills_large_owned_hole():
@@ -1844,7 +1843,7 @@ async def test_rgbd_one_keyframe_diagnostic_exports_alignment_artifacts():
 
 
 @pytest.mark.asyncio
-async def test_fast_onboarding_profile_textures_arkit_mesh_with_three_paired_rgbd_frames():
+async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_geometry():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = auth_headers()
@@ -1949,40 +1948,33 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_three_paired_rgb
         assert rgbd_stats["geometrySource"] == "arkit_mesh_anchor_fusion"
         assert rgbd_stats["geometryPreserved"] is True
         assert rgbd_stats["profile"]["name"] == "fast_onboarding"
-        assert rgbd_stats["profile"]["maxKeyframes"] == 3
-        assert rgbd_stats["profile"]["maxDepthFrames"] == 3
-        assert rgbd_stats["profile"]["maxRgbdFrames"] == 3
+        assert rgbd_stats["profile"]["maxKeyframes"] == 12
+        assert rgbd_stats["profile"]["maxDepthFrames"] == 12
+        assert rgbd_stats["profile"]["maxRgbdFrames"] == 0
         assert rgbd_stats["profile"]["useRgbdGeometry"] is False
         assert rgbd_stats["profile"]["preserveTextureRenderMesh"] is True
-        assert rgbd_stats["profile"]["denseSingleViewTexture"] is True
-        assert rgbd_stats["profile"]["rgbdHeroPatchTexture"] is True
+        assert rgbd_stats["profile"]["denseSingleViewTexture"] is False
+        assert rgbd_stats["profile"]["rgbdHeroPatchTexture"] is False
         assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["profile"]["textureTsdfRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
-        assert rgbd_stats["depthFrameCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
-        assert rgbd_stats["keyframeCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
+        assert rgbd_stats["depthFrameCount"] == 12
+        assert rgbd_stats["keyframeCount"] == 12
 
         keyframe_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/keyframe_selection.json", headers=headers)).json()
         assert keyframe_selection["originalKeyframeCount"] == 55
-        assert keyframe_selection["selectedKeyframeCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
-        assert keyframe_selection["strategy"] == "rgbd_hero_patch_candidate_pool"
-        assert len(keyframe_selection["selectedKeyframeIds"]) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
-        assert len(keyframe_selection["selectedPairDepthFrameIds"]) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
-        assert keyframe_selection["pairSelectionStrategy"] == "first_pair_plus_timed_rgbd_hero_patch_candidate_pool"
-        assert keyframe_selection["candidatePoolLimit"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
-        assert 2.0 <= keyframe_selection["poseDelta"]["timeDeltaSeconds"] <= 3.25
-        assert len(keyframe_selection["poseDeltas"]) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE - 1
-        assert any(item["timeDeltaSeconds"] >= 3.75 for item in keyframe_selection["poseDeltas"])
+        assert keyframe_selection["selectedKeyframeCount"] == 12
+        assert keyframe_selection["strategy"] == "pose_diverse_backend_subset"
+        assert len(keyframe_selection["selectedKeyframeIds"]) == 12
 
         depth_selection = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_selection.json", headers=headers)).json()
         assert depth_selection["originalDepthFrameCount"] == 55
         assert depth_selection["geometryDepthSelection"] == "selected_keyframe_pairs"
-        assert depth_selection["selectedDepthFrameCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
-        assert depth_selection["selectedKeyframeIds"] == keyframe_selection["selectedKeyframeIds"]
-        assert depth_selection["selectedDepthFrameIds"] == keyframe_selection["selectedPairDepthFrameIds"]
+        assert depth_selection["selectedDepthFrameCount"] == 12
+        assert set(depth_selection["selectedDepthFrameIds"])
 
         depth_manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/depth_frame_manifest.json", headers=headers)).json()
-        assert len(depth_manifest) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
-        assert [frame["colorKeyframeId"] for frame in depth_manifest] == keyframe_selection["selectedKeyframeIds"]
+        assert len(depth_manifest) == 12
+        assert {frame["colorKeyframeId"] for frame in depth_manifest}.issubset(set(keyframe_selection["selectedKeyframeIds"]))
 
         fused_mesh = await client.get(f"/api/v1/jobs/{job_id}/result/fused_mesh.obj", headers=headers)
         arkit_mesh = await client.get(f"/api/v1/jobs/{job_id}/result/arkit_fused_mesh.obj", headers=headers)
@@ -1995,49 +1987,45 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_with_three_paired_rgb
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["geometryPreserved"] is True
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
         assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
-        assert manifest["artifacts"]["texturedObj"]["stats"]["uvStrategy"] == "rgbd_hero_patch_direct_image_uv"
-        assert manifest["artifacts"]["texturedObj"]["stats"]["faceCount"] > manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
+        assert manifest["artifacts"]["texturedObj"]["stats"]["uvStrategy"] == "render_mesh_per_face_atlas_padded"
+        assert manifest["artifacts"]["texturedObj"]["stats"]["faceCount"] == manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
+        assert manifest["artifacts"]["texturedObj"]["stats"]["texturedFaceCount"] <= manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
         assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["used"] is False
-        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["enabled"] is True
-        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["patchCount"] == 3
+        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["geometryPreserved"] is True
+        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["enabled"] is False
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
 
         texture_debug = (await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug.json", headers=headers)).json()
         assert [item["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedKeyframeIds"]
-        assert [item["depthFrame"]["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedPairDepthFrameIds"]
-        assert texture_debug["geometry"]["geometrySource"] == "rgbd_hero_patch_depth_mesh"
-        assert len(texture_debug["perKeyframeProjection"]) == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
+        assert [item["depthFrame"]["id"] for item in texture_debug["keyframes"]] == depth_selection["selectedDepthFrameIds"]
+        assert texture_debug["geometry"]["geometrySource"] == "arkit_mesh_anchor_fusion"
+        assert texture_debug["geometry"]["geometryPreserved"] is True
+        assert len(texture_debug["perKeyframeProjection"]) == 12
         assert texture_debug["projection"]["projectionCoverage"] > 0
-        assert texture_debug["processing"]["denseSingleViewTexture"] is True
-        assert texture_debug["processing"]["rgbdHeroPatchTexture"] is True
-        assert texture_debug["processing"]["sourceKeyframeCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
-        assert texture_debug["processing"]["activeTextureKeyframeCount"] == 3
-        assert texture_debug["processing"]["activeProjectionMode"] == "rgbd_hero_patch"
-        assert texture_debug["rgbdHeroPatch"]["patchCount"] == 3
-        assert len(texture_debug["rgbdHeroPatch"]["selectedKeyframeIds"]) == 3
-        assert len(texture_debug["rgbdHeroPatch"]["selectedDepthFrameIds"]) == 3
-        assert set(texture_debug["rgbdHeroPatch"]["selectedKeyframeIds"]).issubset(keyframe_selection["selectedKeyframeIds"])
-        assert set(texture_debug["rgbdHeroPatch"]["selectedDepthFrameIds"]).issubset(keyframe_selection["selectedPairDepthFrameIds"])
-        assert texture_debug["rgbdHeroPatch"]["selection"]["strategy"] == "quality_aware_primary_plus_timed_supplemental_rgbd_hero_patches"
-        assert texture_debug["rgbdHeroPatch"]["selection"]["candidatePoolCount"] == pipeline.RGBD_HERO_PATCH_CANDIDATE_POOL_SIZE
-        assert texture_debug["rgbdHeroPatch"]["depthPreparation"]["confidenceThreshold"] == "accept_all_nonzero_depth_values"
-        assert texture_debug["rgbdHeroPatch"]["mesh"]["acceptedFaceCount"] > 0
-        assert len(texture_debug["rgbdHeroPatch"]["patches"]) == 3
-        assert texture_debug["textureAtlas"]["width"] == 100
-        assert texture_debug["textureAtlas"]["height"] == 300
-        assert texture_debug["rgbdHeroPatch"]["atlasLayout"]["patches"][1]["atlasRect"]["y"] == 100
-        assert texture_debug["rgbdHeroPatch"]["atlasLayout"]["patches"][2]["atlasRect"]["y"] == 200
+        assert texture_debug["projection"]["rejectedDepthEdgeSampleCount"] >= 0
+        assert texture_debug["processing"]["denseSingleViewTexture"] is False
+        assert texture_debug["processing"]["rgbdHeroPatchTexture"] is False
+        assert texture_debug["processing"]["sourceKeyframeCount"] == 12
+        assert texture_debug["processing"]["activeTextureKeyframeCount"] == 12
+        assert texture_debug["processing"]["activeProjectionMode"] == "direct"
+        assert "rgbdHeroPatch" not in texture_debug
+        assert texture_debug["summary"]["selectedTextureKeyframes"]
+        assert texture_debug["summary"]["rejectedOccludedSampleCount"] == texture_debug["projection"]["rejectedOccludedSampleCount"]
+        assert texture_debug["summary"]["rejectedDepthEdgeSampleCount"] == texture_debug["projection"]["rejectedDepthEdgeSampleCount"]
+        assert 0 <= texture_debug["summary"]["unobservedTexelRatio"] <= 1
+        assert texture_debug["summary"]["textureCoverage"] == texture_debug["textureAtlas"]["projectedRasterPixelRatio"]
 
         textured_obj = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.obj", headers=headers)
         textured_mtl = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.mtl", headers=headers)
         texture_png = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh_texture.png", headers=headers)
-        assert "o rgbd_hero_patch_mesh" in textured_obj.text
+        assert "o textured_mesh" in textured_obj.text
+        assert textured_obj.text.count("\nf ") == manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
+        assert "rgbd_hero_patch" not in textured_obj.text
         assert "map_Kd textured_mesh_texture.png" in textured_mtl.text
         assert texture_png.headers["content-type"] == "image/png"
 
         overlay = await client.get(f"/api/v1/jobs/{job_id}/result/two_keyframe_projection_0.png", headers=headers)
-        assert overlay.status_code == 200
-        assert overlay.headers["content-type"] == "image/png"
+        assert overlay.status_code == 404
 
         timings = (await client.get(f"/api/v1/jobs/{job_id}/result/stage_timings.json", headers=headers)).json()
         assert timings["jobId"] == job_id

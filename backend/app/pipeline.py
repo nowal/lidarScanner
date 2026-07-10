@@ -134,6 +134,7 @@ class TextureBlendResult(NamedTuple):
     rejected_edge_sample_count: int
     rejected_grazing_sample_count: int
     rejected_invalid_projection_sample_count: int
+    rejected_depth_edge_sample_count: int
     rejected_occluded_sample_count: int
     depth_tested_sample_count: int
     missing_depth_sample_count: int
@@ -154,6 +155,7 @@ class TextureFaceResult(NamedTuple):
     rejected_edge_sample_count: int
     rejected_grazing_sample_count: int
     rejected_invalid_projection_sample_count: int
+    rejected_depth_edge_sample_count: int
     rejected_occluded_sample_count: int
     depth_tested_sample_count: int
     missing_depth_sample_count: int
@@ -283,6 +285,8 @@ TEXTURE_BLEND_MIN_FACING = 0.18
 TEXTURE_BLEND_EDGE_MARGIN_RATIO = 0.018
 TEXTURE_DEPTH_OCCLUSION_BASE_TOLERANCE_METERS = 0.08
 TEXTURE_DEPTH_OCCLUSION_RELATIVE_TOLERANCE = 0.035
+TEXTURE_DEPTH_EDGE_ABSOLUTE_METERS = 0.12
+TEXTURE_DEPTH_EDGE_RELATIVE = 0.08
 TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT = 0.72
 TEXTURE_DEPTH_MISMATCH_MIN_WEIGHT = 0.35
 TEXTURE_DEPTH_NEIGHBORHOOD_RADIUS = 1
@@ -350,9 +354,9 @@ class ProcessingProfile:
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
     "fast_onboarding": ProcessingProfile(
         name="fast_onboarding",
-        max_keyframes=3,
-        max_depth_frames=3,
-        max_rgbd_frames=3,
+        max_keyframes=12,
+        max_depth_frames=12,
+        max_rgbd_frames=0,
         use_rgbd_geometry=False,
         write_vertex_colored_debug=False,
         write_texture_debug_preview=False,
@@ -362,8 +366,8 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         planar_chart_projection_mode="direct",
         fallback_texture_face_limit=FAST_ONBOARDING_FALLBACK_TEXTURE_FACE_LIMIT,
         preserve_texture_render_mesh=True,
-        dense_single_view_texture=True,
-        rgbd_hero_patch_texture=True,
+        dense_single_view_texture=False,
+        rgbd_hero_patch_texture=False,
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",
@@ -5768,6 +5772,7 @@ async def write_textured_obj(
     rejected_edge_sample_count = 0
     rejected_grazing_sample_count = 0
     rejected_invalid_projection_sample_count = 0
+    rejected_depth_edge_sample_count = 0
     rejected_occluded_sample_count = 0
     depth_tested_sample_count = 0
     missing_depth_sample_count = 0
@@ -5823,6 +5828,7 @@ async def write_textured_obj(
         rejected_edge_sample_count = parallel_result["rejected_edge_sample_count"]
         rejected_grazing_sample_count = parallel_result["rejected_grazing_sample_count"]
         rejected_invalid_projection_sample_count = parallel_result["rejected_invalid_projection_sample_count"]
+        rejected_depth_edge_sample_count = parallel_result["rejected_depth_edge_sample_count"]
         rejected_occluded_sample_count = parallel_result["rejected_occluded_sample_count"]
         depth_tested_sample_count = parallel_result["depth_tested_sample_count"]
         missing_depth_sample_count = parallel_result["missing_depth_sample_count"]
@@ -5900,10 +5906,7 @@ async def write_textured_obj(
                             or TEXTURE_UNOBSERVED_COLOR
                         )
                     elif active_projection_mode == "direct":
-                        fallback_color = (
-                            average_direct_projected_surface_color(region_points, chart.normal, keyframes)
-                            or TEXTURE_UNOBSERVED_COLOR
-                        )
+                        fallback_color = TEXTURE_UNOBSERVED_COLOR
                     else:
                         fallback_color = average_projected_color(region_points, keyframes) or FALLBACK_COLOR
                 return fallback_color
@@ -5940,6 +5943,7 @@ async def write_textured_obj(
             rejected_edge_sample_count += raster_stats["rejectedEdgeSampleCount"]
             rejected_grazing_sample_count += raster_stats["rejectedGrazingSampleCount"]
             rejected_invalid_projection_sample_count += raster_stats["rejectedInvalidProjectionSampleCount"]
+            rejected_depth_edge_sample_count += raster_stats["rejectedDepthEdgeSampleCount"]
             rejected_occluded_sample_count += raster_stats["rejectedOccludedSampleCount"]
             depth_tested_sample_count += raster_stats["depthTestedSampleCount"]
             missing_depth_sample_count += raster_stats["missingDepthSampleCount"]
@@ -5947,11 +5951,33 @@ async def write_textured_obj(
                 textured_face_count += len(chart.face_indices)
             else:
                 fallback_face_count += len(chart.face_indices)
+            owner_angle_degrees = None
+            owner_depth_error_meters = None
+            owner_depth_status = None
+            if owner_candidate is not None:
+                center_point = region_points[0]
+                owner_angle_degrees = round(
+                    math.degrees(math.acos(clamp_float(abs(owner_candidate.facing), -1.0, 1.0))),
+                    3,
+                )
+                owner_depth_visibility = depth_visibility_for_world_point(center_point, owner_candidate.keyframe)
+                owner_depth_status = owner_depth_visibility.status
+                if (
+                    owner_depth_visibility.projected_depth is not None
+                    and owner_depth_visibility.sampled_depth is not None
+                ):
+                    owner_depth_error_meters = round(
+                        abs(owner_depth_visibility.sampled_depth - owner_depth_visibility.projected_depth),
+                        4,
+                    )
             planar_chart_texture_stats.append({
                 **planar_chart_stats(chart),
                 "candidateKeyframeCount": len(all_candidates),
                 "rasterCandidateKeyframeCount": len(candidates),
                 "ownerKeyframeId": owner_candidate.keyframe_debug_id if owner_candidate is not None else None,
+                "ownerAngleDegrees": owner_angle_degrees,
+                "ownerDepthErrorMeters": owner_depth_error_meters,
+                "ownerDepthStatus": owner_depth_status,
                 "sampleStride": max(1, profile.planar_chart_raster_stride),
                 "projectionMode": active_projection_mode,
             })
@@ -6029,14 +6055,7 @@ async def write_textured_obj(
                             or TEXTURE_UNOBSERVED_COLOR
                         )
                     elif active_projection_mode == "direct":
-                        fallback_color = (
-                            average_direct_projected_surface_color(
-                                sample_points,
-                                face_normal,
-                                keyframes,
-                            )
-                            or TEXTURE_UNOBSERVED_COLOR
-                        )
+                        fallback_color = TEXTURE_UNOBSERVED_COLOR
                     else:
                         fallback_color = average_projected_color(face_vertices, keyframes) or FALLBACK_COLOR
                 return fallback_color
@@ -6070,6 +6089,7 @@ async def write_textured_obj(
             rejected_edge_sample_count += raster_stats["rejectedEdgeSampleCount"]
             rejected_grazing_sample_count += raster_stats["rejectedGrazingSampleCount"]
             rejected_invalid_projection_sample_count += raster_stats["rejectedInvalidProjectionSampleCount"]
+            rejected_depth_edge_sample_count += raster_stats["rejectedDepthEdgeSampleCount"]
             rejected_occluded_sample_count += raster_stats["rejectedOccludedSampleCount"]
             depth_tested_sample_count += raster_stats["depthTestedSampleCount"]
             missing_depth_sample_count += raster_stats["missingDepthSampleCount"]
@@ -6204,6 +6224,7 @@ async def write_textured_obj(
         rejected_edge_sample_count=rejected_edge_sample_count,
         rejected_grazing_sample_count=rejected_grazing_sample_count,
         rejected_invalid_projection_sample_count=rejected_invalid_projection_sample_count,
+        rejected_depth_edge_sample_count=rejected_depth_edge_sample_count,
         rejected_occluded_sample_count=rejected_occluded_sample_count,
         depth_tested_sample_count=depth_tested_sample_count,
         missing_depth_sample_count=missing_depth_sample_count,
@@ -6229,6 +6250,7 @@ async def write_textured_obj(
         "sourceKeyframeCount": len(source_keyframes),
         "activeTextureKeyframeCount": len(keyframes),
         "denseSingleViewTexture": dense_single_view_enabled,
+        "rgbdHeroPatchTexture": profile.rgbd_hero_patch_texture,
     }
     texture_diagnostics["geometry"] = texture_geometry_debug(mesh)
     texture_diagnostics["keyframes"] = projection_keyframe_debug_summaries(source_keyframes)
@@ -6246,15 +6268,18 @@ async def write_textured_obj(
         "edgeSampleCount": rejected_edge_sample_count,
         "grazingSampleCount": rejected_grazing_sample_count,
         "invalidProjectionSampleCount": rejected_invalid_projection_sample_count,
+        "depthEdgeSampleCount": rejected_depth_edge_sample_count,
         "occludedSampleCount": rejected_occluded_sample_count,
     }
     texture_diagnostics["projection"]["depthVisibilityStats"] = {
         "depthTestedSampleCount": depth_tested_sample_count,
         "missingDepthSampleCount": missing_depth_sample_count,
+        "depthEdgeSampleCount": rejected_depth_edge_sample_count,
         "occludedSampleCount": rejected_occluded_sample_count,
         "depthVisibilityDecisionCount": (
             depth_tested_sample_count
             + missing_depth_sample_count
+            + rejected_depth_edge_sample_count
             + rejected_occluded_sample_count
         ),
     }
@@ -6384,6 +6409,7 @@ async def rasterize_texture_atlas_parallel(
     rejected_edge_sample_count = 0
     rejected_grazing_sample_count = 0
     rejected_invalid_projection_sample_count = 0
+    rejected_depth_edge_sample_count = 0
     rejected_occluded_sample_count = 0
     depth_tested_sample_count = 0
     missing_depth_sample_count = 0
@@ -6438,6 +6464,7 @@ async def rasterize_texture_atlas_parallel(
             "rejected_edge_sample_count": rejected_edge_sample_count,
             "rejected_grazing_sample_count": rejected_grazing_sample_count,
             "rejected_invalid_projection_sample_count": rejected_invalid_projection_sample_count,
+            "rejected_depth_edge_sample_count": rejected_depth_edge_sample_count,
             "rejected_occluded_sample_count": rejected_occluded_sample_count,
             "depth_tested_sample_count": depth_tested_sample_count,
             "missing_depth_sample_count": missing_depth_sample_count,
@@ -6501,6 +6528,7 @@ async def rasterize_texture_atlas_parallel(
                     rejected_edge_sample_count += result.rejected_edge_sample_count
                     rejected_grazing_sample_count += result.rejected_grazing_sample_count
                     rejected_invalid_projection_sample_count += result.rejected_invalid_projection_sample_count
+                    rejected_depth_edge_sample_count += result.rejected_depth_edge_sample_count
                     rejected_occluded_sample_count += result.rejected_occluded_sample_count
                     depth_tested_sample_count += result.depth_tested_sample_count
                     missing_depth_sample_count += result.missing_depth_sample_count
@@ -6550,6 +6578,7 @@ async def rasterize_texture_atlas_parallel(
         "rejected_edge_sample_count": rejected_edge_sample_count,
         "rejected_grazing_sample_count": rejected_grazing_sample_count,
         "rejected_invalid_projection_sample_count": rejected_invalid_projection_sample_count,
+        "rejected_depth_edge_sample_count": rejected_depth_edge_sample_count,
         "rejected_occluded_sample_count": rejected_occluded_sample_count,
         "depth_tested_sample_count": depth_tested_sample_count,
         "missing_depth_sample_count": missing_depth_sample_count,
@@ -6681,6 +6710,7 @@ def rasterize_texture_face_for_worker(face_index: int) -> TextureFaceResult:
         rejected_edge_sample_count=raster_stats["rejectedEdgeSampleCount"],
         rejected_grazing_sample_count=raster_stats["rejectedGrazingSampleCount"],
         rejected_invalid_projection_sample_count=raster_stats["rejectedInvalidProjectionSampleCount"],
+        rejected_depth_edge_sample_count=raster_stats["rejectedDepthEdgeSampleCount"],
         rejected_occluded_sample_count=raster_stats["rejectedOccludedSampleCount"],
         depth_tested_sample_count=raster_stats["depthTestedSampleCount"],
         missing_depth_sample_count=raster_stats["missingDepthSampleCount"],
@@ -7296,6 +7326,7 @@ def build_texture_diagnostics(
     rejected_edge_sample_count: int,
     rejected_grazing_sample_count: int,
     rejected_invalid_projection_sample_count: int,
+    rejected_depth_edge_sample_count: int,
     rejected_occluded_sample_count: int,
     depth_tested_sample_count: int,
     missing_depth_sample_count: int,
@@ -7334,14 +7365,63 @@ def build_texture_diagnostics(
         + rejected_edge_sample_count
         + rejected_grazing_sample_count
         + rejected_invalid_projection_sample_count
+        + rejected_depth_edge_sample_count
         + rejected_occluded_sample_count
     )
-    depth_visibility_decision_count = depth_tested_sample_count + missing_depth_sample_count + rejected_occluded_sample_count
+    depth_visibility_decision_count = (
+        depth_tested_sample_count
+        + missing_depth_sample_count
+        + rejected_depth_edge_sample_count
+        + rejected_occluded_sample_count
+    )
+    atlas_charts = atlas_layout_stats.get("charts", []) if isinstance(atlas_layout_stats, dict) else []
+    per_chart_owner_frames = [
+        {
+            "chartId": chart.get("chartId"),
+            "ownerKeyframeId": chart.get("ownerKeyframeId"),
+        }
+        for chart in atlas_charts
+        if isinstance(chart, dict) and chart.get("ownerKeyframeId") is not None
+    ]
+    owner_angles = [
+        float(chart["ownerAngleDegrees"])
+        for chart in atlas_charts
+        if isinstance(chart, dict) and chart.get("ownerAngleDegrees") is not None
+    ]
+    owner_depth_errors = [
+        float(chart["ownerDepthErrorMeters"])
+        for chart in atlas_charts
+        if isinstance(chart, dict) and chart.get("ownerDepthErrorMeters") is not None
+    ]
+    selected_texture_keyframes = [
+        item["keyframe"]
+        for item in top_keyframe_counts(selected_keyframe_face_counts, value_label="faceCount")
+    ]
     diagnostics = {
         "version": "v2",
         "renderMesh": render_mesh_stats,
         "uvStrategy": uv_strategy,
         "atlasLayout": atlas_layout_stats,
+        "summary": {
+            "selectedTextureKeyframes": selected_texture_keyframes,
+            "perChartOwnerFrames": per_chart_owner_frames,
+            "rejectedOccludedSampleCount": rejected_occluded_sample_count,
+            "rejectedDepthEdgeSampleCount": rejected_depth_edge_sample_count,
+            "unobservedTexelRatio": round(fallback_raster_ratio, 4),
+            "atlasChartCount": int(atlas_layout_stats.get("chartCount", 0)) if isinstance(atlas_layout_stats, dict) else 0,
+            "planarChartCount": int(atlas_layout_stats.get("chartCount", 0)) if isinstance(atlas_layout_stats, dict) else 0,
+            "textureCoverage": round(raster_projection_ratio, 4),
+            "averageOwnerAngleDegrees": (
+                round(sum(owner_angles) / len(owner_angles), 3)
+                if owner_angles
+                else None
+            ),
+            "averageOwnerDepthErrorMeters": (
+                round(sum(owner_depth_errors) / len(owner_depth_errors), 4)
+                if owner_depth_errors
+                else None
+            ),
+        },
         "objSyntax": {
             "faceCount": face_count,
             "faceWithUVIndexCount": face_count,
@@ -7393,6 +7473,7 @@ def build_texture_diagnostics(
             "rejectedEdgeSampleCount": rejected_edge_sample_count,
             "rejectedGrazingSampleCount": rejected_grazing_sample_count,
             "rejectedInvalidProjectionSampleCount": rejected_invalid_projection_sample_count,
+            "rejectedDepthEdgeSampleCount": rejected_depth_edge_sample_count,
             "rejectedOccludedSampleCount": rejected_occluded_sample_count,
             "depthTestedSampleCount": depth_tested_sample_count,
             "missingDepthSampleCount": missing_depth_sample_count,
@@ -7574,6 +7655,7 @@ def per_keyframe_mesh_projection_stats(
         in_bounds_count = 0
         out_of_bounds_count = 0
         occluded_count = 0
+        depth_edge_count = 0
         depth_tested_count = 0
         missing_depth_count = 0
         unknown_depth_count = 0
@@ -7588,6 +7670,8 @@ def per_keyframe_mesh_projection_stats(
             depth_visibility = depth_visibility_for_world_point(center, keyframe)
             if depth_visibility.status == "occluded":
                 occluded_count += 1
+            elif depth_visibility.status == "depth_edge":
+                depth_edge_count += 1
             elif depth_visibility.status == "unknown":
                 unknown_depth_count += 1
             if depth_visibility.projected_depth is not None:
@@ -7603,6 +7687,7 @@ def per_keyframe_mesh_projection_stats(
             "outOfBoundsFaceCenterCount": out_of_bounds_count,
             "inBoundsRatio": round(in_bounds_count / max(sample_count, 1), 4),
             "occludedFaceCenterCount": occluded_count,
+            "depthEdgeFaceCenterCount": depth_edge_count,
             "unknownDepthFaceCenterCount": unknown_depth_count,
             "depthTestedFaceCenterCount": depth_tested_count,
             "missingDepthFaceCenterCount": missing_depth_count,
@@ -7838,9 +7923,7 @@ def texture_projection_candidates(
             continue
 
         depth_visibility = depth_visibility_for_world_point(center, keyframe)
-        if depth_visibility.status == "occluded" and not relaxed:
-            continue
-        depth_weight = 0.7 if depth_visibility.status == "occluded" else depth_visibility.weight
+        depth_weight = 0.05 if depth_visibility.status in {"occluded", "depth_edge"} else depth_visibility.weight
 
         score = (
             center_bias
@@ -7919,9 +8002,7 @@ def texture_projection_candidates_for_region(
             if project_world_point(center, keyframe) is not None
             else DepthVisibilityResult("unknown", TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT, None, None, None)
         )
-        if depth_visibility.status == "occluded" and not relaxed:
-            continue
-        depth_weight = 0.7 if depth_visibility.status == "occluded" else depth_visibility.weight
+        depth_weight = 0.05 if depth_visibility.status in {"occluded", "depth_edge"} else depth_visibility.weight
 
         visible_point_count = len(projected_points)
         score = (
@@ -7981,6 +8062,7 @@ def empty_texture_raster_stats() -> dict:
         "rejectedEdgeSampleCount": 0,
         "rejectedGrazingSampleCount": 0,
         "rejectedInvalidProjectionSampleCount": 0,
+        "rejectedDepthEdgeSampleCount": 0,
         "rejectedOccludedSampleCount": 0,
         "depthTestedSampleCount": 0,
         "missingDepthSampleCount": 0,
@@ -8008,6 +8090,7 @@ def merge_texture_raster_stats(total: dict, addition: dict) -> None:
         "rejectedEdgeSampleCount",
         "rejectedGrazingSampleCount",
         "rejectedInvalidProjectionSampleCount",
+        "rejectedDepthEdgeSampleCount",
         "rejectedOccludedSampleCount",
         "depthTestedSampleCount",
         "missingDepthSampleCount",
@@ -8033,6 +8116,10 @@ def direct_projected_texture_sample(
     rejected_edge_count = 0
     rejected_grazing_count = 0
     rejected_invalid_projection_count = 0
+    rejected_depth_edge_count = 0
+    rejected_occluded_count = 0
+    depth_tested_count = 0
+    missing_depth_count = 0
 
     for candidate in candidates[:TEXTURE_PLANAR_CHART_DIRECT_MAX_CANDIDATES]:
         if candidate.facing < TEXTURE_BLEND_MIN_FACING:
@@ -8051,6 +8138,18 @@ def direct_projected_texture_sample(
         if edge_margin < edge_threshold:
             rejected_edge_count += 1
             continue
+
+        depth_visibility = depth_visibility_for_world_point(world_point, keyframe)
+        if depth_visibility.status == "occluded":
+            rejected_occluded_count += 1
+            continue
+        if depth_visibility.status == "depth_edge":
+            rejected_depth_edge_count += 1
+            continue
+        if depth_visibility.status == "visible":
+            depth_tested_count += 1
+        else:
+            missing_depth_count += 1
 
         color = sample_image_bilinear(keyframe, u, v)
         luminance = rgb_luminance(color)
@@ -8071,9 +8170,10 @@ def direct_projected_texture_sample(
             rejected_edge_count,
             rejected_grazing_count,
             rejected_invalid_projection_count,
-            0,
-            0,
-            0,
+            rejected_depth_edge_count,
+            rejected_occluded_count,
+            depth_tested_count,
+            missing_depth_count,
         )
 
     return TextureBlendResult(
@@ -8085,9 +8185,10 @@ def direct_projected_texture_sample(
         rejected_edge_count,
         rejected_grazing_count,
         rejected_invalid_projection_count,
-        0,
-        0,
-        0,
+        rejected_depth_edge_count,
+        rejected_occluded_count,
+        depth_tested_count,
+        missing_depth_count,
     )
 
 
@@ -8097,6 +8198,8 @@ def dense_single_view_texture_sample(
 ) -> TextureBlendResult:
     rejected_edge_count = 0
     rejected_invalid_projection_count = 0
+    rejected_depth_edge_count = 0
+    rejected_occluded_count = 0
     depth_tested_count = 0
     missing_depth_count = 0
 
@@ -8114,10 +8217,16 @@ def dense_single_view_texture_sample(
             continue
 
         depth_visibility = depth_visibility_for_world_point(world_point, keyframe)
-        if depth_visibility.status == "unknown":
-            missing_depth_count += 1
-        else:
+        if depth_visibility.status == "occluded":
+            rejected_occluded_count += 1
+            continue
+        if depth_visibility.status == "depth_edge":
+            rejected_depth_edge_count += 1
+            continue
+        if depth_visibility.status == "visible":
             depth_tested_count += 1
+        else:
+            missing_depth_count += 1
 
         return TextureBlendResult(
             sample_image_bilinear(keyframe, u, v),
@@ -8128,7 +8237,8 @@ def dense_single_view_texture_sample(
             rejected_edge_count,
             0,
             rejected_invalid_projection_count,
-            0,
+            rejected_depth_edge_count,
+            rejected_occluded_count,
             depth_tested_count,
             missing_depth_count,
         )
@@ -8142,7 +8252,8 @@ def dense_single_view_texture_sample(
         rejected_edge_count,
         0,
         rejected_invalid_projection_count,
-        0,
+        rejected_depth_edge_count,
+        rejected_occluded_count,
         depth_tested_count,
         missing_depth_count,
     )
@@ -8165,6 +8276,10 @@ def direct_projected_color_for_point(
         if edge_margin < edge_threshold:
             continue
 
+        depth_visibility = depth_visibility_for_world_point(world_point, keyframe)
+        if depth_visibility.status in {"occluded", "depth_edge"}:
+            continue
+
         color = sample_image_bilinear(keyframe, u, v)
         luminance = rgb_luminance(color)
         detail_range = max(color) - min(color)
@@ -8174,7 +8289,7 @@ def direct_projected_color_for_point(
             continue
 
         center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
-        score = center_bias / max(depth, 0.2)
+        score = center_bias * depth_visibility.weight / max(depth, 0.2)
         if score > best_score:
             best_score = score
             best_color = color
@@ -8210,7 +8325,7 @@ def direct_projected_surface_color(
                 continue
 
         depth_visibility = depth_visibility_for_world_point(world_point, keyframe)
-        if depth_visibility.status == "occluded":
+        if depth_visibility.status in {"occluded", "depth_edge"}:
             continue
 
         color = sample_image_bilinear(keyframe, u, v)
@@ -8259,8 +8374,12 @@ def dense_single_view_surface_color(
             if facing < DENSE_SINGLE_VIEW_MIN_FACING:
                 continue
 
+        depth_visibility = depth_visibility_for_world_point(world_point, keyframe)
+        if depth_visibility.status in {"occluded", "depth_edge"}:
+            continue
+
         center_bias = max(0.05, min(edge_margin / keyframe.center_bias_denominator, 1))
-        score = center_bias * max(facing, 0.12) / max(depth, 0.2)
+        score = center_bias * max(facing, 0.12) * depth_visibility.weight / max(depth, 0.2)
         if score > best_score:
             best_score = score
             best_color = sample_image_bilinear(keyframe, u, v)
@@ -8380,6 +8499,7 @@ def rasterize_planar_chart_texture(
                 stats["rejectedEdgeSampleCount"] += blend.rejected_edge_sample_count
                 stats["rejectedGrazingSampleCount"] += blend.rejected_grazing_sample_count
                 stats["rejectedInvalidProjectionSampleCount"] += blend.rejected_invalid_projection_sample_count
+                stats["rejectedDepthEdgeSampleCount"] += blend.rejected_depth_edge_sample_count
                 stats["rejectedOccludedSampleCount"] += blend.rejected_occluded_sample_count
                 stats["depthTestedSampleCount"] += blend.depth_tested_sample_count
                 stats["missingDepthSampleCount"] += blend.missing_depth_sample_count
@@ -8746,6 +8866,7 @@ def rasterize_face_texture(
     rejected_edge_sample_count = 0
     rejected_grazing_sample_count = 0
     rejected_invalid_projection_sample_count = 0
+    rejected_depth_edge_sample_count = 0
     rejected_occluded_sample_count = 0
     depth_tested_sample_count = 0
     missing_depth_sample_count = 0
@@ -8776,6 +8897,7 @@ def rasterize_face_texture(
                     rejected_edge_sample_count += blend.rejected_edge_sample_count
                     rejected_grazing_sample_count += blend.rejected_grazing_sample_count
                     rejected_invalid_projection_sample_count += blend.rejected_invalid_projection_sample_count
+                    rejected_depth_edge_sample_count += blend.rejected_depth_edge_sample_count
                     rejected_occluded_sample_count += blend.rejected_occluded_sample_count
                     depth_tested_sample_count += blend.depth_tested_sample_count
                     missing_depth_sample_count += blend.missing_depth_sample_count
@@ -8791,6 +8913,7 @@ def rasterize_face_texture(
                     rejected_edge_sample_count += blend.rejected_edge_sample_count
                     rejected_grazing_sample_count += blend.rejected_grazing_sample_count
                     rejected_invalid_projection_sample_count += blend.rejected_invalid_projection_sample_count
+                    rejected_depth_edge_sample_count += blend.rejected_depth_edge_sample_count
                     rejected_occluded_sample_count += blend.rejected_occluded_sample_count
                     depth_tested_sample_count += blend.depth_tested_sample_count
                     missing_depth_sample_count += blend.missing_depth_sample_count
@@ -8815,6 +8938,7 @@ def rasterize_face_texture(
         "rejectedEdgeSampleCount": rejected_edge_sample_count,
         "rejectedGrazingSampleCount": rejected_grazing_sample_count,
         "rejectedInvalidProjectionSampleCount": rejected_invalid_projection_sample_count,
+        "rejectedDepthEdgeSampleCount": rejected_depth_edge_sample_count,
         "rejectedOccludedSampleCount": rejected_occluded_sample_count,
         "depthTestedSampleCount": depth_tested_sample_count,
         "missingDepthSampleCount": missing_depth_sample_count,
@@ -8832,6 +8956,7 @@ def blend_projected_texture_sample(
     rejected_edge_count = 0
     rejected_grazing_count = 0
     rejected_invalid_projection_count = 0
+    rejected_depth_edge_count = 0
     rejected_occluded_count = 0
     depth_tested_count = 0
     missing_depth_count = 0
@@ -8856,6 +8981,9 @@ def blend_projected_texture_sample(
         depth_visibility = depth_visibility_for_world_point(world_point, keyframe)
         if depth_visibility.status == "occluded":
             rejected_occluded_count += 1
+            continue
+        if depth_visibility.status == "depth_edge":
+            rejected_depth_edge_count += 1
             continue
         if depth_visibility.status == "visible":
             depth_tested_count += 1
@@ -8886,6 +9014,7 @@ def blend_projected_texture_sample(
             rejected_edge_count,
             rejected_grazing_count,
             rejected_invalid_projection_count,
+            rejected_depth_edge_count,
             rejected_occluded_count,
             depth_tested_count,
             missing_depth_count,
@@ -8902,6 +9031,7 @@ def blend_projected_texture_sample(
             rejected_edge_count,
             rejected_grazing_count,
             rejected_invalid_projection_count,
+            rejected_depth_edge_count,
             rejected_occluded_count,
             depth_tested_count,
             missing_depth_count,
@@ -8929,6 +9059,7 @@ def blend_projected_texture_sample(
         rejected_edge_count,
         rejected_grazing_count,
         rejected_invalid_projection_count,
+        rejected_depth_edge_count,
         rejected_occluded_count,
         depth_tested_count,
         missing_depth_count,
@@ -9077,17 +9208,23 @@ def depth_visibility_for_world_point(
         return DepthVisibilityResult("unknown", TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT, None, None, None)
 
     u, v, projected_depth = projection
-    sampled = sample_depth_frame(depth_frame, u, v)
+    sampled = sample_depth_frame_visibility(depth_frame, u, v)
     if sampled is None:
         return DepthVisibilityResult("unknown", TEXTURE_DEPTH_UNKNOWN_SAMPLE_WEIGHT, projected_depth, None, None)
 
-    sampled_depth, confidence = sampled
+    sampled_depth, confidence, depth_range = sampled
     tolerance = max(
         TEXTURE_DEPTH_OCCLUSION_BASE_TOLERANCE_METERS,
         projected_depth * TEXTURE_DEPTH_OCCLUSION_RELATIVE_TOLERANCE,
     )
     if sampled_depth + tolerance < projected_depth:
         return DepthVisibilityResult("occluded", 0.0, projected_depth, sampled_depth, confidence)
+    depth_edge_threshold = max(
+        TEXTURE_DEPTH_EDGE_ABSOLUTE_METERS,
+        projected_depth * TEXTURE_DEPTH_EDGE_RELATIVE,
+    )
+    if depth_range > depth_edge_threshold:
+        return DepthVisibilityResult("depth_edge", 0.0, projected_depth, sampled_depth, confidence)
 
     depth_error = abs(sampled_depth - projected_depth)
     match_weight = clamp_float(
@@ -9106,6 +9243,41 @@ def depth_visibility_for_world_point(
         sampled_depth,
         confidence,
     )
+
+
+def sample_depth_frame_visibility(
+    depth_frame: ProjectionDepthFrame,
+    u: float,
+    v: float,
+) -> tuple[float, int | None, float] | None:
+    center_x = int(round(u))
+    center_y = int(round(v))
+    radius = TEXTURE_DEPTH_NEIGHBORHOOD_RADIUS
+    values: list[float] = []
+    confidence_values: list[int] = []
+
+    for y in range(center_y - radius, center_y + radius + 1):
+        if y < 0 or y >= depth_frame.height:
+            continue
+        for x in range(center_x - radius, center_x + radius + 1):
+            if x < 0 or x >= depth_frame.width:
+                continue
+            index = y * depth_frame.width + x
+            if depth_frame.confidence_values is not None:
+                confidence = int(depth_frame.confidence_values[index])
+                if confidence == 0:
+                    continue
+                confidence_values.append(confidence)
+            depth = float(depth_frame.depth_values[index])
+            if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+                continue
+            values.append(depth)
+
+    if not values:
+        return None
+
+    confidence = max(confidence_values) if confidence_values else None
+    return median_float(values), confidence, max(values) - min(values)
 
 
 def sample_depth_frame(
