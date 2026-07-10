@@ -1096,7 +1096,7 @@ def test_rgbd_candidate_pool_keeps_alternates_around_timed_windows():
 
 
 def test_rgbd_hero_patch_candidate_selection_prefers_quality_within_timed_windows():
-    def make_candidate(index: int, timestamp: float, sharpness: float) -> dict:
+    def make_candidate(index: int, timestamp: float, sharpness: float, score: float | None = None) -> dict:
         return {
             "index": index,
             "keyframeId": f"kf-{index}",
@@ -1106,20 +1106,21 @@ def test_rgbd_hero_patch_candidate_selection_prefers_quality_within_timed_window
             "validDepthRatio": 1.0,
             "highConfidenceRatio": 1.0,
             "rgbSharpnessScore": sharpness,
-            "score": 9.0 + min(sharpness / 28.0, 1.0),
+            "score": score if score is not None else 9.0 + min(sharpness / 28.0, 1.0),
         }
 
     selected, stats = pipeline.select_rgbd_hero_patch_candidates([
         make_candidate(0, 0.0, 12.0),
-        make_candidate(1, 2.5, 2.0),
-        make_candidate(2, 2.7, 32.0),
-        make_candidate(3, 4.5, 2.0),
-        make_candidate(4, 4.8, 32.0),
+        make_candidate(1, 1.0, 12.0, score=50.0),
+        make_candidate(2, 2.5, 2.0),
+        make_candidate(3, 2.7, 32.0),
+        make_candidate(4, 4.5, 2.0),
+        make_candidate(5, 4.8, 32.0),
     ])
 
-    assert [candidate["keyframeId"] for candidate in selected] == ["kf-0", "kf-2", "kf-4"]
+    assert [candidate["keyframeId"] for candidate in selected] == ["kf-0", "kf-3", "kf-5"]
     assert stats["strategy"] == "quality_aware_primary_plus_timed_supplemental_rgbd_hero_patches"
-    assert stats["candidatePoolCount"] == 5
+    assert stats["candidatePoolCount"] == 6
     assert [item["actualTimeDeltaSeconds"] for item in stats["supplementalSelections"]] == pytest.approx([2.7, 4.8])
 
 

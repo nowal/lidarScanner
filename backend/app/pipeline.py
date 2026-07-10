@@ -2135,7 +2135,6 @@ def rgbd_hero_patch_candidate_quality_score(candidate: dict) -> float:
         float(candidate.get("validDepthRatio") or 0) * 2.0
         + float(candidate.get("highConfidenceRatio") or 0) * 1.0
         + min(float(candidate.get("rgbSharpnessScore") or 0) / 28.0, 1.0) * 1.0
-        + float(candidate.get("score") or 0) * 0.05
     )
 
 
