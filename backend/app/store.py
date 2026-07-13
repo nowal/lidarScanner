@@ -109,6 +109,11 @@ class JobStore:
         rgbd_single_frame_depth_url = None
         rgbd_single_frame_confidence_url = None
         rgbd_single_frame_diagnostics_url = None
+        rgbd_onboarding_mesh_url = None
+        rgbd_onboarding_mtl_url = None
+        rgbd_onboarding_texture_url = None
+        rgbd_onboarding_overlay_url = None
+        rgbd_onboarding_diagnostics_url = None
         vertex_colored_ply_url = None
         textured_obj_url = None
         textured_mtl_url = None
@@ -138,8 +143,13 @@ class JobStore:
             rgbd_single_frame_depth_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_single_frame_depth.png")
             rgbd_single_frame_confidence_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_single_frame_confidence.png")
             rgbd_single_frame_diagnostics_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_single_frame_diagnostics.json")
+            rgbd_onboarding_mesh_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_onboarding_mesh.obj")
+            rgbd_onboarding_mtl_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_onboarding_mesh.mtl")
+            rgbd_onboarding_texture_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_onboarding_texture.png")
+            rgbd_onboarding_overlay_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_onboarding_overlay.png")
+            rgbd_onboarding_diagnostics_url = self._artifact_url_if_present(result_dir, result_base, "rgbd_onboarding_diagnostics.json")
             vertex_colored_ply_url = self._artifact_url_if_present(result_dir, result_base, "colored_mesh.ply")
-            preview_mesh_url = vertex_colored_ply_url or rgbd_fused_mesh_url or rgbd_single_frame_mesh_url or raw_fused_mesh_url
+            preview_mesh_url = rgbd_onboarding_mesh_url or vertex_colored_ply_url or rgbd_fused_mesh_url or rgbd_single_frame_mesh_url or raw_fused_mesh_url
             textured_obj_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.obj")
             textured_mtl_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.mtl")
             texture_png_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh_texture.png")
@@ -151,6 +161,10 @@ class JobStore:
             stage_timings_url = self._artifact_url_if_present(result_dir, result_base, "stage_timings.json")
             usdz_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.usdz")
             glb_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.glb")
+            if rgbd_onboarding_mesh_url and not textured_obj_url:
+                textured_obj_url = rgbd_onboarding_mesh_url
+                textured_mtl_url = rgbd_onboarding_mtl_url
+                texture_png_url = rgbd_onboarding_texture_url
             preview_mesh_url = self._preferred_preview_url_if_present(result_dir, result_base) or preview_mesh_url
         return JobStatusResponse(
             jobId=record.job_id,
@@ -177,6 +191,11 @@ class JobStore:
                 rgbdSingleFrameDepthUrl=rgbd_single_frame_depth_url,
                 rgbdSingleFrameConfidenceUrl=rgbd_single_frame_confidence_url,
                 rgbdSingleFrameDiagnosticsUrl=rgbd_single_frame_diagnostics_url,
+                rgbdOnboardingMeshUrl=rgbd_onboarding_mesh_url,
+                rgbdOnboardingMtlUrl=rgbd_onboarding_mtl_url,
+                rgbdOnboardingTextureUrl=rgbd_onboarding_texture_url,
+                rgbdOnboardingOverlayUrl=rgbd_onboarding_overlay_url,
+                rgbdOnboardingDiagnosticsUrl=rgbd_onboarding_diagnostics_url,
                 vertexColoredPlyUrl=vertex_colored_ply_url,
                 texturedObjUrl=textured_obj_url,
                 texturedMtlUrl=textured_mtl_url,
@@ -209,7 +228,7 @@ class JobStore:
             preferred_path = Path(preferred)
             if preferred_path.name != preferred:
                 continue
-            if preferred_path.name not in {"rgbd_onboarding_mesh.obj", "rgbd_onboarding.usdz"}:
+            if preferred_path.name != "rgbd_onboarding_mesh.obj":
                 continue
             if (result_dir / preferred_path.name).exists():
                 return f"{result_base}/{preferred_path.name}"

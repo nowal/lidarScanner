@@ -67,6 +67,11 @@ class ArtifactLinks(BaseModel):
     rgbdSingleFrameDepthUrl: Optional[str] = None
     rgbdSingleFrameConfidenceUrl: Optional[str] = None
     rgbdSingleFrameDiagnosticsUrl: Optional[str] = None
+    rgbdOnboardingMeshUrl: Optional[str] = None
+    rgbdOnboardingMtlUrl: Optional[str] = None
+    rgbdOnboardingTextureUrl: Optional[str] = None
+    rgbdOnboardingOverlayUrl: Optional[str] = None
+    rgbdOnboardingDiagnosticsUrl: Optional[str] = None
     vertexColoredPlyUrl: Optional[str] = None
     texturedObjUrl: Optional[str] = None
     texturedMtlUrl: Optional[str] = None

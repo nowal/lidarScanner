@@ -214,7 +214,6 @@ async def download_result_file(job_id: str, filename: str) -> Response:
         "rgbd_onboarding_mesh.mtl",
         "rgbd_onboarding_texture.png",
         "rgbd_onboarding_overlay.png",
-        "rgbd_onboarding.usdz",
         "rgbd_onboarding_diagnostics.json",
         "colored_mesh.ply",
         "textured_mesh.obj",

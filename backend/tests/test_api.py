@@ -1370,7 +1370,7 @@ def test_single_keyframe_rgbd_onboarding_prunes_lidar_inconsistent_region(tmp_pa
         output_texture_path=tmp_path / "rgbd_onboarding_texture.png",
         output_debug_path=tmp_path / "rgbd_onboarding_diagnostics.json",
         output_overlay_path=tmp_path / "rgbd_onboarding_overlay.png",
-        output_usdz_path=tmp_path / "rgbd_onboarding.usdz",
+        output_usdz_path=None,
         profile=pipeline.PROCESSING_PROFILES["fast_onboarding"],
     )
 
@@ -2134,10 +2134,16 @@ async def test_fast_onboarding_profile_prefers_single_keyframe_rgbd_onboarding_m
 
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
-        assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
-        assert status["artifacts"]["usdzUrl"].endswith("/textured_mesh.usdz")
+        assert status["artifacts"]["texturedObjUrl"].endswith("/rgbd_onboarding_mesh.obj")
+        assert status["artifacts"]["texturedMtlUrl"].endswith("/rgbd_onboarding_mesh.mtl")
+        assert status["artifacts"]["texturePngUrl"].endswith("/rgbd_onboarding_texture.png")
+        assert status["artifacts"]["usdzUrl"] is None
         assert status["artifacts"]["vertexColoredPlyUrl"] is None
-        assert status["artifacts"]["previewMeshUrl"].endswith("/rgbd_onboarding.usdz")
+        assert status["artifacts"]["previewMeshUrl"].endswith("/rgbd_onboarding_mesh.obj")
+        assert status["artifacts"]["rgbdOnboardingMeshUrl"].endswith("/rgbd_onboarding_mesh.obj")
+        assert status["artifacts"]["rgbdOnboardingMtlUrl"].endswith("/rgbd_onboarding_mesh.mtl")
+        assert status["artifacts"]["rgbdOnboardingTextureUrl"].endswith("/rgbd_onboarding_texture.png")
+        assert status["artifacts"]["rgbdOnboardingDiagnosticsUrl"].endswith("/rgbd_onboarding_diagnostics.json")
         assert status["artifacts"]["rgbdFusedMeshUrl"] is None
         assert status["artifacts"]["textureDebugPreviewUrl"] is None
         assert status["artifacts"]["stageTimingsUrl"].endswith("/stage_timings.json")
@@ -2184,7 +2190,7 @@ async def test_fast_onboarding_profile_prefers_single_keyframe_rgbd_onboarding_m
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
         assert manifest["processingProfile"]["name"] == "fast_onboarding"
         assert manifest["preferredPhotorealArtifact"] == "rgbd_onboarding_mesh"
-        assert manifest["preferredPreview"] == "rgbd_onboarding.usdz"
+        assert manifest["preferredPreview"] == "rgbd_onboarding_mesh.obj"
         assert manifest["artifacts"]["rgbdOnboardingMesh"]["available"] is True
         assert manifest["artifacts"]["rgbdOnboardingMesh"]["preferred"] is True
         onboarding_stats = manifest["artifacts"]["rgbdOnboardingMesh"]["stats"]
@@ -2201,23 +2207,9 @@ async def test_fast_onboarding_profile_prefers_single_keyframe_rgbd_onboarding_m
         assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is False
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["geometryPreserved"] is True
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
-        assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
-        assert manifest["artifacts"]["texturedObj"]["stats"]["uvStrategy"] == "source_keyframe_projection_atlas"
-        assert manifest["artifacts"]["texturedObj"]["stats"]["faceCount"] > manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
-        assert manifest["artifacts"]["texturedObj"]["stats"]["texturedFaceCount"] <= manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
-        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["used"] is True
-        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["algorithm"] == "lidar_surface_edge_subdivision"
-        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["surfaceConstrained"] is True
-        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["geometryPreserved"] is False
-        assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["rawGeometryPreserved"] is True
-        assert (
-            manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["renderFaceCount"]
-            == manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
-        )
-        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["enabled"] is True
-        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["sourceImageAtlas"]["enabled"] is True
+        assert manifest["artifacts"]["texturedObj"]["stats"]["available"] is False
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
-        assert manifest["artifacts"]["usdz"]["available"] is True
+        assert manifest["artifacts"]["usdz"]["available"] is False
 
         onboarding_obj = await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_onboarding_mesh.obj", headers=headers)
         onboarding_mtl = await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_onboarding_mesh.mtl", headers=headers)
@@ -2236,44 +2228,6 @@ async def test_fast_onboarding_profile_prefers_single_keyframe_rgbd_onboarding_m
         assert onboarding_diagnostics["selectedDepthFrameId"] == onboarding_stats["selectedDepthFrameId"]
         assert onboarding_diagnostics["pruning"]["rawFaceCount"] == onboarding_stats["rawFaceCount"]
         assert onboarding_diagnostics["pruning"]["finalFaceCount"] == onboarding_stats["prunedFaceCount"]
-
-        texture_debug = (await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug.json", headers=headers)).json()
-        assert [item["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedKeyframeIds"]
-        assert [item["depthFrame"]["id"] for item in texture_debug["keyframes"]] == depth_selection["selectedDepthFrameIds"]
-        assert texture_debug["geometry"]["geometrySource"] == "arkit_mesh_anchor_fusion"
-        assert texture_debug["geometry"]["geometryPreserved"] is True
-        assert texture_debug["geometry"]["faceCount"] == manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
-        assert texture_debug["geometry"]["renderMesh"]["algorithm"] == "lidar_surface_edge_subdivision"
-        assert texture_debug["geometry"]["renderMesh"]["geometryPreserved"] is False
-        assert len(texture_debug["perKeyframeProjection"]) == 55
-        assert texture_debug["projection"]["projectionCoverage"] > 0
-        assert texture_debug["projection"]["rejectedDepthEdgeSampleCount"] >= 0
-        assert texture_debug["processing"]["denseSingleViewTexture"] is False
-        assert texture_debug["processing"]["rgbdHeroPatchTexture"] is False
-        assert texture_debug["processing"]["sourceKeyframeCount"] == 55
-        assert texture_debug["processing"]["activeTextureKeyframeCount"] == 55
-        assert texture_debug["processing"]["activeProjectionMode"] == "direct"
-        assert texture_debug["processing"]["cpuVisibility"]["enabled"] is True
-        assert texture_debug["processing"]["coherentLabeling"]["enabled"] is True
-        assert texture_debug["visibility"][0]["algorithm"] == "cpu_reduced_resolution_face_center_z_buffer"
-        assert "rgbdHeroPatch" not in texture_debug
-        assert texture_debug["summary"]["selectedTextureKeyframes"]
-        assert texture_debug["summary"]["rejectedOccludedSampleCount"] == texture_debug["projection"]["rejectedOccludedSampleCount"]
-        assert texture_debug["summary"]["rejectedDepthEdgeSampleCount"] == texture_debug["projection"]["rejectedDepthEdgeSampleCount"]
-        assert 0 <= texture_debug["summary"]["unobservedTexelRatio"] <= 1
-        assert texture_debug["summary"]["textureCoverage"] == texture_debug["textureAtlas"]["projectedRasterPixelRatio"]
-
-        textured_obj = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.obj", headers=headers)
-        textured_mtl = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.mtl", headers=headers)
-        texture_png = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh_texture.png", headers=headers)
-        assert "o textured_mesh" in textured_obj.text
-        assert textured_obj.text.count("\nf ") == manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
-        assert "rgbd_hero_patch" not in textured_obj.text
-        assert "map_Kd textured_mesh_texture.png" in textured_mtl.text
-        assert texture_png.headers["content-type"] == "image/png"
-
-        overlay = await client.get(f"/api/v1/jobs/{job_id}/result/two_keyframe_projection_0.png", headers=headers)
-        assert overlay.status_code == 200
 
         timings = (await client.get(f"/api/v1/jobs/{job_id}/result/stage_timings.json", headers=headers)).json()
         assert timings["jobId"] == job_id

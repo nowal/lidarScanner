@@ -858,7 +858,7 @@ class TexturedMeshStage:
                 output_texture_path=job_dir / "work" / "rgbd_onboarding_texture.png",
                 output_debug_path=job_dir / "work" / "rgbd_onboarding_diagnostics.json",
                 output_overlay_path=job_dir / "work" / "rgbd_onboarding_overlay.png",
-                output_usdz_path=job_dir / "work" / "rgbd_onboarding.usdz",
+                output_usdz_path=None,
                 profile=profile,
             )
             if onboarding_stats.get("available"):
@@ -877,6 +877,7 @@ class TexturedMeshStage:
                     80,
                     f"RGB-D onboarding mesh unavailable: {onboarding_stats.get('reason', 'no usable RGB-D frame')}",
                 )
+            return
         if not mesh.faces or not keyframes:
             await report(self.name, 72, "Texture projection skipped because mesh faces or keyframes are missing")
             return
@@ -1138,7 +1139,6 @@ class ExportStage:
             "rgbd_onboarding_mesh.mtl",
             "rgbd_onboarding_texture.png",
             "rgbd_onboarding_overlay.png",
-            "rgbd_onboarding.usdz",
             "rgbd_onboarding_diagnostics.json",
             "colored_mesh.ply",
             "textured_mesh.obj",
@@ -1199,9 +1199,7 @@ class ExportStage:
         else:
             preferred_photoreal = "vertex_colored_ply"
         preferred_preview = (
-            "rgbd_onboarding.usdz"
-            if preferred_photoreal == "rgbd_onboarding_mesh" and (result_dir / "rgbd_onboarding.usdz").exists()
-            else "rgbd_onboarding_mesh.obj"
+            "rgbd_onboarding_mesh.obj"
             if preferred_photoreal == "rgbd_onboarding_mesh"
             else "textured_mesh.usdz"
             if preferred_photoreal == "usdz"
@@ -1304,7 +1302,7 @@ class ExportStage:
                     "mtlPath": "rgbd_onboarding_mesh.mtl",
                     "texturePath": "rgbd_onboarding_texture.png",
                     "overlayPath": "rgbd_onboarding_overlay.png",
-                    "usdzPath": "rgbd_onboarding.usdz",
+                    "usdzPath": rgbd_onboarding_diagnostic.get("artifacts", {}).get("usdz", {}).get("path"),
                     "diagnosticsPath": "rgbd_onboarding_diagnostics.json",
                     "available": rgbd_onboarding_available,
                     "preferred": preferred_photoreal == "rgbd_onboarding_mesh",
@@ -1383,7 +1381,6 @@ class ExportStage:
                 "rgbd_onboarding_mesh.mtl",
                 "rgbd_onboarding_texture.png",
                 "rgbd_onboarding_overlay.png",
-                "rgbd_onboarding.usdz",
                 "rgbd_onboarding_diagnostics.json",
                 "colored_mesh.ply",
                 "textured_mesh.obj",
@@ -2369,7 +2366,7 @@ def unavailable_rgbd_onboarding_stats(
             "mtl": {"format": "mtl", "path": "rgbd_onboarding_mesh.mtl", "available": False},
             "texture": {"format": "png", "path": "rgbd_onboarding_texture.png", "available": False},
             "overlay": {"format": "png", "path": "rgbd_onboarding_overlay.png", "available": False},
-            "usdz": {"format": "usdz", "path": "rgbd_onboarding.usdz", "available": False},
+            "usdz": {"format": "usdz", "path": None, "available": False},
             "diagnostics": {"format": "json", "path": "rgbd_onboarding_diagnostics.json", "available": True},
         },
     }
