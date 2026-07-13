@@ -882,7 +882,7 @@ class TexturedMeshStage:
                     report=report,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Two-keyframe RGB-D onboarding mesh unavailable; falling back to single frame: %s", exc)
+                logger.exception("Two-keyframe RGB-D onboarding mesh unavailable; falling back to single frame: %s", exc)
                 onboarding_stats = {
                     "available": False,
                     "reason": str(exc),
@@ -8815,12 +8815,16 @@ def project_vertex_color(vertex: tuple[float, float, float], keyframes: list[Pro
             continue
         distance_weight = 1 / max(depth, 0.2)
         weight = center_bias * distance_weight * depth_visibility.weight
+        if weight <= 1e-8:
+            continue
         samples.append((weight, sample_image_nearest(keyframe, u, v)))
 
     if not samples:
         return None
 
     total_weight = sum(weight for weight, _ in samples)
+    if total_weight <= 1e-8:
+        return None
     r = sum(weight * color[0] for weight, color in samples) / total_weight
     g = sum(weight * color[1] for weight, color in samples) / total_weight
     b = sum(weight * color[2] for weight, color in samples) / total_weight

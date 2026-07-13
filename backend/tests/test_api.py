@@ -1112,6 +1112,56 @@ async def test_fast_direct_projection_rejects_occluded_samples_and_stays_neutral
     assert pixels[stats["tilePadding"] + 1, stats["tilePadding"] + 1] == pipeline.TEXTURE_UNOBSERVED_COLOR
 
 
+def test_project_vertex_color_ignores_zero_weight_depth_edge_samples():
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    image_intrinsics = [
+        100, 0, 0,
+        0, 100, 0,
+        50, 50, 1,
+    ]
+    depth_intrinsics = [
+        4, 0, 0,
+        0, 4, 0,
+        2, 2, 1,
+    ]
+    image = Image.new("RGB", (100, 100), (180, 120, 80))
+    depth_values = array("f", [
+        1.0, 1.0, 1.0, 1.0,
+        1.0, 2.0, 2.0, 2.0,
+        1.0, 2.0, 1.0, 2.0,
+        1.0, 2.0, 2.0, 2.0,
+    ])
+    depth_frame = pipeline.ProjectionDepthFrame(
+        id="edge-depth",
+        color_keyframe_id="edge-keyframe",
+        width=4,
+        height=4,
+        world_to_camera=pipeline.invert_rigid_transform(transform),
+        intrinsics=depth_intrinsics,
+        depth_values=depth_values,
+        confidence_values=bytes([2] * 16),
+    )
+    keyframe = pipeline.ProjectionKeyframe(
+        image=image,
+        width=image.width,
+        height=image.height,
+        world_to_camera=pipeline.invert_rigid_transform(transform),
+        camera_position=(0, 0, 0),
+        intrinsics=image_intrinsics,
+        pixels=image.load(),
+        id="edge-keyframe",
+        depth_frame=depth_frame,
+    )
+
+    assert pipeline.depth_visibility_for_world_point((0.0, 0.0, -1.0), keyframe).status == "depth_edge"
+    assert pipeline.project_vertex_color((0.0, 0.0, -1.0), [keyframe]) is None
+
+
 def test_rgbd_hero_patch_depth_preparation_accepts_low_confidence_and_fills_holes():
     depth_values = array("f", [
         1.0, 1.0, 1.0,
