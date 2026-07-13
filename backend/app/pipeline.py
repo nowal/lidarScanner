@@ -214,6 +214,32 @@ class TextureAtlasLayout:
 
 
 @dataclass
+class SourceImageAtlasPlacement:
+    keyframe: ProjectionKeyframe
+    x: int
+    y: int
+    tile_size: int
+    image_x: int
+    image_y: int
+    image_width: int
+    image_height: int
+    source_scale: float
+    owner_face_count: int
+
+
+@dataclass
+class SourceImageAtlasLayout:
+    width: int
+    height: int
+    tile_size: int
+    columns: int
+    rows: int
+    tile_start_y: int
+    placements: dict[str, SourceImageAtlasPlacement]
+    stats: dict
+
+
+@dataclass
 class DecodedDepthFrame:
     id: str | None
     color_keyframe_id: str | None
@@ -286,6 +312,11 @@ TEXTURE_PLANAR_CHART_SECONDARY_MIN_COVERAGE_RATIO = 0.55
 TEXTURE_PLANAR_CHART_SECONDARY_MAX_REGIONS = 12
 TEXTURE_PLANAR_CHART_SECONDARY_MAX_SAMPLE_POINTS = 512
 TEXTURE_ISLAND_DILATION_PIXELS = 4
+TEXTURE_SOURCE_IMAGE_ATLAS_ENABLED = True
+TEXTURE_SOURCE_IMAGE_ATLAS_MAX_TILE_SIZE = 768
+TEXTURE_SOURCE_IMAGE_ATLAS_MIN_TILE_SIZE = 128
+TEXTURE_SOURCE_IMAGE_ATLAS_TILE_STEP = 16
+TEXTURE_SOURCE_IMAGE_ATLAS_PADDING = 8
 TEXTURE_COLOR_SATURATION_BOOST = 1.12
 TEXTURE_COLOR_CONTRAST_BOOST = 1.05
 TEXTURE_BLEND_MAX_FACE_CANDIDATES = 6
@@ -7399,6 +7430,53 @@ async def write_textured_obj(
     coverage_face_statuses = ["unknown"] * face_count
     visibility_stats = build_keyframe_mesh_visibility_masks(mesh, keyframes)
     face_owner_labels, coherent_label_stats = assign_coherent_face_keyframes(mesh, keyframes)
+    source_image_atlas_layout = (
+        build_source_image_atlas_layout(
+            keyframes=keyframes,
+            face_owner_labels=face_owner_labels,
+            face_to_chart=atlas_layout_spec.face_to_chart,
+            atlas_max_size=atlas_max_size,
+            tile_start_y=atlas_layout_spec.tile_start_y,
+        )
+        if should_use_source_image_projection_atlas(
+            profile=profile,
+            active_projection_mode=active_projection_mode,
+            keyframes=keyframes,
+        )
+        else None
+    )
+    if source_image_atlas_layout is not None:
+        atlas_width = source_image_atlas_layout.width
+        atlas_height = source_image_atlas_layout.height
+        source_background_color = (
+            TEXTURE_UNOBSERVED_COLOR
+            if active_projection_mode in {"direct", "dense_single_view"}
+            else FALLBACK_COLOR
+        )
+        texture = Image.new("RGB", (atlas_width, atlas_height), source_background_color)
+        texture_mask = Image.new("L", (atlas_width, atlas_height), 0)
+        texture_pixels = texture.load()
+        mask_pixels = texture_mask.load()
+        atlas_layout_spec.width = atlas_width
+        atlas_layout_spec.height = atlas_height
+        atlas_layout_spec.strategy = (
+            "planar_chart_atlas_with_source_keyframe_projection"
+            if atlas_layout_spec.planar_charts
+            else "source_keyframe_projection_atlas"
+        )
+        atlas_layout_spec.stats = {
+            **atlas_layout_spec.stats,
+            "enabled": True,
+            "reason": "source_image_projection_atlas",
+            "sourceImageAtlas": source_image_atlas_layout.stats,
+        }
+        paste_source_image_atlas_tiles(
+            texture,
+            texture_mask,
+            source_image_atlas_layout,
+        )
+        texture_pixels = texture.load()
+        mask_pixels = texture_mask.load()
     serial_texture_budget_enabled = (
         atlas_layout_spec.planar_charts
         or profile.fallback_texture_face_limit is not None
@@ -7623,14 +7701,36 @@ async def write_textured_obj(
             raise asyncio.CancelledError
 
         chart = atlas_layout_spec.face_to_chart.get(face_index)
-        tile = atlas_tile_for_layout(face_index, atlas_layout_spec) if chart is None else (chart.x, chart.y)
         face_vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
-        atlas_triangle = (
-            atlas_triangle_points(tile, tile_size)
-            if chart is None
-            else [planar_chart_pixel_for_vertex(chart, vertex) for vertex in face_vertices]
-        )
-        uv_start = face_index * 3 + 1
+        source_projection: dict | None = None
+        source_candidates: list[TextureProjectionCandidate] = []
+        tile: tuple[int, int] | None = None
+        if chart is not None:
+            atlas_triangle = [planar_chart_pixel_for_vertex(chart, vertex) for vertex in face_vertices]
+        elif source_image_atlas_layout is not None:
+            fallback_processed_count += 1
+            source_candidates = texture_projection_candidates(
+                face_vertices,
+                keyframes,
+                relaxed=active_projection_mode == "dense_single_view",
+                face_index=face_index,
+            )
+            source_candidates = prioritize_owner_candidate(source_candidates, face_owner_labels[face_index])
+            source_projection = source_image_atlas_face_projection(
+                face_vertices,
+                source_candidates,
+                source_image_atlas_layout,
+            )
+            atlas_triangle = (
+                source_projection["atlasPoints"]
+                if source_projection is not None and source_projection.get("atlasPoints") is not None
+                else source_image_atlas_fallback_triangle(source_image_atlas_layout)
+            )
+        else:
+            tile = atlas_tile_for_layout(face_index, atlas_layout_spec)
+            atlas_triangle = atlas_triangle_points(tile, tile_size)
+
+        uv_start = len(vt_lines) + 1
         current_face_uvs: list[tuple[float, float]] = []
         for point in atlas_triangle:
             u = (point[0] + 0.5) / atlas_width
@@ -7656,7 +7756,60 @@ async def write_textured_obj(
             face_lines.append(obj_face_line(face, uv_start))
             continue
 
+        if source_image_atlas_layout is not None:
+            if source_projection is not None:
+                rejected_invalid_projection_sample_count += int(source_projection.get("rejectedInvalidProjectionSampleCount", 0))
+                rejected_depth_edge_sample_count += int(source_projection.get("rejectedDepthEdgeSampleCount", 0))
+                rejected_occluded_sample_count += int(source_projection.get("rejectedOccludedSampleCount", 0))
+                depth_tested_sample_count += int(source_projection.get("depthTestedSampleCount", 0))
+                missing_depth_sample_count += int(source_projection.get("missingDepthSampleCount", 0))
+
+            if source_projection is not None and source_projection.get("atlasPoints") is not None:
+                selected_key = str(source_projection["keyframe"])
+                selected_keyframe_face_counts[selected_key] = selected_keyframe_face_counts.get(selected_key, 0) + 1
+                keyframe_contribution_counts[selected_key] = keyframe_contribution_counts.get(selected_key, 0) + 1
+                rasterized_pixel_count += 1
+                projected_pixel_count += 1
+                single_sample_pixel_count += 1
+                accepted_projection_sample_count += 1
+                textured_face_count += 1
+                fallback_projected_count += 1
+                coverage_face_statuses[face_index] = "projected_source_atlas"
+            else:
+                rasterized_pixel_count += 1
+                fallback_pixel_count += 1
+                fallback_face_count += 1
+                coverage_face_statuses[face_index] = "fallback_unobserved"
+
+            for point in atlas_triangle:
+                uv_vertex_sample_stats.add(
+                    sample_texture_at_atlas_point(texture_pixels, atlas_width, atlas_height, point[0], point[1])
+                )
+            for point in atlas_interior_sample_points(atlas_triangle):
+                uv_face_interior_sample_stats.add(
+                    sample_texture_at_atlas_point(texture_pixels, atlas_width, atlas_height, point[0], point[1])
+                )
+
+            face_lines.append(obj_face_line(face, uv_start))
+            if report_progress is not None and (
+                fallback_processed_count % fallback_progress_interval == 0
+                or fallback_processed_count == fallback_total
+            ):
+                fraction = (fallback_processed_count / fallback_total) if fallback_total else 1
+                coverage = int((fallback_projected_count / fallback_processed_count) * 100) if fallback_processed_count else 0
+                await report_progress(
+                    83 + fraction * 10,
+                    (
+                        f"Projecting source-atlas faces {fallback_processed_count} / {fallback_total} "
+                        f"({coverage}% assigned)"
+                    ),
+                )
+                await asyncio.sleep(0)
+            continue
+
         fallback_processed_count += 1
+        if tile is None:
+            tile = atlas_tile_for_layout(face_index, atlas_layout_spec)
         if face_index in fallback_high_quality_faces:
             candidates = texture_projection_candidates(
                 face_vertices,
@@ -7829,6 +7982,16 @@ async def write_textured_obj(
         "charts": planar_chart_texture_stats or atlas_layout_spec.stats.get("charts", []),
         "fallbackBudget": fallback_budget_stats,
     }
+    if source_image_atlas_layout is not None:
+        non_chart_face_count = fallback_total
+        source_projected_face_count = fallback_projected_count
+        source_fallback_face_count = max(0, non_chart_face_count - source_projected_face_count)
+        atlas_layout_debug_stats["nonChartFaceCount"] = non_chart_face_count
+        atlas_layout_debug_stats["sourceProjectedFaceCount"] = source_projected_face_count
+        atlas_layout_debug_stats["sourceFallbackFaceCount"] = source_fallback_face_count
+        atlas_layout_debug_stats["legacyPerFaceFallbackTileSize"] = atlas_layout_debug_stats.get("fallbackTileSize")
+        atlas_layout_debug_stats["fallbackFaceCount"] = source_fallback_face_count
+        atlas_layout_debug_stats["fallbackTileSize"] = None
 
     texture_diagnostics = build_texture_diagnostics(
         texture=texture,
@@ -7890,6 +8053,18 @@ async def write_textured_obj(
         "activeTextureKeyframeCount": len(keyframes),
         "denseSingleViewTexture": dense_single_view_enabled,
         "rgbdHeroPatchTexture": profile.rgbd_hero_patch_texture,
+        "sourceImageProjectionAtlas": (
+            source_image_atlas_layout.stats
+            if source_image_atlas_layout is not None
+            else {
+                "enabled": False,
+                "reason": (
+                    "not_applicable_for_projection_mode"
+                    if active_projection_mode not in {"direct", "dense_single_view"}
+                    else "no_non_chart_owned_faces"
+                ),
+            }
+        ),
         "cpuVisibility": {
             "enabled": bool(visibility_stats),
             "rasterMaxSize": TEXTURE_VISIBILITY_RASTER_MAX_SIZE,
@@ -8921,6 +9096,310 @@ def atlas_tile_padding(tile_size: int) -> int:
     if tile_size < 6:
         return 0
     return min(4, max(1, tile_size // 6))
+
+
+def should_use_source_image_projection_atlas(
+    *,
+    profile: ProcessingProfile,
+    active_projection_mode: str,
+    keyframes: list[ProjectionKeyframe],
+) -> bool:
+    return (
+        TEXTURE_SOURCE_IMAGE_ATLAS_ENABLED
+        and bool(keyframes)
+        and active_projection_mode in {"direct", "dense_single_view"}
+        and profile.fallback_texture_face_limit is None
+    )
+
+
+def build_source_image_atlas_layout(
+    *,
+    keyframes: list[ProjectionKeyframe],
+    face_owner_labels: list[str | None],
+    face_to_chart: dict[int, PlanarTextureChart],
+    atlas_max_size: int,
+    tile_start_y: int,
+) -> SourceImageAtlasLayout | None:
+    owner_counts: dict[str, int] = {}
+    for face_index, owner_label in enumerate(face_owner_labels):
+        if owner_label is None or face_index in face_to_chart:
+            continue
+        owner_counts[owner_label] = owner_counts.get(owner_label, 0) + 1
+
+    if not owner_counts:
+        return None
+
+    keyframe_order = {keyframe.debug_id: index for index, keyframe in enumerate(keyframes)}
+    eligible_keyframes = [
+        keyframe
+        for keyframe in keyframes
+        if owner_counts.get(keyframe.debug_id, 0) > 0
+    ]
+    eligible_keyframes.sort(
+        key=lambda keyframe: (
+            owner_counts.get(keyframe.debug_id, 0),
+            -keyframe_order.get(keyframe.debug_id, 0),
+        ),
+        reverse=True,
+    )
+
+    tile_size, columns, rows, capacity = fit_source_image_tiles(
+        source_keyframe_count=len(eligible_keyframes),
+        atlas_max_size=atlas_max_size,
+        tile_start_y=tile_start_y,
+    )
+    if tile_size <= 0 or columns <= 0 or rows <= 0 or capacity <= 0:
+        return None
+
+    included_keyframes = eligible_keyframes[:capacity]
+    placements: dict[str, SourceImageAtlasPlacement] = {}
+    for index, keyframe in enumerate(included_keyframes):
+        column = index % columns
+        row = index // columns
+        tile_x = column * tile_size
+        tile_y = tile_start_y + row * tile_size
+        placement = build_source_image_atlas_placement(
+            keyframe=keyframe,
+            tile_x=tile_x,
+            tile_y=tile_y,
+            tile_size=tile_size,
+            owner_face_count=owner_counts.get(keyframe.debug_id, 0),
+        )
+        placements[keyframe.debug_id] = placement
+
+    atlas_height = max(64, tile_start_y + rows * tile_size)
+    dropped_keyframes = eligible_keyframes[capacity:]
+    return SourceImageAtlasLayout(
+        width=atlas_max_size,
+        height=min(atlas_max_size, atlas_height),
+        tile_size=tile_size,
+        columns=columns,
+        rows=rows,
+        tile_start_y=tile_start_y,
+        placements=placements,
+        stats={
+            "enabled": True,
+            "strategy": "source_keyframe_projection_atlas",
+            "sourceKeyframeCount": len(keyframes),
+            "eligibleKeyframeCount": len(eligible_keyframes),
+            "packedKeyframeCount": len(included_keyframes),
+            "droppedKeyframeCount": len(dropped_keyframes),
+            "tileSize": tile_size,
+            "tilePadding": TEXTURE_SOURCE_IMAGE_ATLAS_PADDING,
+            "columns": columns,
+            "rows": rows,
+            "tileStartY": tile_start_y,
+            "atlasMaxSize": atlas_max_size,
+            "placements": [
+                source_image_atlas_placement_stats(placement)
+                for placement in placements.values()
+            ],
+            "droppedKeyframes": [
+                {
+                    "keyframe": keyframe.debug_id,
+                    "ownerFaceCount": owner_counts.get(keyframe.debug_id, 0),
+                }
+                for keyframe in dropped_keyframes[:12]
+            ],
+        },
+    )
+
+
+def fit_source_image_tiles(
+    *,
+    source_keyframe_count: int,
+    atlas_max_size: int,
+    tile_start_y: int,
+) -> tuple[int, int, int, int]:
+    if source_keyframe_count <= 0:
+        return 0, 0, 0, 0
+
+    available_height = atlas_max_size - tile_start_y
+    if available_height < TEXTURE_SOURCE_IMAGE_ATLAS_MIN_TILE_SIZE:
+        return 0, 0, 0, 0
+
+    max_tile_size = min(TEXTURE_SOURCE_IMAGE_ATLAS_MAX_TILE_SIZE, atlas_max_size)
+    step = max(1, TEXTURE_SOURCE_IMAGE_ATLAS_TILE_STEP)
+    for tile_size in range(max_tile_size, TEXTURE_SOURCE_IMAGE_ATLAS_MIN_TILE_SIZE - 1, -step):
+        columns = max(1, atlas_max_size // tile_size)
+        rows = math.ceil(source_keyframe_count / columns)
+        if rows * tile_size <= available_height:
+            return tile_size, columns, rows, source_keyframe_count
+
+    tile_size = TEXTURE_SOURCE_IMAGE_ATLAS_MIN_TILE_SIZE
+    columns = max(1, atlas_max_size // tile_size)
+    rows = max(0, available_height // tile_size)
+    capacity = min(source_keyframe_count, columns * rows)
+    if capacity <= 0:
+        return 0, 0, 0, 0
+    return tile_size, columns, math.ceil(capacity / columns), capacity
+
+
+def build_source_image_atlas_placement(
+    *,
+    keyframe: ProjectionKeyframe,
+    tile_x: int,
+    tile_y: int,
+    tile_size: int,
+    owner_face_count: int,
+) -> SourceImageAtlasPlacement:
+    padding = min(TEXTURE_SOURCE_IMAGE_ATLAS_PADDING, max(0, (tile_size - 1) // 2))
+    content_size = max(1, tile_size - padding * 2)
+    source_scale = min(content_size / max(keyframe.width, 1), content_size / max(keyframe.height, 1))
+    image_width = max(1, min(content_size, int(round(keyframe.width * source_scale))))
+    image_height = max(1, min(content_size, int(round(keyframe.height * source_scale))))
+    image_x = tile_x + padding + max(0, (content_size - image_width) // 2)
+    image_y = tile_y + padding + max(0, (content_size - image_height) // 2)
+    return SourceImageAtlasPlacement(
+        keyframe=keyframe,
+        x=tile_x,
+        y=tile_y,
+        tile_size=tile_size,
+        image_x=image_x,
+        image_y=image_y,
+        image_width=image_width,
+        image_height=image_height,
+        source_scale=source_scale,
+        owner_face_count=owner_face_count,
+    )
+
+
+def source_image_atlas_placement_stats(placement: SourceImageAtlasPlacement) -> dict:
+    return {
+        "keyframe": placement.keyframe.debug_id,
+        "ownerFaceCount": placement.owner_face_count,
+        "tile": {
+            "x": placement.x,
+            "y": placement.y,
+            "size": placement.tile_size,
+        },
+        "imageRect": {
+            "x": placement.image_x,
+            "y": placement.image_y,
+            "width": placement.image_width,
+            "height": placement.image_height,
+        },
+        "sourceImage": {
+            "width": placement.keyframe.width,
+            "height": placement.keyframe.height,
+        },
+        "sourceScale": round(placement.source_scale, 5),
+    }
+
+
+def paste_source_image_atlas_tiles(
+    texture: Image.Image,
+    texture_mask: Image.Image,
+    source_atlas: SourceImageAtlasLayout,
+) -> dict:
+    filled_pixel_count = 0
+    keyframe_contribution_counts: dict[str, int] = {}
+    resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
+
+    for placement in source_atlas.placements.values():
+        resized = placement.keyframe.image.resize(
+            (placement.image_width, placement.image_height),
+            resample=resample,
+        )
+        texture.paste(resized, (placement.image_x, placement.image_y))
+        texture_mask.paste(
+            Image.new("L", (placement.image_width, placement.image_height), 255),
+            (placement.image_x, placement.image_y),
+        )
+        pixel_count = placement.image_width * placement.image_height
+        filled_pixel_count += pixel_count
+        keyframe_contribution_counts[placement.keyframe.debug_id] = pixel_count
+
+    return {
+        "filledPixelCount": filled_pixel_count,
+        "projectedPixelCount": filled_pixel_count,
+        "singleSamplePixelCount": filled_pixel_count,
+        "acceptedProjectionSampleCount": filled_pixel_count,
+        "keyframeContributionCounts": keyframe_contribution_counts,
+    }
+
+
+def source_image_atlas_point(
+    placement: SourceImageAtlasPlacement,
+    projection: tuple[float, float, float],
+) -> tuple[float, float]:
+    u, v, _depth = projection
+    scale_x = (placement.image_width - 1) / max(placement.keyframe.width - 1, 1)
+    scale_y = (placement.image_height - 1) / max(placement.keyframe.height - 1, 1)
+    x = placement.image_x + clamp_float(u, 0.0, placement.keyframe.width - 1) * scale_x
+    y = placement.image_y + clamp_float(v, 0.0, placement.keyframe.height - 1) * scale_y
+    return x, y
+
+
+def source_image_atlas_face_projection(
+    face_vertices: list[tuple[float, float, float]],
+    candidates: list[TextureProjectionCandidate],
+    source_atlas: SourceImageAtlasLayout,
+) -> dict:
+    rejected_invalid_projection_count = 0
+    rejected_depth_edge_count = 0
+    rejected_occluded_count = 0
+    depth_tested_count = 0
+    missing_depth_count = 0
+    center = triangle_center(face_vertices[0], face_vertices[1], face_vertices[2])
+
+    for candidate in candidates:
+        placement = source_atlas.placements.get(candidate.keyframe_debug_id)
+        if placement is None:
+            continue
+        depth_visibility = depth_visibility_for_world_point(center, placement.keyframe)
+        if depth_visibility.status == "occluded":
+            rejected_occluded_count += 1
+            continue
+        if depth_visibility.status == "depth_edge":
+            rejected_depth_edge_count += 1
+            continue
+        if depth_visibility.status == "visible":
+            depth_tested_count += 1
+        else:
+            missing_depth_count += 1
+
+        projections = [project_world_point(vertex, placement.keyframe) for vertex in face_vertices]
+        if any(projection is None for projection in projections):
+            rejected_invalid_projection_count += 1
+            continue
+        atlas_points = [
+            source_image_atlas_point(placement, projection)
+            for projection in projections
+            if projection is not None
+        ]
+        if len(atlas_points) == 3:
+            return {
+                "atlasPoints": atlas_points,
+                "keyframe": candidate.keyframe_debug_id,
+                "rejectedInvalidProjectionSampleCount": rejected_invalid_projection_count,
+                "rejectedDepthEdgeSampleCount": rejected_depth_edge_count,
+                "rejectedOccludedSampleCount": rejected_occluded_count,
+                "depthTestedSampleCount": depth_tested_count,
+                "missingDepthSampleCount": missing_depth_count,
+            }
+    return {
+        "atlasPoints": None,
+        "keyframe": None,
+        "rejectedInvalidProjectionSampleCount": rejected_invalid_projection_count,
+        "rejectedDepthEdgeSampleCount": rejected_depth_edge_count,
+        "rejectedOccludedSampleCount": rejected_occluded_count,
+        "depthTestedSampleCount": depth_tested_count,
+        "missingDepthSampleCount": missing_depth_count,
+    }
+
+
+def source_image_atlas_fallback_triangle(source_atlas: SourceImageAtlasLayout) -> list[tuple[float, float]]:
+    placement = next(iter(source_atlas.placements.values()), None)
+    if placement is None:
+        return atlas_triangle_points((0, 0), max(TEXTURE_SOURCE_IMAGE_ATLAS_MIN_TILE_SIZE, 8))
+
+    padding = max(1, min(TEXTURE_SOURCE_IMAGE_ATLAS_PADDING, placement.tile_size // 4))
+    left = placement.x + 0.25
+    top = placement.y + 0.25
+    right = placement.x + max(1.0, padding - 0.25)
+    bottom = placement.y + max(1.0, padding - 0.25)
+    return [(left, bottom), (right, bottom), (left, top)]
 
 
 def texture_dilation_pixels(tile_size: int) -> int:

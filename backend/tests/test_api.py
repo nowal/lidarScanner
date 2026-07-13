@@ -2085,7 +2085,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["geometryPreserved"] is True
         assert manifest["artifacts"]["vertexColoredPlyDebugPreview"]["available"] is False
         assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
-        assert manifest["artifacts"]["texturedObj"]["stats"]["uvStrategy"] == "render_mesh_per_face_atlas_padded"
+        assert manifest["artifacts"]["texturedObj"]["stats"]["uvStrategy"] == "source_keyframe_projection_atlas"
         assert manifest["artifacts"]["texturedObj"]["stats"]["faceCount"] > manifest["artifacts"]["rawFusedMesh"]["stats"]["faceCount"]
         assert manifest["artifacts"]["texturedObj"]["stats"]["texturedFaceCount"] <= manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
         assert manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["used"] is True
@@ -2097,7 +2097,8 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
             manifest["artifacts"]["texturedObj"]["stats"]["renderMesh"]["renderFaceCount"]
             == manifest["artifacts"]["texturedObj"]["stats"]["faceCount"]
         )
-        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["enabled"] is False
+        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["enabled"] is True
+        assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["sourceImageAtlas"]["enabled"] is True
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
 
         texture_debug = (await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug.json", headers=headers)).json()
