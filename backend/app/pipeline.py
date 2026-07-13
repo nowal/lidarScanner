@@ -16,6 +16,7 @@ import os
 import shutil
 import struct
 import sys
+import zipfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Awaitable, Callable, NamedTuple, Protocol
@@ -910,9 +911,9 @@ class TexturedMeshStage:
                         "stats": textured_stats["diagnostics"],
                     },
                     "usdz": {
-                        "available": False,
                         "path": None,
-                        "reason": "USDZ conversion is represented in the manifest but not enabled in this backend milestone.",
+                        "available": False,
+                        "reason": "USDZ export was not requested.",
                     },
                     "glb": {
                         "available": False,
@@ -971,6 +972,7 @@ class TexturedMeshStage:
                 else None
             ),
             output_projection_overlay_dir=job_dir / "work",
+            output_textured_usdz_path=job_dir / "work" / "textured_mesh.usdz",
             output_textured_glb_path=job_dir / "work" / "textured_mesh.glb",
             output_uv_checker_glb_path=job_dir / "work" / "uv_checker.glb",
             output_coverage_debug_glb_path=job_dir / "work" / "coverage_debug.glb",
@@ -1018,9 +1020,8 @@ class TexturedMeshStage:
                 "stats": textured_stats["diagnostics"],
             },
             "usdz": {
-                "available": False,
-                "path": None,
-                "reason": "USDZ conversion is represented in the manifest but not enabled in this backend milestone.",
+                **textured_stats["usdz"],
+                "role": "photoreal_textured_mesh",
             },
             "glb": {
                 **textured_stats["glb"],
@@ -1092,6 +1093,7 @@ class ExportStage:
             "textured_mesh.obj",
             "textured_mesh.mtl",
             "textured_mesh_texture.png",
+            "textured_mesh.usdz",
             "textured_mesh.glb",
             "geometry_only.glb",
             "geometry_culled.glb",
@@ -1127,7 +1129,9 @@ class ExportStage:
             "available": False,
             "reason": "RGB-D single-frame diagnostic did not run.",
         }
-        if (result_dir / "textured_mesh.obj").exists():
+        if (result_dir / "textured_mesh.usdz").exists():
+            preferred_photoreal = "usdz"
+        elif (result_dir / "textured_mesh.obj").exists():
             preferred_photoreal = "textured_obj"
         elif (result_dir / "rgbd_single_frame_mesh.obj").exists():
             preferred_photoreal = "rgbd_single_frame_mesh"
@@ -1287,6 +1291,7 @@ class ExportStage:
                 "textured_mesh.obj",
                 "textured_mesh.mtl",
                 "textured_mesh_texture.png",
+                "textured_mesh.usdz",
                 "textured_mesh.glb",
                 "geometry_only.glb",
                 "geometry_culled.glb",
@@ -1336,6 +1341,9 @@ class ExportStage:
             "coordinateTransforms": coordinate_transforms,
             "keyframes": keyframes,
             "preferredPreview": (
+                "textured_mesh.usdz"
+                if preferred_photoreal == "usdz"
+                else
                 "textured_mesh.obj"
                 if preferred_photoreal == "textured_obj"
                 else "rgbd_single_frame_mesh.obj"
@@ -5899,6 +5907,284 @@ def write_mesh_glb(
     }
 
 
+def write_textured_usdz(
+    mesh: FusedMesh,
+    output_path: Path,
+    *,
+    face_uvs: FaceUVs,
+    texture_path: Path,
+    name: str = "textured_mesh",
+) -> dict:
+    if not mesh.vertices or not mesh.faces:
+        return {
+            "format": "usdz",
+            "path": output_path.name,
+            "available": False,
+            "reason": "Mesh has no vertices or triangle faces.",
+        }
+    if len(face_uvs) != len(mesh.faces):
+        return {
+            "format": "usdz",
+            "path": output_path.name,
+            "available": False,
+            "reason": "UV coordinate count does not match face count.",
+        }
+    if not texture_path.exists():
+        return {
+            "format": "usdz",
+            "path": output_path.name,
+            "available": False,
+            "reason": "Texture PNG is missing.",
+        }
+
+    flat_uvs = [uv for face_uv in face_uvs for uv in face_uv]
+    validation = validate_glb_mesh_inputs(
+        mesh.vertices,
+        [index for face in mesh.faces for index in face],
+        flat_uvs,
+    )
+    if not validation["valid"]:
+        return {
+            "format": "usdz",
+            "path": output_path.name,
+            "available": False,
+            "reason": validation["reason"],
+            "validation": validation,
+        }
+
+    usda_path = output_path.with_suffix(".usda.tmp")
+    texture_arcname = texture_path.name
+    root_name = usd_identifier(name)
+    vertex_normals = compute_vertex_normals(mesh.vertices, mesh.faces)
+    try:
+        write_textured_usda(
+            usda_path,
+            mesh=mesh,
+            face_uvs=face_uvs,
+            vertex_normals=vertex_normals,
+            root_name=root_name,
+            mesh_name="Mesh",
+            material_name="LidarAI_Textured_Material",
+            texture_arcname=texture_arcname,
+        )
+        write_usdz_archive(output_path, [
+            (f"{name}.usda", usda_path),
+            (texture_arcname, texture_path),
+        ])
+    finally:
+        try:
+            usda_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    return {
+        "format": "usdz",
+        "path": output_path.name,
+        "available": output_path.exists(),
+        "primitiveType": "triangles",
+        "doubleSided": True,
+        "vertexCount": len(mesh.vertices),
+        "faceCount": len(mesh.faces),
+        "uvCoordinateCount": len(flat_uvs),
+        "hasTexture": True,
+        "texturePath": texture_arcname,
+        "sizeBytes": output_path.stat().st_size if output_path.exists() else 0,
+        "generator": "direct_usda_usdz_package",
+        "validation": validation,
+    }
+
+
+def usd_identifier(value: str) -> str:
+    cleaned = "".join(character if character.isalnum() or character == "_" else "_" for character in value)
+    if not cleaned:
+        return "Mesh"
+    if cleaned[0].isdigit():
+        cleaned = f"_{cleaned}"
+    return cleaned
+
+
+def write_textured_usda(
+    output_path: Path,
+    *,
+    mesh: FusedMesh,
+    face_uvs: FaceUVs,
+    vertex_normals: list[tuple[float, float, float]],
+    root_name: str,
+    mesh_name: str,
+    material_name: str,
+    texture_arcname: str,
+) -> None:
+    with output_path.open("w", encoding="utf-8") as handle:
+        handle.write("#usda 1.0\n")
+        handle.write("(\n")
+        handle.write(f"    defaultPrim = \"{root_name}\"\n")
+        handle.write("    metersPerUnit = 1\n")
+        handle.write("    upAxis = \"Y\"\n")
+        handle.write(")\n\n")
+        handle.write(f"def Xform \"{root_name}\"\n")
+        handle.write("{\n")
+        handle.write(f"    def Mesh \"{mesh_name}\" (\n")
+        handle.write("        prepend apiSchemas = [\"MaterialBindingAPI\"]\n")
+        handle.write("    )\n")
+        handle.write("    {\n")
+        handle.write("        uniform token subdivisionScheme = \"none\"\n")
+        handle.write("        uniform bool doubleSided = 1\n")
+        write_usd_tuple_array(
+            handle,
+            "point3f[] points",
+            mesh.vertices,
+            indent="        ",
+            tuple_formatter=format_usd_vec3,
+        )
+        write_usd_scalar_array(
+            handle,
+            "int[] faceVertexCounts",
+            (3 for _face in mesh.faces),
+            indent="        ",
+            value_formatter=str,
+        )
+        write_usd_scalar_array(
+            handle,
+            "int[] faceVertexIndices",
+            (index for face in mesh.faces for index in face),
+            indent="        ",
+            value_formatter=str,
+        )
+        write_usd_tuple_array(
+            handle,
+            "normal3f[] normals",
+            vertex_normals,
+            indent="        ",
+            tuple_formatter=format_usd_vec3,
+            metadata=' (\n            interpolation = "vertex"\n        )',
+        )
+        write_usd_tuple_array(
+            handle,
+            "texCoord2f[] primvars:st",
+            (uv for face_uv in face_uvs for uv in face_uv),
+            indent="        ",
+            tuple_formatter=format_usd_vec2,
+            metadata=' (\n            interpolation = "faceVarying"\n        )',
+        )
+        handle.write(f"        rel material:binding = </{root_name}/Looks/{material_name}>\n")
+        handle.write("    }\n\n")
+        handle.write("    def Scope \"Looks\"\n")
+        handle.write("    {\n")
+        handle.write(f"        def Material \"{material_name}\"\n")
+        handle.write("        {\n")
+        handle.write(
+            f"            token outputs:surface.connect = </{root_name}/Looks/{material_name}/PreviewSurface.outputs:surface>\n"
+        )
+        handle.write("            def Shader \"PreviewSurface\"\n")
+        handle.write("            {\n")
+        handle.write("                uniform token info:id = \"UsdPreviewSurface\"\n")
+        handle.write(
+            f"                color3f inputs:diffuseColor.connect = </{root_name}/Looks/{material_name}/DiffuseTexture.outputs:rgb>\n"
+        )
+        handle.write("                float inputs:roughness = 1\n")
+        handle.write("                float inputs:metallic = 0\n")
+        handle.write("                token outputs:surface\n")
+        handle.write("            }\n")
+        handle.write("            def Shader \"DiffuseTexture\"\n")
+        handle.write("            {\n")
+        handle.write("                uniform token info:id = \"UsdUVTexture\"\n")
+        handle.write(f"                asset inputs:file = @{texture_arcname}@\n")
+        handle.write("                token inputs:sourceColorSpace = \"sRGB\"\n")
+        handle.write(
+            f"                float2 inputs:st.connect = </{root_name}/Looks/{material_name}/Primvar_st.outputs:result>\n"
+        )
+        handle.write("                color3f outputs:rgb\n")
+        handle.write("            }\n")
+        handle.write("            def Shader \"Primvar_st\"\n")
+        handle.write("            {\n")
+        handle.write("                uniform token info:id = \"UsdPrimvarReader_float2\"\n")
+        handle.write("                string inputs:varname = \"st\"\n")
+        handle.write("                float2 outputs:result\n")
+        handle.write("            }\n")
+        handle.write("        }\n")
+        handle.write("    }\n")
+        handle.write("}\n")
+
+
+def write_usd_scalar_array(
+    handle,
+    declaration: str,
+    values,
+    *,
+    indent: str,
+    value_formatter: Callable[[object], str],
+    values_per_line: int = 24,
+) -> None:
+    handle.write(f"{indent}{declaration} = [\n")
+    line_values: list[str] = []
+    for value in values:
+        line_values.append(value_formatter(value))
+        if len(line_values) >= values_per_line:
+            handle.write(f"{indent}    {', '.join(line_values)},\n")
+            line_values = []
+    if line_values:
+        handle.write(f"{indent}    {', '.join(line_values)},\n")
+    handle.write(f"{indent}]\n")
+
+
+def write_usd_tuple_array(
+    handle,
+    declaration: str,
+    values,
+    *,
+    indent: str,
+    tuple_formatter: Callable[[object], str],
+    metadata: str = "",
+    values_per_line: int = 4,
+) -> None:
+    handle.write(f"{indent}{declaration} = [\n")
+    line_values: list[str] = []
+    for value in values:
+        line_values.append(tuple_formatter(value))
+        if len(line_values) >= values_per_line:
+            handle.write(f"{indent}    {', '.join(line_values)},\n")
+            line_values = []
+    if line_values:
+        handle.write(f"{indent}    {', '.join(line_values)},\n")
+    handle.write(f"{indent}]{metadata}\n")
+
+
+def format_usd_vec3(value: object) -> str:
+    x, y, z = value
+    return f"({float(x):.6f}, {float(y):.6f}, {float(z):.6f})"
+
+
+def format_usd_vec2(value: object) -> str:
+    u, v = value
+    return f"({float(u):.8f}, {float(v):.8f})"
+
+
+def write_usdz_archive(output_path: Path, files: list[tuple[str, Path]]) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+        for arcname, source_path in files:
+            info = zipfile.ZipInfo(arcname)
+            info.compress_type = zipfile.ZIP_STORED
+            info.extra = usdz_alignment_extra(
+                current_offset=archive.fp.tell(),
+                filename_length=len(arcname.encode("utf-8")),
+            )
+            with archive.open(info, "w") as destination:
+                with source_path.open("rb") as source:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+
+
+def usdz_alignment_extra(current_offset: int, filename_length: int) -> bytes:
+    local_header_length = 30 + filename_length
+    padding_length = (64 - ((current_offset + local_header_length) % 64)) % 64
+    if padding_length == 0:
+        return b""
+    if padding_length < 4:
+        padding_length += 64
+    payload_length = padding_length - 4
+    return struct.pack("<HH", 0xCAFE, payload_length) + (b"\0" * payload_length)
+
+
 def validate_glb_mesh_inputs(
     vertices: list[tuple[float, float, float]],
     indices: list[int],
@@ -7359,6 +7645,7 @@ async def write_textured_obj(
     output_debug_path: Path | None = None,
     output_debug_preview_path: Path | None = None,
     output_projection_overlay_dir: Path | None = None,
+    output_textured_usdz_path: Path | None = None,
     output_textured_glb_path: Path | None = None,
     output_uv_checker_glb_path: Path | None = None,
     output_coverage_debug_glb_path: Path | None = None,
@@ -8112,6 +8399,12 @@ async def write_textured_obj(
             output_projection_overlay_dir,
         )
 
+    usdz_artifact = {
+        "format": "usdz",
+        "path": "textured_mesh.usdz",
+        "available": False,
+        "reason": "Textured USDZ export was not requested.",
+    }
     glb_artifacts = {
         "texturedMeshGlb": {
             "format": "glb",
@@ -8140,6 +8433,14 @@ async def write_textured_obj(
     }
     texture.save(output_texture_path)
     texture_png_bytes = output_texture_path.read_bytes()
+    if output_textured_usdz_path is not None:
+        usdz_artifact = write_textured_usdz(
+            mesh,
+            output_textured_usdz_path,
+            face_uvs=face_uvs,
+            texture_path=output_texture_path,
+            name="textured_mesh",
+        )
     if output_textured_glb_path is not None:
         glb_artifacts["texturedMeshGlb"] = write_mesh_glb(
             mesh,
@@ -8164,6 +8465,7 @@ async def write_textured_obj(
             "path": output_coverage_debug_report_path.name if output_coverage_debug_report_path else None,
             "available": bool(output_coverage_debug_report_path and output_coverage_debug_report_path.exists()),
         }
+    texture_diagnostics["usdzDiagnostics"] = usdz_artifact
     texture_diagnostics["glbDiagnostics"] = glb_artifacts
     if output_debug_preview_path is not None:
         write_texture_debug_preview(texture, output_debug_preview_path)
@@ -8237,6 +8539,7 @@ async def write_textured_obj(
         "renderMesh": mesh.stats.get("textureRenderMesh", {}),
         "atlasLayout": atlas_layout_debug_stats,
         "textureWorkerCount": parallel_worker_count,
+        "usdz": usdz_artifact,
         "glb": glb_artifacts["texturedMeshGlb"],
         "diagnosticGlbs": {
             "uvCheckerGlb": glb_artifacts["uvCheckerGlb"],

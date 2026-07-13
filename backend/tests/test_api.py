@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import struct
+import zipfile
 from array import array
 from io import BytesIO
 
@@ -655,7 +656,7 @@ async def test_raw_mesh_artifacts_are_exported_when_texturing_is_disabled():
         assert status["artifacts"]["uvCheckerGlbUrl"].endswith("/uv_checker.glb")
         assert status["artifacts"]["coverageDebugGlbUrl"].endswith("/coverage_debug.glb")
         assert status["artifacts"]["texturePngUrl"].endswith("/textured_mesh_texture.png")
-        assert status["artifacts"]["usdzUrl"] is None
+        assert status["artifacts"]["usdzUrl"].endswith("/textured_mesh.usdz")
 
         obj_resp = await client.get(f"/api/v1/jobs/{job_id}/result/fused_mesh.obj", headers=headers)
         assert obj_resp.status_code == 200
@@ -663,8 +664,10 @@ async def test_raw_mesh_artifacts_are_exported_when_texturing_is_disabled():
         assert "f " in obj_resp.text
 
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
-        assert manifest["preferredPhotorealArtifact"] == "textured_obj"
+        assert manifest["preferredPhotorealArtifact"] == "usdz"
         assert manifest["artifacts"]["texturedObj"]["stats"]["projectionCoverage"] > 0
+        assert manifest["artifacts"]["usdz"]["available"] is True
+        assert manifest["artifacts"]["usdz"]["path"] == "textured_mesh.usdz"
         assert manifest["artifacts"]["glb"]["available"] is True
         assert manifest["artifacts"]["glb"]["path"] == "textured_mesh.glb"
         assert manifest["artifacts"]["geometryOnlyGlb"]["available"] is True
@@ -675,6 +678,14 @@ async def test_raw_mesh_artifacts_are_exported_when_texturing_is_disabled():
         assert manifest["artifacts"]["meshIntegrityReport"]["available"] is True
         assert manifest["artifacts"]["textureDebug"]["available"] is True
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["invalidFaceCount"] == 1
+
+        usdz_resp = await client.get(f"/api/v1/jobs/{job_id}/result/textured_mesh.usdz", headers=headers)
+        assert usdz_resp.status_code == 200
+        assert usdz_resp.headers["content-type"] == "model/vnd.usdz+zip"
+        with zipfile.ZipFile(BytesIO(usdz_resp.content)) as archive:
+            assert archive.namelist() == ["textured_mesh.usda", "textured_mesh_texture.png"]
+            assert all(info.compress_type == zipfile.ZIP_STORED for info in archive.infolist())
+            assert b"UsdPreviewSurface" in archive.read("textured_mesh.usda")
 
 
 def test_texture_render_mesh_reduces_dense_mesh_for_larger_atlas_tiles(monkeypatch):
@@ -2034,6 +2045,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         status = await wait_for_complete(client, job_id, headers)
         assert status["status"] == "complete"
         assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
+        assert status["artifacts"]["usdzUrl"].endswith("/textured_mesh.usdz")
         assert status["artifacts"]["vertexColoredPlyUrl"] is None
         assert status["artifacts"]["previewMeshUrl"].endswith("/fused_mesh.obj")
         assert status["artifacts"]["rgbdFusedMeshUrl"] is None
@@ -2080,6 +2092,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
 
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
         assert manifest["processingProfile"]["name"] == "fast_onboarding"
+        assert manifest["preferredPhotorealArtifact"] == "usdz"
         assert manifest["artifacts"]["rgbdFusedMesh"]["available"] is False
         assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is False
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["geometryPreserved"] is True
@@ -2100,6 +2113,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["enabled"] is True
         assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["sourceImageAtlas"]["enabled"] is True
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
+        assert manifest["artifacts"]["usdz"]["available"] is True
 
         texture_debug = (await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug.json", headers=headers)).json()
         assert [item["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedKeyframeIds"]
