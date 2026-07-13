@@ -1293,6 +1293,96 @@ def test_rgbd_hero_patch_ownership_replaces_stretched_primary_depth_edges():
     assert cull_stats["patches"][1]["primaryStretchedDepthEdgeCount"] == 2
 
 
+def test_single_keyframe_rgbd_onboarding_prunes_lidar_inconsistent_region(tmp_path):
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    intrinsics = [
+        4, 0, 0,
+        0, 4, 0,
+        2, 2, 1,
+    ]
+    keyframe_dir = tmp_path / "keyframes"
+    depth_dir = tmp_path / "depth_frames"
+    keyframe_dir.mkdir()
+    depth_dir.mkdir()
+    Image.new("RGB", (5, 5), (180, 110, 70)).save(keyframe_dir / "keyframe_001.jpg")
+
+    depth_values = []
+    for y in range(5):
+        for x in range(5):
+            depth_values.append(1.6 if x >= 3 and y >= 3 else 1.0)
+    (depth_dir / "depth_001.f32").write_bytes(struct.pack(f"<{len(depth_values)}f", *depth_values))
+    (depth_dir / "depth_001.confidence.u8").write_bytes(bytes([2] * 25))
+
+    keyframes = [{
+        "id": "onboarding-keyframe",
+        "timestamp": 0.0,
+        "cameraTransform": transform,
+        "intrinsics": intrinsics,
+        "imageResolution": [5, 5],
+        "path": "keyframes/keyframe_001.jpg",
+    }]
+    depth_frames = [{
+        "id": "onboarding-depth",
+        "colorKeyframeId": "onboarding-keyframe",
+        "timestamp": 0.0,
+        "cameraTransform": transform,
+        "intrinsics": intrinsics,
+        "depthResolution": [5, 5],
+        "depthFormat": "float32_little_endian_meters",
+        "path": "depth_frames/depth_001.f32",
+        "confidenceFormat": "uint8_arkit_confidence",
+        "confidencePath": "depth_frames/depth_001.confidence.u8",
+        "metersPerUnit": 1,
+    }]
+
+    lidar_vertices = [
+        pipeline.backproject_depth_sample_to_world(x, y, 1.0, intrinsics, transform)
+        for y in range(5)
+        for x in range(5)
+    ]
+    lidar_faces = []
+    for y in range(4):
+        for x in range(4):
+            top_left = y * 5 + x
+            top_right = top_left + 1
+            bottom_left = top_left + 5
+            bottom_right = bottom_left + 1
+            lidar_faces.append((top_left, bottom_left, top_right))
+            lidar_faces.append((top_right, bottom_left, bottom_right))
+    arkit_mesh = pipeline.FusedMesh(
+        vertices=lidar_vertices,
+        faces=lidar_faces,
+        stats={"geometrySource": "synthetic_lidar_support_plane"},
+    )
+
+    stats = pipeline.write_single_keyframe_rgbd_onboarding_mesh(
+        keyframes=keyframes,
+        depth_frames=depth_frames,
+        work_dir=tmp_path,
+        arkit_mesh=arkit_mesh,
+        output_obj_path=tmp_path / "rgbd_onboarding_mesh.obj",
+        output_mtl_path=tmp_path / "rgbd_onboarding_mesh.mtl",
+        output_texture_path=tmp_path / "rgbd_onboarding_texture.png",
+        output_debug_path=tmp_path / "rgbd_onboarding_diagnostics.json",
+        output_overlay_path=tmp_path / "rgbd_onboarding_overlay.png",
+        output_usdz_path=tmp_path / "rgbd_onboarding.usdz",
+        profile=pipeline.PROCESSING_PROFILES["fast_onboarding"],
+    )
+
+    assert stats["available"] is True
+    assert stats["selectedKeyframeId"] == "onboarding-keyframe"
+    assert stats["selectedDepthFrameId"] == "onboarding-depth"
+    assert stats["rawFaceCount"] > stats["prunedFaceCount"]
+    assert stats["pruning"]["pruneReasonCounts"]["lidar_depth_disagreement_prune"] > 0
+    assert (tmp_path / "rgbd_onboarding_mesh.obj").read_text(encoding="utf-8").count("\nf ") == stats["prunedFaceCount"]
+    assert "map_Kd rgbd_onboarding_texture.png" in (tmp_path / "rgbd_onboarding_mesh.mtl").read_text(encoding="utf-8")
+
+
 def make_rgbd_hero_patch_test_patch(
     name: str,
     confidence_values: bytes,
@@ -1951,7 +2041,7 @@ async def test_rgbd_one_keyframe_diagnostic_exports_alignment_artifacts():
 
 
 @pytest.mark.asyncio
-async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_geometry():
+async def test_fast_onboarding_profile_prefers_single_keyframe_rgbd_onboarding_mesh():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         headers = auth_headers()
@@ -2047,7 +2137,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert status["artifacts"]["texturedObjUrl"].endswith("/textured_mesh.obj")
         assert status["artifacts"]["usdzUrl"].endswith("/textured_mesh.usdz")
         assert status["artifacts"]["vertexColoredPlyUrl"] is None
-        assert status["artifacts"]["previewMeshUrl"].endswith("/fused_mesh.obj")
+        assert status["artifacts"]["previewMeshUrl"].endswith("/rgbd_onboarding.usdz")
         assert status["artifacts"]["rgbdFusedMeshUrl"] is None
         assert status["artifacts"]["textureDebugPreviewUrl"] is None
         assert status["artifacts"]["stageTimingsUrl"].endswith("/stage_timings.json")
@@ -2065,6 +2155,7 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert rgbd_stats["profile"]["densifyTextureRenderMesh"] is True
         assert rgbd_stats["profile"]["denseSingleViewTexture"] is False
         assert rgbd_stats["profile"]["rgbdHeroPatchTexture"] is False
+        assert rgbd_stats["profile"]["rgbdOnboardingMesh"] is True
         assert rgbd_stats["profile"]["textureRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["profile"]["textureTsdfRenderTargetFaces"] == pipeline.FAST_ONBOARDING_TEXTURE_TSDF_RENDER_TARGET_FACE_COUNT
         assert rgbd_stats["depthFrameCount"] == 55
@@ -2092,7 +2183,20 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
 
         manifest = (await client.get(f"/api/v1/jobs/{job_id}/result/manifest.json", headers=headers)).json()
         assert manifest["processingProfile"]["name"] == "fast_onboarding"
-        assert manifest["preferredPhotorealArtifact"] == "usdz"
+        assert manifest["preferredPhotorealArtifact"] == "rgbd_onboarding_mesh"
+        assert manifest["preferredPreview"] == "rgbd_onboarding.usdz"
+        assert manifest["artifacts"]["rgbdOnboardingMesh"]["available"] is True
+        assert manifest["artifacts"]["rgbdOnboardingMesh"]["preferred"] is True
+        onboarding_stats = manifest["artifacts"]["rgbdOnboardingMesh"]["stats"]
+        assert onboarding_stats["selectedKeyframeId"] in keyframe_selection["selectedKeyframeIds"][:4]
+        assert onboarding_stats["selectedDepthFrameId"] in depth_selection["selectedDepthFrameIds"][:4]
+        assert onboarding_stats["secondsFromCaptureStart"] <= pipeline.RGBD_ONBOARDING_WINDOW_SECONDS
+        assert onboarding_stats["rawVertexCount"] > 0
+        assert onboarding_stats["rawFaceCount"] > 0
+        assert onboarding_stats["prunedVertexCount"] > 0
+        assert onboarding_stats["prunedFaceCount"] > 0
+        assert onboarding_stats["pruning"]["pruneReasonCounts"]
+        assert onboarding_stats["becamePreferredPreview"] is True
         assert manifest["artifacts"]["rgbdFusedMesh"]["available"] is False
         assert manifest["artifacts"]["rgbdFusedMesh"]["stats"]["used"] is False
         assert manifest["artifacts"]["rawFusedMesh"]["stats"]["geometryPreserved"] is True
@@ -2114,6 +2218,24 @@ async def test_fast_onboarding_profile_textures_arkit_mesh_without_rgbd_patch_ge
         assert manifest["artifacts"]["texturedObj"]["stats"]["atlasLayout"]["sourceImageAtlas"]["enabled"] is True
         assert manifest["artifacts"]["textureDebug"]["previewAvailable"] is False
         assert manifest["artifacts"]["usdz"]["available"] is True
+
+        onboarding_obj = await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_onboarding_mesh.obj", headers=headers)
+        onboarding_mtl = await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_onboarding_mesh.mtl", headers=headers)
+        onboarding_texture = await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_onboarding_texture.png", headers=headers)
+        onboarding_diagnostics = (await client.get(
+            f"/api/v1/jobs/{job_id}/result/rgbd_onboarding_diagnostics.json",
+            headers=headers,
+        )).json()
+        assert "o rgbd_onboarding_mesh" in onboarding_obj.text
+        assert "mtllib rgbd_onboarding_mesh.mtl" in onboarding_obj.text
+        assert "\nvt " in onboarding_obj.text
+        assert "\nf " in onboarding_obj.text
+        assert "map_Kd rgbd_onboarding_texture.png" in onboarding_mtl.text
+        assert onboarding_texture.headers["content-type"] == "image/png"
+        assert onboarding_diagnostics["selectedKeyframeId"] == onboarding_stats["selectedKeyframeId"]
+        assert onboarding_diagnostics["selectedDepthFrameId"] == onboarding_stats["selectedDepthFrameId"]
+        assert onboarding_diagnostics["pruning"]["rawFaceCount"] == onboarding_stats["rawFaceCount"]
+        assert onboarding_diagnostics["pruning"]["finalFaceCount"] == onboarding_stats["prunedFaceCount"]
 
         texture_debug = (await client.get(f"/api/v1/jobs/{job_id}/result/texture_debug.json", headers=headers)).json()
         assert [item["id"] for item in texture_debug["keyframes"]] == keyframe_selection["selectedKeyframeIds"]

@@ -151,6 +151,7 @@ class JobStore:
             stage_timings_url = self._artifact_url_if_present(result_dir, result_base, "stage_timings.json")
             usdz_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.usdz")
             glb_url = self._artifact_url_if_present(result_dir, result_base, "textured_mesh.glb")
+            preview_mesh_url = self._preferred_preview_url_if_present(result_dir, result_base) or preview_mesh_url
         return JobStatusResponse(
             jobId=record.job_id,
             createdAt=record.created_at,
@@ -193,6 +194,26 @@ class JobStore:
 
     def _artifact_url_if_present(self, result_dir: Path, result_base: str, filename: str) -> Optional[str]:
         return f"{result_base}/{filename}" if (result_dir / filename).exists() else None
+
+    def _preferred_preview_url_if_present(self, result_dir: Path, result_base: str) -> Optional[str]:
+        for manifest_name in ("manifest.json", "reconstructed_scene.json"):
+            manifest_path = result_dir / manifest_name
+            if not manifest_path.exists():
+                continue
+            try:
+                preferred = json.loads(manifest_path.read_text(encoding="utf-8")).get("preferredPreview")
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(preferred, str) or not preferred:
+                continue
+            preferred_path = Path(preferred)
+            if preferred_path.name != preferred:
+                continue
+            if preferred_path.name not in {"rgbd_onboarding_mesh.obj", "rgbd_onboarding.usdz"}:
+                continue
+            if (result_dir / preferred_path.name).exists():
+                return f"{result_base}/{preferred_path.name}"
+        return None
 
     async def publish(self, record: JobRecord) -> None:
         event = {"jobId": record.job_id, "status": self.to_response(record).model_dump(mode="json")}

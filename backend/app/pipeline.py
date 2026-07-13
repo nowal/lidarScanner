@@ -383,6 +383,18 @@ RGBD_HERO_PATCH_SECONDARY_CLAIM_RADIUS_PIXELS = 1
 RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_ABSOLUTE_METERS = 0.18
 RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_RELATIVE = 0.16
 RGBD_HERO_PATCH_PRIMARY_OWNER_MIN_VALID_NEIGHBORS = 3
+RGBD_ONBOARDING_WINDOW_SECONDS = 3.0
+RGBD_ONBOARDING_TARGET_SAMPLES = 160_000
+RGBD_ONBOARDING_FACE_ABSOLUTE_TOLERANCE_METERS = 0.18
+RGBD_ONBOARDING_FACE_RELATIVE_TOLERANCE = 0.22
+RGBD_ONBOARDING_LIDAR_SUPPORT_DISTANCE_METERS = 0.15
+RGBD_ONBOARDING_LIDAR_DEPTH_SUPPORT_METERS = 0.15
+RGBD_ONBOARDING_LIDAR_HARD_REJECT_DEPTH_METERS = 0.32
+RGBD_ONBOARDING_LIDAR_HARD_REJECT_DISTANCE_METERS = 0.28
+RGBD_ONBOARDING_MAX_FACE_EDGE_METERS = 0.75
+RGBD_ONBOARDING_MIN_COMPONENT_FACES = 8
+RGBD_ONBOARDING_MIN_COMPONENT_FACE_RATIO = 0.003
+RGBD_ONBOARDING_LIDAR_PIXEL_BUCKETS = 28
 
 
 @dataclass(frozen=True)
@@ -404,6 +416,7 @@ class ProcessingProfile:
     densify_texture_render_mesh: bool = False
     dense_single_view_texture: bool = False
     rgbd_hero_patch_texture: bool = False
+    rgbd_onboarding_mesh: bool = False
 
 
 PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
@@ -424,6 +437,7 @@ PROCESSING_PROFILES: dict[str, ProcessingProfile] = {
         densify_texture_render_mesh=True,
         dense_single_view_texture=False,
         rgbd_hero_patch_texture=False,
+        rgbd_onboarding_mesh=True,
     ),
     "full_quality": ProcessingProfile(
         name="full_quality",
@@ -832,6 +846,37 @@ class TexturedMeshStage:
         depth_manifest_path = job_dir / "work" / "depth_frame_manifest.json"
         depth_frames = json.loads(depth_manifest_path.read_text(encoding="utf-8")) if depth_manifest_path.exists() else []
         mesh = read_fused_mesh_json(job_dir / "work" / "fused_mesh.json")
+        if profile.rgbd_onboarding_mesh:
+            await report(self.name, 74, "Building single-keyframe RGB-D onboarding mesh")
+            onboarding_stats = write_single_keyframe_rgbd_onboarding_mesh(
+                keyframes=keyframes,
+                depth_frames=depth_frames,
+                work_dir=job_dir / "work",
+                arkit_mesh=mesh,
+                output_obj_path=job_dir / "work" / "rgbd_onboarding_mesh.obj",
+                output_mtl_path=job_dir / "work" / "rgbd_onboarding_mesh.mtl",
+                output_texture_path=job_dir / "work" / "rgbd_onboarding_texture.png",
+                output_debug_path=job_dir / "work" / "rgbd_onboarding_diagnostics.json",
+                output_overlay_path=job_dir / "work" / "rgbd_onboarding_overlay.png",
+                output_usdz_path=job_dir / "work" / "rgbd_onboarding.usdz",
+                profile=profile,
+            )
+            if onboarding_stats.get("available"):
+                await report(
+                    self.name,
+                    80,
+                    (
+                        "Built RGB-D onboarding mesh "
+                        f"({onboarding_stats.get('prunedFaceCount', 0)} faces from "
+                        f"{onboarding_stats.get('selectedKeyframeId')})"
+                    ),
+                )
+            else:
+                await report(
+                    self.name,
+                    80,
+                    f"RGB-D onboarding mesh unavailable: {onboarding_stats.get('reason', 'no usable RGB-D frame')}",
+                )
         if not mesh.faces or not keyframes:
             await report(self.name, 72, "Texture projection skipped because mesh faces or keyframes are missing")
             return
@@ -1089,6 +1134,12 @@ class ExportStage:
             "rgbd_single_frame_depth.png",
             "rgbd_single_frame_confidence.png",
             "rgbd_single_frame_diagnostics.json",
+            "rgbd_onboarding_mesh.obj",
+            "rgbd_onboarding_mesh.mtl",
+            "rgbd_onboarding_texture.png",
+            "rgbd_onboarding_overlay.png",
+            "rgbd_onboarding.usdz",
+            "rgbd_onboarding_diagnostics.json",
             "colored_mesh.ply",
             "textured_mesh.obj",
             "textured_mesh.mtl",
@@ -1129,7 +1180,17 @@ class ExportStage:
             "available": False,
             "reason": "RGB-D single-frame diagnostic did not run.",
         }
-        if (result_dir / "textured_mesh.usdz").exists():
+        rgbd_onboarding_diagnostic = json.loads((work_dir / "rgbd_onboarding_diagnostics.json").read_text(encoding="utf-8")) if (work_dir / "rgbd_onboarding_diagnostics.json").exists() else {
+            "available": False,
+            "reason": "RGB-D onboarding mesh did not run.",
+        }
+        rgbd_onboarding_available = (
+            bool(rgbd_onboarding_diagnostic.get("available"))
+            and (result_dir / "rgbd_onboarding_mesh.obj").exists()
+        )
+        if processing_profile.get("name") == "fast_onboarding" and rgbd_onboarding_available:
+            preferred_photoreal = "rgbd_onboarding_mesh"
+        elif (result_dir / "textured_mesh.usdz").exists():
             preferred_photoreal = "usdz"
         elif (result_dir / "textured_mesh.obj").exists():
             preferred_photoreal = "textured_obj"
@@ -1137,6 +1198,23 @@ class ExportStage:
             preferred_photoreal = "rgbd_single_frame_mesh"
         else:
             preferred_photoreal = "vertex_colored_ply"
+        preferred_preview = (
+            "rgbd_onboarding.usdz"
+            if preferred_photoreal == "rgbd_onboarding_mesh" and (result_dir / "rgbd_onboarding.usdz").exists()
+            else "rgbd_onboarding_mesh.obj"
+            if preferred_photoreal == "rgbd_onboarding_mesh"
+            else "textured_mesh.usdz"
+            if preferred_photoreal == "usdz"
+            else "textured_mesh.obj"
+            if preferred_photoreal == "textured_obj"
+            else "rgbd_single_frame_mesh.obj"
+            if preferred_photoreal == "rgbd_single_frame_mesh"
+            else "rgbd_fused_mesh.obj"
+            if preferred_photoreal == "rgbd_fused_mesh"
+            else "colored_mesh.ply"
+            if preferred_photoreal == "vertex_colored_ply"
+            else "fused_mesh.obj"
+        )
         coordinate_transforms = {
             "convention": "column_major_4x4",
             "sourceCoordinateSpace": "arkit_world",
@@ -1158,6 +1236,7 @@ class ExportStage:
         artifact_manifest = {
             "version": "v1",
             "preferredPhotorealArtifact": preferred_photoreal,
+            "preferredPreview": preferred_preview,
             "processingProfile": processing_profile,
             "captureSelection": {
                 "client": summary.get("clientCaptureSelection"),
@@ -1217,6 +1296,19 @@ class ExportStage:
                     "diagnosticsPath": "rgbd_single_frame_diagnostics.json",
                     "available": bool(rgbd_diagnostic.get("available")),
                     "stats": rgbd_diagnostic,
+                },
+                "rgbdOnboardingMesh": {
+                    "role": "single_keyframe_rgbd_onboarding_photoreal_mesh",
+                    "format": "obj",
+                    "objPath": "rgbd_onboarding_mesh.obj",
+                    "mtlPath": "rgbd_onboarding_mesh.mtl",
+                    "texturePath": "rgbd_onboarding_texture.png",
+                    "overlayPath": "rgbd_onboarding_overlay.png",
+                    "usdzPath": "rgbd_onboarding.usdz",
+                    "diagnosticsPath": "rgbd_onboarding_diagnostics.json",
+                    "available": rgbd_onboarding_available,
+                    "preferred": preferred_photoreal == "rgbd_onboarding_mesh",
+                    "stats": rgbd_onboarding_diagnostic,
                 },
                 "vertexColoredPlyDebugPreview": {
                     "role": "vertex_colored_debug_preview",
@@ -1287,6 +1379,12 @@ class ExportStage:
                 "rgbd_single_frame_depth.png",
                 "rgbd_single_frame_confidence.png",
                 "rgbd_single_frame_diagnostics.json",
+                "rgbd_onboarding_mesh.obj",
+                "rgbd_onboarding_mesh.mtl",
+                "rgbd_onboarding_texture.png",
+                "rgbd_onboarding_overlay.png",
+                "rgbd_onboarding.usdz",
+                "rgbd_onboarding_diagnostics.json",
                 "colored_mesh.ply",
                 "textured_mesh.obj",
                 "textured_mesh.mtl",
@@ -1325,10 +1423,12 @@ class ExportStage:
                 "geometryCulledGlb": artifact_manifest["artifacts"]["geometryCulledGlb"],
                 "rgbdFusedMesh": artifact_manifest["artifacts"]["rgbdFusedMesh"],
                 "rgbdSingleFrameDiagnostic": artifact_manifest["artifacts"]["rgbdSingleFrameDiagnostic"],
+                "rgbdOnboardingMesh": artifact_manifest["artifacts"]["rgbdOnboardingMesh"],
             },
             "debugPreview": artifact_manifest["artifacts"]["vertexColoredPlyDebugPreview"],
             "photoreal": {
                 "preferredArtifact": preferred_photoreal,
+                "rgbdOnboardingMesh": artifact_manifest["artifacts"]["rgbdOnboardingMesh"],
                 "texturedObj": artifact_manifest["artifacts"]["texturedObj"],
                 "textureDebug": artifact_manifest["artifacts"]["textureDebug"],
                 "uvCheckerGlb": artifact_manifest["artifacts"]["uvCheckerGlb"],
@@ -1340,20 +1440,7 @@ class ExportStage:
             "captureSelection": artifact_manifest["captureSelection"],
             "coordinateTransforms": coordinate_transforms,
             "keyframes": keyframes,
-            "preferredPreview": (
-                "textured_mesh.usdz"
-                if preferred_photoreal == "usdz"
-                else
-                "textured_mesh.obj"
-                if preferred_photoreal == "textured_obj"
-                else "rgbd_single_frame_mesh.obj"
-                if preferred_photoreal == "rgbd_single_frame_mesh"
-                else "rgbd_fused_mesh.obj"
-                if preferred_photoreal == "rgbd_fused_mesh"
-                else "colored_mesh.ply"
-                if preferred_photoreal == "vertex_colored_ply"
-                else "fused_mesh.obj"
-            ),
+            "preferredPreview": preferred_preview,
         }, indent=2), encoding="utf-8")
         (result_dir / "manifest.json").write_text(json.dumps(artifact_manifest, indent=2), encoding="utf-8")
         if is_cancelled():
@@ -1946,6 +2033,1115 @@ def write_rgbd_single_frame_mesh_obj(
         "outOfBoundsColorSampleCount": out_of_bounds_color_count,
         "rejectedFaceCount": rejected_face_count,
     }
+
+
+def write_single_keyframe_rgbd_onboarding_mesh(
+    *,
+    keyframes: list[dict],
+    depth_frames: list[dict],
+    work_dir: Path,
+    arkit_mesh: FusedMesh,
+    output_obj_path: Path,
+    output_mtl_path: Path,
+    output_texture_path: Path,
+    output_debug_path: Path,
+    output_overlay_path: Path | None = None,
+    output_usdz_path: Path | None = None,
+    profile: ProcessingProfile | None = None,
+) -> dict:
+    paired_frames = pair_rgbd_frames(keyframes, depth_frames, work_dir)
+    if not paired_frames:
+        stats = unavailable_rgbd_onboarding_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=0,
+            reason="No RGB/depth frame pair could be matched by colorKeyframeId or timestamp.",
+            profile=profile,
+        )
+        output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    timestamps = [
+        float(frame[1].get("timestamp") or frame[0].get("timestamp") or 0.0)
+        for frame in paired_frames
+    ]
+    first_timestamp = min(timestamps) if timestamps else 0.0
+    scan_midpoint = (min(timestamps) + max(timestamps)) / 2 if timestamps else 0.0
+    scan_span = max(max(timestamps) - min(timestamps), 1e-6) if timestamps else 1.0
+
+    warnings: list[str] = []
+    candidates: list[dict] = []
+    skipped_candidates: list[dict] = []
+    for index, pair in enumerate(paired_frames):
+        try:
+            candidates.append(rgbd_onboarding_candidate_metrics(
+                index=index,
+                pair=pair,
+                work_dir=work_dir,
+                first_timestamp=first_timestamp,
+                scan_midpoint=scan_midpoint,
+                scan_span=scan_span,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            keyframe, depth_frame, _color_path, _depth_path = pair
+            skipped_candidates.append({
+                "index": index,
+                "keyframeId": keyframe.get("id"),
+                "depthFrameId": depth_frame.get("id"),
+                "reason": str(exc),
+            })
+
+    if not candidates:
+        stats = unavailable_rgbd_onboarding_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=len(paired_frames),
+            reason="No RGB-D onboarding candidate had valid depth bytes, transforms, and intrinsics.",
+            profile=profile,
+        )
+        stats["skippedCandidates"] = skipped_candidates
+        output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    window_candidates = [
+        candidate for candidate in candidates
+        if candidate["withinOnboardingWindow"] and int(candidate.get("meshablePixelCount") or 0) >= 3
+    ]
+    if not window_candidates:
+        stats = unavailable_rgbd_onboarding_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=len(paired_frames),
+            reason="No RGB-D candidate in the first onboarding window had enough meshable depth pixels.",
+            profile=profile,
+        )
+        stats.update({
+            "firstTimestamp": first_timestamp,
+            "onboardingWindowSeconds": RGBD_ONBOARDING_WINDOW_SECONDS,
+            "candidateCount": len(candidates),
+            "candidateSummary": [
+                rgbd_onboarding_candidate_summary(candidate, selected=False)
+                for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True)
+            ],
+            "skippedCandidates": skipped_candidates,
+        })
+        output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    selected = max(
+        window_candidates,
+        key=lambda candidate: (
+            float(candidate.get("score") or 0),
+            float(candidate.get("validDepthRatio") or 0),
+            float(candidate.get("highConfidenceRatio") or 0),
+            -float(candidate.get("secondsFromCaptureStart") or 0),
+        ),
+    )
+    keyframe, depth_frame, color_path, depth_path = selected["pair"]
+    width, height = [int(value) for value in depth_frame["depthResolution"]]
+    rgb_image = Image.open(color_path).convert("RGB")
+    depth_values = read_float32_depth_values(depth_path, width, height)
+    confidence_values = read_confidence_values(depth_frame, work_dir, width, height)
+    projection_keyframe = diagnostic_projection_keyframe(keyframe, rgb_image)
+    prepared_depth = prepare_rgbd_hero_patch_depth_grid(
+        depth_values=depth_values,
+        confidence_values=confidence_values,
+        width=width,
+        height=height,
+    )
+
+    mesh_result = build_single_keyframe_rgbd_onboarding_mesh(
+        keyframe=keyframe,
+        depth_frame=depth_frame,
+        projection_keyframe=projection_keyframe,
+        depth_values=prepared_depth["depthValues"],
+        width=width,
+        height=height,
+    )
+    raw_mesh = mesh_result["mesh"]
+    raw_uv_coordinates = mesh_result["uvCoordinates"]
+    if not raw_mesh.faces:
+        stats = unavailable_rgbd_onboarding_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=len(paired_frames),
+            reason="Selected RGB-D onboarding keyframe did not produce any connected faces.",
+            profile=profile,
+        )
+        stats.update({
+            "selectedKeyframeId": keyframe.get("id"),
+            "selectedDepthFrameId": depth_frame.get("id"),
+            "candidateSummary": [
+                rgbd_onboarding_candidate_summary(candidate, selected=(candidate is selected))
+                for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True)
+            ],
+            "mesh": mesh_result["stats"],
+        })
+        output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    prune_result = prune_rgbd_onboarding_mesh_with_lidar(
+        mesh=raw_mesh,
+        uv_coordinates=raw_uv_coordinates,
+        face_source_pixels=mesh_result["faceSourcePixels"],
+        depth_frame=depth_frame,
+        arkit_mesh=arkit_mesh,
+    )
+    final_mesh = prune_result["mesh"]
+    final_uv_coordinates = prune_result["uvCoordinates"]
+    if not final_mesh.faces:
+        stats = unavailable_rgbd_onboarding_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=len(paired_frames),
+            reason="RGB-D onboarding mesh was pruned to zero faces.",
+            profile=profile,
+        )
+        stats.update({
+            "selectedKeyframeId": keyframe.get("id"),
+            "selectedDepthFrameId": depth_frame.get("id"),
+            "rawVertexCount": len(raw_mesh.vertices),
+            "rawFaceCount": len(raw_mesh.faces),
+            "pruning": prune_result["stats"],
+        })
+        output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    output_texture_path.parent.mkdir(parents=True, exist_ok=True)
+    rgb_image.save(output_texture_path)
+    output_mtl_path.write_text("\n".join([
+        "newmtl LidarAI_RGBD_Hero_Patch",
+        "Ka 1.000000 1.000000 1.000000",
+        "Kd 1.000000 1.000000 1.000000",
+        "Ks 0.000000 0.000000 0.000000",
+        "d 1.0",
+        "illum 1",
+        f"map_Kd {output_texture_path.name}",
+        "",
+    ]), encoding="utf-8")
+    write_textured_mesh_obj_with_uvs(
+        mesh=final_mesh,
+        uv_coordinates=final_uv_coordinates,
+        output_obj_path=output_obj_path,
+        output_mtl_path=output_mtl_path,
+        object_name="rgbd_onboarding_mesh",
+    )
+
+    overlay_stats = None
+    if output_overlay_path is not None:
+        samples = collect_rgbd_diagnostic_samples(
+            keyframe=keyframe,
+            depth_frame=depth_frame,
+            projection_keyframe=projection_keyframe,
+            rgb_image=rgb_image,
+            depth_values=depth_values,
+            confidence_values=confidence_values,
+            max_samples=RGBD_DIAGNOSTIC_OVERLAY_MAX_SAMPLES,
+        )
+        overlay_stats = write_rgbd_overlay_png(
+            rgb_image=rgb_image,
+            samples=samples["points"],
+            output_path=output_overlay_path,
+        )
+
+    face_uvs = face_uvs_from_vertex_uvs(final_mesh, final_uv_coordinates)
+    usdz_stats = {
+        "format": "usdz",
+        "path": output_usdz_path.name if output_usdz_path is not None else None,
+        "available": False,
+        "reason": "USDZ export was not requested.",
+    }
+    if output_usdz_path is not None:
+        usdz_stats = write_textured_usdz(
+            final_mesh,
+            output_usdz_path,
+            face_uvs=face_uvs,
+            texture_path=output_texture_path,
+            name="rgbd_onboarding",
+        )
+
+    confidence_histogram = confidence_histogram_for_values(confidence_values)
+    candidate_summary = [
+        rgbd_onboarding_candidate_summary(candidate, selected=(candidate is selected))
+        for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True)
+    ]
+    stats = {
+        "available": True,
+        "profile": profile.name if profile is not None else "fast_onboarding",
+        "strategy": "best_single_rgbd_keyframe_from_first_three_seconds_with_lidar_support_pruning",
+        "preferredPreviewCandidate": True,
+        "becamePreferredPreview": True,
+        "pairedFrameCount": len(paired_frames),
+        "candidateCount": len(window_candidates),
+        "totalCandidateCount": len(candidates),
+        "firstTimestamp": first_timestamp,
+        "onboardingWindowSeconds": RGBD_ONBOARDING_WINDOW_SECONDS,
+        "selectedCandidateRank": 1,
+        "selectedKeyframeId": keyframe.get("id"),
+        "selectedDepthFrameId": depth_frame.get("id"),
+        "selectedColorKeyframeId": depth_frame.get("colorKeyframeId"),
+        "selectedTimestamp": selected.get("sourceTimestamp"),
+        "secondsFromCaptureStart": selected.get("secondsFromCaptureStart"),
+        "selectedScore": selected.get("score"),
+        "selectedScoreBreakdown": selected.get("scoreBreakdown"),
+        "validDepthRatio": selected.get("validDepthRatio"),
+        "centralCoverageRatio": selected.get("centralCoverageRatio"),
+        "depthEdgeChaosRatio": selected.get("depthEdgeChaosRatio"),
+        "confidenceHistogram": confidence_histogram,
+        "highConfidenceRatio": selected.get("highConfidenceRatio"),
+        "rawVertexCount": len(raw_mesh.vertices),
+        "rawFaceCount": len(raw_mesh.faces),
+        "prunedVertexCount": len(final_mesh.vertices),
+        "prunedFaceCount": len(final_mesh.faces),
+        "textureSize": [rgb_image.width, rgb_image.height],
+        "sourceDepthResolution": [width, height],
+        "depthPreparation": prepared_depth["stats"],
+        "mesh": {
+            **mesh_result["stats"],
+            "rawVertexCount": len(raw_mesh.vertices),
+            "rawFaceCount": len(raw_mesh.faces),
+            "finalVertexCount": len(final_mesh.vertices),
+            "finalFaceCount": len(final_mesh.faces),
+        },
+        "pruning": prune_result["stats"],
+        "artifacts": {
+            "obj": {
+                "format": "obj",
+                "path": output_obj_path.name,
+                "available": output_obj_path.exists(),
+                "vertexCount": len(final_mesh.vertices),
+                "uvCoordinateCount": len(final_uv_coordinates),
+                "faceCount": len(final_mesh.faces),
+            },
+            "mtl": {
+                "format": "mtl",
+                "path": output_mtl_path.name,
+                "available": output_mtl_path.exists(),
+            },
+            "texture": {
+                "format": "png",
+                "path": output_texture_path.name,
+                "available": output_texture_path.exists(),
+                "width": rgb_image.width,
+                "height": rgb_image.height,
+            },
+            "overlay": overlay_stats or {
+                "format": "png",
+                "path": output_overlay_path.name if output_overlay_path is not None else None,
+                "available": False,
+                "reason": "Overlay export was not requested.",
+            },
+            "usdz": usdz_stats,
+            "diagnostics": {
+                "format": "json",
+                "path": output_debug_path.name,
+                "available": True,
+            },
+        },
+        "candidateSummary": candidate_summary,
+        "skippedCandidates": skipped_candidates,
+        "warnings": dedupe_preserve_order(warnings + selected.get("warnings", [])),
+    }
+    output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    return stats
+
+
+def unavailable_rgbd_onboarding_stats(
+    *,
+    keyframes: list[dict],
+    depth_frames: list[dict],
+    paired_count: int,
+    reason: str,
+    profile: ProcessingProfile | None = None,
+) -> dict:
+    return {
+        "available": False,
+        "profile": profile.name if profile is not None else "fast_onboarding",
+        "strategy": "best_single_rgbd_keyframe_from_first_three_seconds_with_lidar_support_pruning",
+        "reason": reason,
+        "keyframeCount": len(keyframes),
+        "depthFrameCount": len(depth_frames),
+        "pairedFrameCount": paired_count,
+        "onboardingWindowSeconds": RGBD_ONBOARDING_WINDOW_SECONDS,
+        "becamePreferredPreview": False,
+        "artifacts": {
+            "obj": {"format": "obj", "path": "rgbd_onboarding_mesh.obj", "available": False},
+            "mtl": {"format": "mtl", "path": "rgbd_onboarding_mesh.mtl", "available": False},
+            "texture": {"format": "png", "path": "rgbd_onboarding_texture.png", "available": False},
+            "overlay": {"format": "png", "path": "rgbd_onboarding_overlay.png", "available": False},
+            "usdz": {"format": "usdz", "path": "rgbd_onboarding.usdz", "available": False},
+            "diagnostics": {"format": "json", "path": "rgbd_onboarding_diagnostics.json", "available": True},
+        },
+    }
+
+
+def rgbd_onboarding_candidate_metrics(
+    *,
+    index: int,
+    pair: tuple[dict, dict, Path, Path],
+    work_dir: Path,
+    first_timestamp: float,
+    scan_midpoint: float,
+    scan_span: float,
+) -> dict:
+    base = rgbd_diagnostic_candidate_metrics(
+        index=index,
+        pair=pair,
+        work_dir=work_dir,
+        scan_midpoint=scan_midpoint,
+        scan_span=scan_span,
+    )
+    keyframe, depth_frame, color_path, depth_path = pair
+    width, height = [int(value) for value in depth_frame["depthResolution"]]
+    depth_values = read_float32_depth_values(depth_path, width, height)
+    confidence_values = read_confidence_values(depth_frame, work_dir, width, height)
+    color_quality = image_quality_stats_for_path(color_path)
+    central_coverage = central_valid_depth_ratio(depth_values, confidence_values, width, height)
+    edge_chaos = depth_edge_chaos_ratio(depth_values, width, height)
+    meshable_pixels = sum(
+        1
+        for value in depth_values
+        if math.isfinite(float(value)) and 0 < float(value) <= RGBD_DEPTH_TRUNC_METERS
+    )
+    timestamp = float(base.get("sourceTimestamp") or 0.0)
+    seconds_from_start = max(0.0, timestamp - first_timestamp)
+    within_window = seconds_from_start <= RGBD_ONBOARDING_WINDOW_SECONDS + 1e-6
+    meshable_ratio = meshable_pixels / max(width * height, 1)
+    valid_depth = float(base.get("validDepthRatio") or 0.0)
+    high_confidence = float(base.get("highConfidenceRatio") or 0.0)
+    sharpness = min(float(base.get("rgbSharpnessScore") or 0.0) / 28.0, 1.0)
+    exposure = float(color_quality.get("exposureScore") or 0.0)
+    non_overexposed = 1.0 - float(color_quality.get("overexposedRatio") or 0.0)
+    non_underexposed = 1.0 - float(color_quality.get("underexposedRatio") or 0.0)
+    chaos_score = 1.0 - edge_chaos
+    central_score = central_coverage
+    color_match_bonus = 0.5 if base.get("colorKeyframeIdMatched") else 0.0
+    pose_score = tracking_pose_confidence(keyframe)
+    score_breakdown = {
+        "validDepth": round(valid_depth * 3.0, 6),
+        "highConfidence": round(high_confidence * 1.2, 6),
+        "centralCoverage": round(central_score * 1.35, 6),
+        "meshablePixels": round(meshable_ratio * 1.0, 6),
+        "nonOverexposedColor": round(non_overexposed * 0.45, 6),
+        "nonUnderexposedColor": round(non_underexposed * 0.45, 6),
+        "exposure": round(exposure * 0.45, 6),
+        "sharpness": round(sharpness * 0.65, 6),
+        "lowDepthEdgeChaos": round(chaos_score * 0.85, 6),
+        "pose": round(pose_score * 0.25, 6),
+        "colorDepthPairing": round(color_match_bonus, 6),
+    }
+    score = sum(score_breakdown.values())
+    rejection_reasons = []
+    if not within_window:
+        rejection_reasons.append("outside_first_three_seconds")
+    if meshable_pixels < 3:
+        rejection_reasons.append("not_enough_meshable_pixels")
+    if valid_depth < 0.02:
+        rejection_reasons.append("very_low_valid_depth_ratio")
+    if edge_chaos > 0.85:
+        rejection_reasons.append("high_depth_edge_chaos")
+    return {
+        **base,
+        "score": round(score, 6),
+        "scoreBreakdown": score_breakdown,
+        "secondsFromCaptureStart": round(seconds_from_start, 4),
+        "withinOnboardingWindow": within_window,
+        "colorQuality": color_quality,
+        "nonOverexposedRatio": round(non_overexposed, 6),
+        "nonUnderexposedRatio": round(non_underexposed, 6),
+        "centralCoverageRatio": round(central_coverage, 6),
+        "depthEdgeChaosRatio": round(edge_chaos, 6),
+        "meshablePixelCount": meshable_pixels,
+        "meshablePixelRatio": round(meshable_ratio, 6),
+        "poseConfidence": round(pose_score, 4),
+        "rejectionReasons": rejection_reasons,
+    }
+
+
+def rgbd_onboarding_candidate_summary(candidate: dict, *, selected: bool) -> dict:
+    reasons = list(candidate.get("rejectionReasons") or [])
+    if selected:
+        reasons = ["selected"]
+    elif not reasons:
+        reasons = ["lower_score_than_selected_candidate"]
+    return {
+        "index": candidate.get("index"),
+        "keyframeId": candidate.get("keyframeId"),
+        "depthFrameId": candidate.get("depthFrameId"),
+        "sourceTimestamp": candidate.get("sourceTimestamp"),
+        "secondsFromCaptureStart": candidate.get("secondsFromCaptureStart"),
+        "withinOnboardingWindow": candidate.get("withinOnboardingWindow"),
+        "score": candidate.get("score"),
+        "scoreBreakdown": candidate.get("scoreBreakdown"),
+        "validDepthRatio": candidate.get("validDepthRatio"),
+        "highConfidenceRatio": candidate.get("highConfidenceRatio"),
+        "centralCoverageRatio": candidate.get("centralCoverageRatio"),
+        "depthEdgeChaosRatio": candidate.get("depthEdgeChaosRatio"),
+        "meshablePixelCount": candidate.get("meshablePixelCount"),
+        "nonOverexposedRatio": candidate.get("nonOverexposedRatio"),
+        "nonUnderexposedRatio": candidate.get("nonUnderexposedRatio"),
+        "rgbSharpnessScore": candidate.get("rgbSharpnessScore"),
+        "poseConfidence": candidate.get("poseConfidence"),
+        "rejectionReasons": reasons,
+    }
+
+
+def image_quality_stats_for_path(path: Path, thumbnail_max: int = 112) -> dict:
+    try:
+        image = Image.open(path).convert("L")
+        image.thumbnail((thumbnail_max, thumbnail_max), Image.Resampling.BILINEAR)
+        width, height = image.size
+        values = image.tobytes()
+    except Exception:
+        return {
+            "available": False,
+            "exposureScore": 0.55,
+            "meanLuminance": None,
+            "overexposedRatio": 0.0,
+            "underexposedRatio": 0.0,
+        }
+
+    if not values:
+        return {
+            "available": False,
+            "exposureScore": 0.55,
+            "meanLuminance": None,
+            "overexposedRatio": 0.0,
+            "underexposedRatio": 0.0,
+        }
+
+    mean_luminance = sum(values) / len(values)
+    overexposed_ratio = sum(1 for value in values if value >= 248) / len(values)
+    underexposed_ratio = sum(1 for value in values if value <= 6) / len(values)
+    exposure_score = clamp_float(
+        1.0
+        - (abs(mean_luminance - 128.0) / 170.0)
+        - overexposed_ratio * 0.75
+        - underexposed_ratio * 0.9,
+        0.15,
+        1.0,
+    )
+    return {
+        "available": True,
+        "exposureScore": round(exposure_score, 4),
+        "meanLuminance": round(mean_luminance, 2),
+        "overexposedRatio": round(overexposed_ratio, 4),
+        "underexposedRatio": round(underexposed_ratio, 4),
+        "sampledWidth": width,
+        "sampledHeight": height,
+    }
+
+
+def central_valid_depth_ratio(
+    depth_values: array,
+    confidence_values: bytes | None,
+    width: int,
+    height: int,
+) -> float:
+    x0 = int(width * 0.2)
+    x1 = max(x0 + 1, int(math.ceil(width * 0.8)))
+    y0 = int(height * 0.2)
+    y1 = max(y0 + 1, int(math.ceil(height * 0.8)))
+    total = 0
+    valid = 0
+    for y in range(max(0, y0), min(height, y1)):
+        for x in range(max(0, x0), min(width, x1)):
+            total += 1
+            index = y * width + x
+            depth = float(depth_values[index])
+            if confidence_values is not None and int(confidence_values[index]) == 0:
+                continue
+            if math.isfinite(depth) and 0 < depth <= RGBD_DEPTH_TRUNC_METERS:
+                valid += 1
+    return valid / total if total else 0.0
+
+
+def depth_edge_chaos_ratio(depth_values: array, width: int, height: int) -> float:
+    total_pixels = width * height
+    step = max(1, int(math.ceil(math.sqrt(total_pixels / 20_000))))
+    checked = 0
+    chaotic = 0
+    for y in range(0, height, step):
+        for x in range(0, width, step):
+            index = y * width + x
+            depth = float(depth_values[index])
+            if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+                continue
+            for nx, ny in ((x + step, y), (x, y + step)):
+                if nx >= width or ny >= height:
+                    continue
+                neighbor = float(depth_values[ny * width + nx])
+                if not math.isfinite(neighbor) or neighbor <= 0 or neighbor > RGBD_DEPTH_TRUNC_METERS:
+                    continue
+                checked += 1
+                if abs(neighbor - depth) > max(0.12, min(depth, neighbor) * 0.14):
+                    chaotic += 1
+    return chaotic / checked if checked else 0.0
+
+
+def build_single_keyframe_rgbd_onboarding_mesh(
+    *,
+    keyframe: dict,
+    depth_frame: dict,
+    projection_keyframe: ProjectionKeyframe,
+    depth_values: array,
+    width: int,
+    height: int,
+) -> dict:
+    intrinsics = depth_frame.get("intrinsics") or []
+    transform = depth_frame.get("cameraTransform") or []
+    total_pixels = width * height
+    sample_step = max(1, int(math.ceil(math.sqrt(total_pixels / RGBD_ONBOARDING_TARGET_SAMPLES))))
+    x_samples = sampled_depth_indices(width, sample_step)
+    y_samples = sampled_depth_indices(height, sample_step)
+    vertices: list[tuple[float, float, float]] = []
+    uv_coordinates: list[tuple[float, float]] = []
+    vertex_source_pixels: list[tuple[float, float]] = []
+    faces: list[tuple[int, int, int]] = []
+    face_source_pixels: list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]] = []
+    seen_faces: set[tuple[int, int, int]] = set()
+    grid: list[list[int | None]] = []
+    depth_grid: list[list[float]] = []
+    invalid_depth_count = 0
+    rejected_face_reasons: dict[str, int] = {}
+
+    for source_y in y_samples:
+        row: list[int | None] = []
+        depth_row: list[float] = []
+        for source_x in x_samples:
+            source_index = source_y * width + source_x
+            depth = float(depth_values[source_index])
+            if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+                invalid_depth_count += 1
+                row.append(None)
+                depth_row.append(0)
+                continue
+
+            world = backproject_depth_sample_to_world(
+                source_x=source_x,
+                source_y=source_y,
+                depth=depth,
+                intrinsics=intrinsics,
+                camera_transform=transform,
+            )
+            rgb_pixel = expected_rgb_pixel_for_depth_sample(source_x, source_y, depth_frame, keyframe)
+            if rgb_pixel is None:
+                rgb_pixel = (
+                    (source_x / max(width - 1, 1)) * max(projection_keyframe.width - 1, 1),
+                    (source_y / max(height - 1, 1)) * max(projection_keyframe.height - 1, 1),
+                )
+            u_pixel = clamp_float(float(rgb_pixel[0]), 0.0, max(projection_keyframe.width - 1, 1))
+            v_pixel = clamp_float(float(rgb_pixel[1]), 0.0, max(projection_keyframe.height - 1, 1))
+            row.append(len(vertices))
+            depth_row.append(depth)
+            vertices.append(world)
+            uv_coordinates.append((
+                clamp_float(u_pixel / max(projection_keyframe.width - 1, 1), 0.0, 1.0),
+                1.0 - clamp_float(v_pixel / max(projection_keyframe.height - 1, 1), 0.0, 1.0),
+            ))
+            vertex_source_pixels.append((float(source_x), float(source_y)))
+        grid.append(row)
+        depth_grid.append(depth_row)
+
+    for y in range(len(grid) - 1):
+        for x in range(len(grid[y]) - 1):
+            top_left = grid[y][x]
+            top_right = grid[y][x + 1]
+            bottom_left = grid[y + 1][x]
+            bottom_right = grid[y + 1][x + 1]
+            d_tl = depth_grid[y][x]
+            d_tr = depth_grid[y][x + 1]
+            d_bl = depth_grid[y + 1][x]
+            d_br = depth_grid[y + 1][x + 1]
+            add_rgbd_onboarding_face(
+                vertices=vertices,
+                faces=faces,
+                seen_faces=seen_faces,
+                vertex_source_pixels=vertex_source_pixels,
+                face_source_pixels=face_source_pixels,
+                indices=(top_left, bottom_left, top_right),
+                depths=(d_tl, d_bl, d_tr),
+                rejected_face_reasons=rejected_face_reasons,
+            )
+            add_rgbd_onboarding_face(
+                vertices=vertices,
+                faces=faces,
+                seen_faces=seen_faces,
+                vertex_source_pixels=vertex_source_pixels,
+                face_source_pixels=face_source_pixels,
+                indices=(top_right, bottom_left, bottom_right),
+                depths=(d_tr, d_bl, d_br),
+                rejected_face_reasons=rejected_face_reasons,
+            )
+
+    mesh = FusedMesh(vertices=vertices, faces=faces, stats={
+        "geometrySource": "single_keyframe_rgbd_onboarding_depth_mesh",
+        "vertexCount": len(vertices),
+        "faceCount": len(faces),
+        "selectedKeyframeId": keyframe.get("id"),
+        "selectedDepthFrameId": depth_frame.get("id"),
+        "sampleStep": sample_step,
+        "sourceDepthResolution": [width, height],
+        "targetSamples": RGBD_ONBOARDING_TARGET_SAMPLES,
+        "depthConnectionAbsoluteToleranceMeters": RGBD_ONBOARDING_FACE_ABSOLUTE_TOLERANCE_METERS,
+        "depthConnectionRelativeTolerance": RGBD_ONBOARDING_FACE_RELATIVE_TOLERANCE,
+    })
+    return {
+        "mesh": mesh,
+        "uvCoordinates": uv_coordinates,
+        "faceSourcePixels": face_source_pixels,
+        "stats": {
+            "vertexCount": len(vertices),
+            "faceCount": len(faces),
+            "sampleStep": sample_step,
+            "sampledColumnCount": len(x_samples),
+            "sampledRowCount": len(y_samples),
+            "invalidDepthSampleCount": invalid_depth_count,
+            "rejectedFaceCount": sum(rejected_face_reasons.values()),
+            "rejectedFaceReasons": rejected_face_reasons,
+            "acceptedFaceCount": len(faces),
+            "depthConnectionAbsoluteToleranceMeters": RGBD_ONBOARDING_FACE_ABSOLUTE_TOLERANCE_METERS,
+            "depthConnectionRelativeTolerance": RGBD_ONBOARDING_FACE_RELATIVE_TOLERANCE,
+            "maxFaceEdgeMeters": RGBD_ONBOARDING_MAX_FACE_EDGE_METERS,
+        },
+    }
+
+
+def add_rgbd_onboarding_face(
+    *,
+    vertices: list[tuple[float, float, float]],
+    faces: list[tuple[int, int, int]],
+    seen_faces: set[tuple[int, int, int]],
+    vertex_source_pixels: list[tuple[float, float]],
+    face_source_pixels: list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]],
+    indices: tuple[int | None, int | None, int | None],
+    depths: tuple[float, float, float],
+    rejected_face_reasons: dict[str, int],
+) -> None:
+    reason = rgbd_onboarding_face_rejection_reason(vertices, seen_faces, indices, depths)
+    if reason is not None:
+        rejected_face_reasons[reason] = rejected_face_reasons.get(reason, 0) + 1
+        return
+
+    face = (int(indices[0]), int(indices[1]), int(indices[2]))
+    seen_faces.add(tuple(sorted(face)))
+    faces.append(face)
+    face_source_pixels.append((
+        vertex_source_pixels[face[0]],
+        vertex_source_pixels[face[1]],
+        vertex_source_pixels[face[2]],
+    ))
+
+
+def rgbd_onboarding_face_rejection_reason(
+    vertices: list[tuple[float, float, float]],
+    seen_faces: set[tuple[int, int, int]],
+    indices: tuple[int | None, int | None, int | None],
+    depths: tuple[float, float, float],
+) -> str | None:
+    if any(index is None for index in indices):
+        return "invalid_depth_corner"
+    if not should_connect_depth_samples(
+        depths,
+        absolute_tolerance=RGBD_ONBOARDING_FACE_ABSOLUTE_TOLERANCE_METERS,
+        relative_tolerance=RGBD_ONBOARDING_FACE_RELATIVE_TOLERANCE,
+    ):
+        return "depth_discontinuity"
+
+    face = (int(indices[0]), int(indices[1]), int(indices[2]))
+    if len(set(face)) != 3:
+        return "degenerate_indices"
+    face_key = tuple(sorted(face))
+    if face_key in seen_faces:
+        return "duplicate_face"
+
+    a, b, c = (vertices[face[0]], vertices[face[1]], vertices[face[2]])
+    if triangle_area(a, b, c) <= 1e-10:
+        return "degenerate_area"
+    max_edge = max(length(subtract(a, b)), length(subtract(b, c)), length(subtract(c, a)))
+    if max_edge > RGBD_ONBOARDING_MAX_FACE_EDGE_METERS:
+        return "extreme_edge_length"
+    return None
+
+
+def prune_rgbd_onboarding_mesh_with_lidar(
+    *,
+    mesh: FusedMesh,
+    uv_coordinates: list[tuple[float, float]],
+    face_source_pixels: list[tuple[tuple[float, float], tuple[float, float], tuple[float, float]]],
+    depth_frame: dict,
+    arkit_mesh: FusedMesh,
+) -> dict:
+    support_index = build_lidar_projection_support_index(arkit_mesh, depth_frame)
+    if not support_index["available"]:
+        return {
+            "mesh": mesh,
+            "uvCoordinates": uv_coordinates,
+            "stats": {
+                "enabled": False,
+                "reason": support_index["reason"],
+                "rawVertexCount": len(mesh.vertices),
+                "rawFaceCount": len(mesh.faces),
+                "finalVertexCount": len(mesh.vertices),
+                "finalFaceCount": len(mesh.faces),
+                "pruneReasonCounts": {"lidar_support_unavailable_keep": len(mesh.faces)},
+                "lidarSupportIndex": lidar_support_index_summary(support_index),
+                "averageLidarSupportDistanceMeters": None,
+                "medianLidarSupportDistanceMeters": None,
+                "disconnectedComponentCounts": None,
+            },
+        }
+
+    kept_faces: list[tuple[int, int, int]] = []
+    face_support_reasons: list[str] = []
+    prune_reason_counts: dict[str, int] = {}
+    support_distances: list[float] = []
+    depth_support_distances: list[float] = []
+    for face_index, face in enumerate(mesh.faces):
+        decision = rgbd_onboarding_lidar_face_decision(
+            mesh=mesh,
+            face=face,
+            face_source_pixels=face_source_pixels[face_index] if face_index < len(face_source_pixels) else None,
+            support_index=support_index,
+        )
+        reason = decision["reason"]
+        prune_reason_counts[reason] = prune_reason_counts.get(reason, 0) + 1
+        if decision.get("nearestDistanceMeters") is not None:
+            support_distances.append(float(decision["nearestDistanceMeters"]))
+        if decision.get("nearestDepthDeltaMeters") is not None:
+            depth_support_distances.append(float(decision["nearestDepthDeltaMeters"]))
+        if decision["keep"]:
+            kept_faces.append(face)
+            face_support_reasons.append(reason)
+
+    compact = compact_mesh_to_faces(mesh, uv_coordinates, kept_faces)
+    component_result = filter_rgbd_onboarding_components(
+        mesh=compact["mesh"],
+        uv_coordinates=compact["uvCoordinates"],
+        face_support_reasons=face_support_reasons,
+    )
+    component_stats = component_result["stats"]
+    if component_stats.get("removedFaceCount", 0):
+        prune_reason_counts["tiny_disconnected_island"] = (
+            prune_reason_counts.get("tiny_disconnected_island", 0)
+            + int(component_stats["removedFaceCount"])
+        )
+
+    final_mesh = component_result["mesh"]
+    final_uv_coordinates = component_result["uvCoordinates"]
+    return {
+        "mesh": final_mesh,
+        "uvCoordinates": final_uv_coordinates,
+        "stats": {
+            "enabled": True,
+            "algorithm": "camera_projection_lidar_vertex_support_with_sparse_keep",
+            "rawVertexCount": len(mesh.vertices),
+            "rawFaceCount": len(mesh.faces),
+            "afterLidarFaceCount": len(kept_faces),
+            "finalVertexCount": len(final_mesh.vertices),
+            "finalFaceCount": len(final_mesh.faces),
+            "prunedFaceCount": len(mesh.faces) - len(final_mesh.faces),
+            "prunedVertexCount": len(mesh.vertices) - len(final_mesh.vertices),
+            "pruneReasonCounts": prune_reason_counts,
+            "supportDistanceMeters": RGBD_ONBOARDING_LIDAR_SUPPORT_DISTANCE_METERS,
+            "supportDepthDeltaMeters": RGBD_ONBOARDING_LIDAR_DEPTH_SUPPORT_METERS,
+            "hardRejectDepthDeltaMeters": RGBD_ONBOARDING_LIDAR_HARD_REJECT_DEPTH_METERS,
+            "hardRejectDistanceMeters": RGBD_ONBOARDING_LIDAR_HARD_REJECT_DISTANCE_METERS,
+            "averageLidarSupportDistanceMeters": (
+                round(sum(support_distances) / len(support_distances), 5)
+                if support_distances else None
+            ),
+            "medianLidarSupportDistanceMeters": (
+                round(median_sorted(sorted(support_distances)), 5)
+                if support_distances else None
+            ),
+            "averageLidarDepthDeltaMeters": (
+                round(sum(depth_support_distances) / len(depth_support_distances), 5)
+                if depth_support_distances else None
+            ),
+            "medianLidarDepthDeltaMeters": (
+                round(median_sorted(sorted(depth_support_distances)), 5)
+                if depth_support_distances else None
+            ),
+            "lidarSupportIndex": lidar_support_index_summary(support_index),
+            "disconnectedComponentCounts": component_stats,
+        },
+    }
+
+
+def build_lidar_projection_support_index(arkit_mesh: FusedMesh, depth_frame: dict) -> dict:
+    resolution = depth_frame.get("depthResolution") or []
+    intrinsics = depth_frame.get("intrinsics") or []
+    transform = depth_frame.get("cameraTransform") or []
+    if not arkit_mesh.vertices:
+        return {"available": False, "reason": "arkit_mesh_has_no_vertices"}
+    if len(resolution) != 2 or len(intrinsics) != 9 or len(transform) != 16:
+        return {"available": False, "reason": "selected_depth_frame_missing_projection_metadata"}
+
+    width, height = int(resolution[0]), int(resolution[1])
+    if width <= 0 or height <= 0:
+        return {"available": False, "reason": "selected_depth_frame_invalid_resolution"}
+
+    world_to_camera = invert_rigid_transform(transform)
+    cell_size = max(1, int(math.ceil(max(width, height) / RGBD_ONBOARDING_LIDAR_PIXEL_BUCKETS)))
+    buckets: dict[tuple[int, int], list[dict]] = {}
+    projected_count = 0
+    for index, vertex in enumerate(arkit_mesh.vertices):
+        projection = project_world_point_values(vertex, world_to_camera, intrinsics, width, height)
+        if projection is None:
+            continue
+        u, v, depth = projection
+        cell = (int(u) // cell_size, int(v) // cell_size)
+        buckets.setdefault(cell, []).append({
+            "vertexIndex": index,
+            "world": vertex,
+            "u": u,
+            "v": v,
+            "depth": depth,
+        })
+        projected_count += 1
+
+    if not buckets:
+        return {
+            "available": False,
+            "reason": "no_arkit_vertices_project_into_selected_rgbd_frame",
+            "inputVertexCount": len(arkit_mesh.vertices),
+            "inputFaceCount": len(arkit_mesh.faces),
+            "projectedVertexCount": projected_count,
+        }
+
+    return {
+        "available": True,
+        "width": width,
+        "height": height,
+        "intrinsics": intrinsics,
+        "worldToCamera": world_to_camera,
+        "cellSizePixels": cell_size,
+        "bucketCount": len(buckets),
+        "inputVertexCount": len(arkit_mesh.vertices),
+        "inputFaceCount": len(arkit_mesh.faces),
+        "projectedVertexCount": projected_count,
+        "buckets": buckets,
+    }
+
+
+def lidar_support_index_summary(support_index: dict) -> dict:
+    return {
+        key: value
+        for key, value in support_index.items()
+        if key not in {"buckets", "worldToCamera", "intrinsics"}
+    }
+
+
+def rgbd_onboarding_lidar_face_decision(
+    *,
+    mesh: FusedMesh,
+    face: tuple[int, int, int],
+    face_source_pixels: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None,
+    support_index: dict,
+) -> dict:
+    vertices = [mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]]
+    centroid = triangle_center(vertices[0], vertices[1], vertices[2])
+    projection = project_world_point_values(
+        centroid,
+        support_index["worldToCamera"],
+        support_index["intrinsics"],
+        int(support_index["width"]),
+        int(support_index["height"]),
+    )
+    if projection is None:
+        return {"keep": True, "reason": "rgbd_face_unprojected_keep"}
+
+    projected_u, projected_v, projected_depth = projection
+    if face_source_pixels is not None:
+        projected_u = sum(pixel[0] for pixel in face_source_pixels) / 3.0
+        projected_v = sum(pixel[1] for pixel in face_source_pixels) / 3.0
+    candidates = nearby_lidar_support_candidates(support_index, projected_u, projected_v)
+    if not candidates:
+        return {"keep": True, "reason": "lidar_sparse_keep"}
+
+    nearest_distance = min(length(subtract(candidate["world"], centroid)) for candidate in candidates)
+    nearest_depth_delta = min(abs(float(candidate["depth"]) - projected_depth) for candidate in candidates)
+    if (
+        nearest_distance <= RGBD_ONBOARDING_LIDAR_SUPPORT_DISTANCE_METERS
+        or nearest_depth_delta <= RGBD_ONBOARDING_LIDAR_DEPTH_SUPPORT_METERS
+    ):
+        return {
+            "keep": True,
+            "reason": "lidar_supported_keep",
+            "nearestDistanceMeters": round(nearest_distance, 5),
+            "nearestDepthDeltaMeters": round(nearest_depth_delta, 5),
+        }
+    if (
+        nearest_depth_delta >= RGBD_ONBOARDING_LIDAR_HARD_REJECT_DEPTH_METERS
+        and nearest_distance >= RGBD_ONBOARDING_LIDAR_HARD_REJECT_DISTANCE_METERS
+    ):
+        return {
+            "keep": False,
+            "reason": "lidar_depth_disagreement_prune",
+            "nearestDistanceMeters": round(nearest_distance, 5),
+            "nearestDepthDeltaMeters": round(nearest_depth_delta, 5),
+        }
+    return {
+        "keep": True,
+        "reason": "lidar_ambiguous_keep",
+        "nearestDistanceMeters": round(nearest_distance, 5),
+        "nearestDepthDeltaMeters": round(nearest_depth_delta, 5),
+    }
+
+
+def nearby_lidar_support_candidates(support_index: dict, u: float, v: float) -> list[dict]:
+    cell_size = max(int(support_index["cellSizePixels"]), 1)
+    center_cell = (int(u) // cell_size, int(v) // cell_size)
+    buckets: dict[tuple[int, int], list[dict]] = support_index["buckets"]
+    candidates: list[dict] = []
+    for radius in (1, 2):
+        candidates.clear()
+        for cy in range(center_cell[1] - radius, center_cell[1] + radius + 1):
+            for cx in range(center_cell[0] - radius, center_cell[0] + radius + 1):
+                candidates.extend(buckets.get((cx, cy), []))
+        if candidates:
+            return list(candidates)
+    return []
+
+
+def compact_mesh_to_faces(
+    mesh: FusedMesh,
+    uv_coordinates: list[tuple[float, float]],
+    kept_faces: list[tuple[int, int, int]],
+) -> dict:
+    referenced = sorted({index for face in kept_faces for index in face})
+    remap = {old_index: new_index for new_index, old_index in enumerate(referenced)}
+    vertices = [mesh.vertices[old_index] for old_index in referenced]
+    uvs = [uv_coordinates[old_index] for old_index in referenced]
+    faces = [
+        (remap[face[0]], remap[face[1]], remap[face[2]])
+        for face in kept_faces
+        if face[0] in remap and face[1] in remap and face[2] in remap
+    ]
+    return {
+        "mesh": FusedMesh(vertices=vertices, faces=faces, stats={**mesh.stats, "vertexCount": len(vertices), "faceCount": len(faces)}),
+        "uvCoordinates": uvs,
+        "remap": remap,
+    }
+
+
+def filter_rgbd_onboarding_components(
+    *,
+    mesh: FusedMesh,
+    uv_coordinates: list[tuple[float, float]],
+    face_support_reasons: list[str],
+) -> dict:
+    components = mesh_connected_face_components(mesh)
+    if not components:
+        return {
+            "mesh": mesh,
+            "uvCoordinates": uv_coordinates,
+            "stats": {
+                "enabled": False,
+                "reason": "no_faces",
+                "componentCount": 0,
+                "removedComponentCount": 0,
+                "removedFaceCount": 0,
+            },
+        }
+
+    total_faces = len(mesh.faces)
+    min_faces = max(
+        RGBD_ONBOARDING_MIN_COMPONENT_FACES,
+        int(math.ceil(total_faces * RGBD_ONBOARDING_MIN_COMPONENT_FACE_RATIO)),
+    )
+    if total_faces <= min_faces * 2:
+        return {
+            "mesh": mesh,
+            "uvCoordinates": uv_coordinates,
+            "stats": {
+                "enabled": False,
+                "reason": "mesh_too_small_for_component_pruning",
+                "componentCount": len(components),
+                "largestComponentFaces": max(len(component) for component in components),
+                "removedComponentCount": 0,
+                "removedFaceCount": 0,
+                "minComponentFaces": min_faces,
+            },
+        }
+
+    keep_face_indexes: set[int] = set()
+    removed_component_count = 0
+    removed_face_count = 0
+    component_summaries = []
+    for component in components:
+        has_lidar_support = any(
+            face_index < len(face_support_reasons)
+            and face_support_reasons[face_index] == "lidar_supported_keep"
+            for face_index in component
+        )
+        keep = len(component) >= min_faces or has_lidar_support
+        if keep:
+            keep_face_indexes.update(component)
+        else:
+            removed_component_count += 1
+            removed_face_count += len(component)
+        component_summaries.append({
+            "faceCount": len(component),
+            "hasLidarSupport": has_lidar_support,
+            "kept": keep,
+        })
+
+    kept_faces = [
+        face for index, face in enumerate(mesh.faces)
+        if index in keep_face_indexes
+    ]
+    compact = compact_mesh_to_faces(mesh, uv_coordinates, kept_faces)
+    return {
+        "mesh": compact["mesh"],
+        "uvCoordinates": compact["uvCoordinates"],
+        "stats": {
+            "enabled": True,
+            "componentCount": len(components),
+            "keptComponentCount": len(components) - removed_component_count,
+            "removedComponentCount": removed_component_count,
+            "removedFaceCount": removed_face_count,
+            "minComponentFaces": min_faces,
+            "largestComponentFaces": max(len(component) for component in components),
+            "components": component_summaries[:40],
+        },
+    }
+
+
+def mesh_connected_face_components(mesh: FusedMesh) -> list[list[int]]:
+    vertex_to_faces: dict[int, list[int]] = {}
+    for face_index, face in enumerate(mesh.faces):
+        for vertex_index in face:
+            vertex_to_faces.setdefault(vertex_index, []).append(face_index)
+
+    visited: set[int] = set()
+    components: list[list[int]] = []
+    for start_index in range(len(mesh.faces)):
+        if start_index in visited:
+            continue
+        component: list[int] = []
+        stack = [start_index]
+        visited.add(start_index)
+        while stack:
+            face_index = stack.pop()
+            component.append(face_index)
+            for vertex_index in mesh.faces[face_index]:
+                for neighbor in vertex_to_faces.get(vertex_index, []):
+                    if neighbor in visited:
+                        continue
+                    visited.add(neighbor)
+                    stack.append(neighbor)
+        components.append(component)
+    return components
+
+
+def face_uvs_from_vertex_uvs(mesh: FusedMesh, uv_coordinates: list[tuple[float, float]]) -> FaceUVs:
+    return [
+        (uv_coordinates[face[0]], uv_coordinates[face[1]], uv_coordinates[face[2]])
+        for face in mesh.faces
+        if face[0] < len(uv_coordinates) and face[1] < len(uv_coordinates) and face[2] < len(uv_coordinates)
+    ]
 
 
 def write_rgbd_hero_patch_textured_obj(
@@ -3556,6 +4752,7 @@ def processing_profile_stats(profile: ProcessingProfile) -> dict:
         "densifyTextureRenderMesh": profile.densify_texture_render_mesh,
         "denseSingleViewTexture": profile.dense_single_view_texture,
         "rgbdHeroPatchTexture": profile.rgbd_hero_patch_texture,
+        "rgbdOnboardingMesh": profile.rgbd_onboarding_mesh,
     }
 
 
