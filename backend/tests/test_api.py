@@ -1451,9 +1451,100 @@ def test_single_keyframe_rgbd_onboarding_prunes_lidar_inconsistent_region(tmp_pa
     assert stats["selectedKeyframeId"] == "onboarding-keyframe"
     assert stats["selectedDepthFrameId"] == "onboarding-depth"
     assert stats["rawFaceCount"] > stats["prunedFaceCount"]
+    assert stats["pruning"]["guardrailTriggered"] is False
+    assert stats["pruning"]["applied"] is True
     assert stats["pruning"]["pruneReasonCounts"]["lidar_depth_disagreement_prune"] > 0
     assert (tmp_path / "rgbd_onboarding_mesh.obj").read_text(encoding="utf-8").count("\nf ") == stats["prunedFaceCount"]
     assert "map_Kd rgbd_onboarding_texture.png" in (tmp_path / "rgbd_onboarding_mesh.mtl").read_text(encoding="utf-8")
+
+
+def test_single_keyframe_rgbd_onboarding_lidar_pruning_guardrail_keeps_rgbd_mesh(tmp_path):
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    intrinsics = [
+        4, 0, 0,
+        0, 4, 0,
+        2, 2, 1,
+    ]
+    keyframe_dir = tmp_path / "keyframes"
+    depth_dir = tmp_path / "depth_frames"
+    keyframe_dir.mkdir()
+    depth_dir.mkdir()
+    Image.new("RGB", (5, 5), (180, 110, 70)).save(keyframe_dir / "keyframe_001.jpg")
+
+    depth_values = [2.0] * 25
+    (depth_dir / "depth_001.f32").write_bytes(struct.pack(f"<{len(depth_values)}f", *depth_values))
+    (depth_dir / "depth_001.confidence.u8").write_bytes(bytes([2] * 25))
+
+    keyframes = [{
+        "id": "onboarding-keyframe",
+        "timestamp": 0.0,
+        "cameraTransform": transform,
+        "intrinsics": intrinsics,
+        "imageResolution": [5, 5],
+        "path": "keyframes/keyframe_001.jpg",
+    }]
+    depth_frames = [{
+        "id": "onboarding-depth",
+        "colorKeyframeId": "onboarding-keyframe",
+        "timestamp": 0.0,
+        "cameraTransform": transform,
+        "intrinsics": intrinsics,
+        "depthResolution": [5, 5],
+        "depthFormat": "float32_little_endian_meters",
+        "path": "depth_frames/depth_001.f32",
+        "confidenceFormat": "uint8_arkit_confidence",
+        "confidencePath": "depth_frames/depth_001.confidence.u8",
+        "metersPerUnit": 1,
+    }]
+
+    lidar_vertices = [
+        pipeline.backproject_depth_sample_to_world(x, y, 1.0, intrinsics, transform)
+        for y in range(5)
+        for x in range(5)
+    ]
+    lidar_faces = []
+    for y in range(4):
+        for x in range(4):
+            top_left = y * 5 + x
+            top_right = top_left + 1
+            bottom_left = top_left + 5
+            bottom_right = bottom_left + 1
+            lidar_faces.append((top_left, bottom_left, top_right))
+            lidar_faces.append((top_right, bottom_left, bottom_right))
+    arkit_mesh = pipeline.FusedMesh(
+        vertices=lidar_vertices,
+        faces=lidar_faces,
+        stats={"geometrySource": "synthetic_lidar_wrong_depth_plane"},
+    )
+
+    stats = pipeline.write_single_keyframe_rgbd_onboarding_mesh(
+        keyframes=keyframes,
+        depth_frames=depth_frames,
+        work_dir=tmp_path,
+        arkit_mesh=arkit_mesh,
+        output_obj_path=tmp_path / "rgbd_onboarding_mesh.obj",
+        output_mtl_path=tmp_path / "rgbd_onboarding_mesh.mtl",
+        output_texture_path=tmp_path / "rgbd_onboarding_texture.png",
+        output_debug_path=tmp_path / "rgbd_onboarding_diagnostics.json",
+        output_overlay_path=tmp_path / "rgbd_onboarding_overlay.png",
+        output_usdz_path=None,
+        profile=pipeline.PROCESSING_PROFILES["fast_onboarding"],
+    )
+
+    pruning = stats["pruning"]
+    assert stats["available"] is True
+    assert stats["rawFaceCount"] == stats["prunedFaceCount"]
+    assert pruning["guardrailTriggered"] is True
+    assert pruning["applied"] is False
+    assert pruning["wouldPruneFaceRatio"] > pipeline.RGBD_ONBOARDING_LIDAR_MAX_HARD_PRUNE_RATIO
+    assert pruning["advisoryPruneReasonCounts"]["lidar_depth_disagreement_prune"] > 0
+    assert pruning["pruneReasonCounts"]["lidar_prune_guardrail_keep"] == stats["rawFaceCount"]
+    assert (tmp_path / "rgbd_onboarding_mesh.obj").read_text(encoding="utf-8").count("\nf ") == stats["prunedFaceCount"]
 
 
 def make_rgbd_hero_patch_test_patch(

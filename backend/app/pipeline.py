@@ -396,6 +396,7 @@ RGBD_ONBOARDING_MIN_COMPONENT_FACES = 8
 RGBD_ONBOARDING_MIN_COMPONENT_FACE_RATIO = 0.003
 RGBD_ONBOARDING_LIDAR_PIXEL_BUCKETS = 96
 RGBD_ONBOARDING_LIDAR_MAX_SUPPORT_CANDIDATES = 64
+RGBD_ONBOARDING_LIDAR_MAX_HARD_PRUNE_RATIO = 0.40
 
 
 @dataclass(frozen=True)
@@ -2795,6 +2796,7 @@ def prune_rgbd_onboarding_mesh_with_lidar(
         }
 
     kept_faces: list[tuple[int, int, int]] = []
+    kept_face_support_reasons: list[str] = []
     face_support_reasons: list[str] = []
     prune_reason_counts: dict[str, int] = {}
     support_distances: list[float] = []
@@ -2807,6 +2809,7 @@ def prune_rgbd_onboarding_mesh_with_lidar(
             support_index=support_index,
         )
         reason = decision["reason"]
+        face_support_reasons.append(reason)
         prune_reason_counts[reason] = prune_reason_counts.get(reason, 0) + 1
         if decision.get("nearestDistanceMeters") is not None:
             support_distances.append(float(decision["nearestDistanceMeters"]))
@@ -2814,13 +2817,78 @@ def prune_rgbd_onboarding_mesh_with_lidar(
             depth_support_distances.append(float(decision["nearestDepthDeltaMeters"]))
         if decision["keep"]:
             kept_faces.append(face)
-            face_support_reasons.append(reason)
+            kept_face_support_reasons.append(reason)
+
+    raw_face_count = len(mesh.faces)
+    would_prune_face_count = max(0, raw_face_count - len(kept_faces))
+    would_prune_face_ratio = would_prune_face_count / raw_face_count if raw_face_count else 0.0
+    guardrail_triggered = would_prune_face_ratio > RGBD_ONBOARDING_LIDAR_MAX_HARD_PRUNE_RATIO
+    if guardrail_triggered:
+        component_result = filter_rgbd_onboarding_components(
+            mesh=mesh,
+            uv_coordinates=uv_coordinates,
+            face_support_reasons=face_support_reasons,
+        )
+        component_stats = component_result["stats"]
+        actual_prune_reason_counts = {"lidar_prune_guardrail_keep": raw_face_count}
+        if component_stats.get("removedFaceCount", 0):
+            actual_prune_reason_counts["tiny_disconnected_island"] = int(component_stats["removedFaceCount"])
+
+        final_mesh = component_result["mesh"]
+        final_uv_coordinates = component_result["uvCoordinates"]
+        return {
+            "mesh": final_mesh,
+            "uvCoordinates": final_uv_coordinates,
+            "stats": {
+                "enabled": True,
+                "algorithm": "camera_projection_lidar_vertex_support_advisory_guardrail",
+                "applied": False,
+                "guardrailTriggered": True,
+                "guardrailReason": "LiDAR hard pruning would remove too much otherwise-valid RGB-D surface.",
+                "rawVertexCount": len(mesh.vertices),
+                "rawFaceCount": raw_face_count,
+                "afterLidarFaceCount": len(final_mesh.faces),
+                "advisoryAfterLidarFaceCount": len(kept_faces),
+                "finalVertexCount": len(final_mesh.vertices),
+                "finalFaceCount": len(final_mesh.faces),
+                "prunedFaceCount": len(mesh.faces) - len(final_mesh.faces),
+                "prunedVertexCount": len(mesh.vertices) - len(final_mesh.vertices),
+                "wouldPruneFaceCount": would_prune_face_count,
+                "wouldPruneFaceRatio": round(would_prune_face_ratio, 4),
+                "maxHardPruneRatio": RGBD_ONBOARDING_LIDAR_MAX_HARD_PRUNE_RATIO,
+                "pruneReasonCounts": actual_prune_reason_counts,
+                "advisoryPruneReasonCounts": prune_reason_counts,
+                "supportDistanceMeters": RGBD_ONBOARDING_LIDAR_SUPPORT_DISTANCE_METERS,
+                "supportDepthDeltaMeters": RGBD_ONBOARDING_LIDAR_DEPTH_SUPPORT_METERS,
+                "hardRejectDepthDeltaMeters": RGBD_ONBOARDING_LIDAR_HARD_REJECT_DEPTH_METERS,
+                "hardRejectDistanceMeters": RGBD_ONBOARDING_LIDAR_HARD_REJECT_DISTANCE_METERS,
+                "maxSupportCandidatesPerFace": RGBD_ONBOARDING_LIDAR_MAX_SUPPORT_CANDIDATES,
+                "averageLidarSupportDistanceMeters": (
+                    round(sum(support_distances) / len(support_distances), 5)
+                    if support_distances else None
+                ),
+                "medianLidarSupportDistanceMeters": (
+                    round(median_sorted(sorted(support_distances)), 5)
+                    if support_distances else None
+                ),
+                "averageLidarDepthDeltaMeters": (
+                    round(sum(depth_support_distances) / len(depth_support_distances), 5)
+                    if depth_support_distances else None
+                ),
+                "medianLidarDepthDeltaMeters": (
+                    round(median_sorted(sorted(depth_support_distances)), 5)
+                    if depth_support_distances else None
+                ),
+                "lidarSupportIndex": lidar_support_index_summary(support_index),
+                "disconnectedComponentCounts": component_stats,
+            },
+        }
 
     compact = compact_mesh_to_faces(mesh, uv_coordinates, kept_faces)
     component_result = filter_rgbd_onboarding_components(
         mesh=compact["mesh"],
         uv_coordinates=compact["uvCoordinates"],
-        face_support_reasons=face_support_reasons,
+        face_support_reasons=kept_face_support_reasons,
     )
     component_stats = component_result["stats"]
     if component_stats.get("removedFaceCount", 0):
@@ -2837,6 +2905,8 @@ def prune_rgbd_onboarding_mesh_with_lidar(
         "stats": {
             "enabled": True,
             "algorithm": "camera_projection_lidar_vertex_support_with_sparse_keep",
+            "applied": True,
+            "guardrailTriggered": False,
             "rawVertexCount": len(mesh.vertices),
             "rawFaceCount": len(mesh.faces),
             "afterLidarFaceCount": len(kept_faces),
@@ -2850,6 +2920,9 @@ def prune_rgbd_onboarding_mesh_with_lidar(
             "hardRejectDepthDeltaMeters": RGBD_ONBOARDING_LIDAR_HARD_REJECT_DEPTH_METERS,
             "hardRejectDistanceMeters": RGBD_ONBOARDING_LIDAR_HARD_REJECT_DISTANCE_METERS,
             "maxSupportCandidatesPerFace": RGBD_ONBOARDING_LIDAR_MAX_SUPPORT_CANDIDATES,
+            "wouldPruneFaceCount": would_prune_face_count,
+            "wouldPruneFaceRatio": round(would_prune_face_ratio, 4),
+            "maxHardPruneRatio": RGBD_ONBOARDING_LIDAR_MAX_HARD_PRUNE_RATIO,
             "averageLidarSupportDistanceMeters": (
                 round(sum(support_distances) / len(support_distances), 5)
                 if support_distances else None
