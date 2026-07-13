@@ -1293,6 +1293,79 @@ def test_rgbd_hero_patch_ownership_replaces_stretched_primary_depth_edges():
     assert cull_stats["patches"][1]["primaryStretchedDepthEdgeCount"] == 2
 
 
+def test_single_keyframe_rgbd_onboarding_mesh_downsamples_preview_budget():
+    width, height = 160, 120
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    intrinsics = [
+        120, 0, 0,
+        0, 120, 0,
+        width / 2, height / 2, 1,
+    ]
+    rgb_image = Image.new("RGB", (width, height), (180, 110, 70))
+    projection_keyframe = pipeline.ProjectionKeyframe(
+        image=rgb_image,
+        width=width,
+        height=height,
+        world_to_camera=transform,
+        camera_position=(0.0, 0.0, 0.0),
+        intrinsics=intrinsics,
+        pixels=rgb_image.load(),
+        id="onboarding-keyframe",
+    )
+
+    result = pipeline.build_single_keyframe_rgbd_onboarding_mesh(
+        keyframe={
+            "id": "onboarding-keyframe",
+            "cameraTransform": transform,
+            "intrinsics": intrinsics,
+            "imageResolution": [width, height],
+        },
+        depth_frame={
+            "id": "onboarding-depth",
+            "cameraTransform": transform,
+            "intrinsics": intrinsics,
+            "depthResolution": [width, height],
+        },
+        projection_keyframe=projection_keyframe,
+        depth_values=array("f", [1.0] * (width * height)),
+        width=width,
+        height=height,
+    )
+
+    full_resolution_face_budget = (width - 1) * (height - 1) * 2
+    stats = result["stats"]
+    assert stats["targetSamples"] == pipeline.RGBD_ONBOARDING_TARGET_SAMPLES
+    assert stats["sampleStep"] == 2
+    assert stats["faceCount"] <= 10_000
+    assert stats["faceCount"] < full_resolution_face_budget
+    assert len(result["mesh"].faces) == stats["acceptedFaceCount"]
+    assert result["mesh"].stats["targetSamples"] == pipeline.RGBD_ONBOARDING_TARGET_SAMPLES
+
+
+def test_onboarding_lidar_support_candidates_are_bounded_and_nearest():
+    support_index = {
+        "cellSizePixels": 10,
+        "maxCandidatesPerLookup": 3,
+        "buckets": {
+            (0, 0): [
+                {"vertexIndex": 0, "u": 8.0, "v": 8.0, "world": (0, 0, 0), "depth": 1.0},
+                {"vertexIndex": 1, "u": 5.0, "v": 5.0, "world": (0, 0, 0), "depth": 1.0},
+                {"vertexIndex": 2, "u": 9.0, "v": 9.0, "world": (0, 0, 0), "depth": 1.0},
+                {"vertexIndex": 3, "u": 2.0, "v": 2.0, "world": (0, 0, 0), "depth": 1.0},
+            ],
+        },
+    }
+
+    candidates = pipeline.nearby_lidar_support_candidates(support_index, 8.5, 8.5)
+
+    assert [candidate["vertexIndex"] for candidate in candidates] == [0, 2, 1]
+
+
 def test_single_keyframe_rgbd_onboarding_prunes_lidar_inconsistent_region(tmp_path):
     transform = [
         1, 0, 0, 0,

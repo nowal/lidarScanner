@@ -384,7 +384,7 @@ RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_ABSOLUTE_METERS = 0.18
 RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_RELATIVE = 0.16
 RGBD_HERO_PATCH_PRIMARY_OWNER_MIN_VALID_NEIGHBORS = 3
 RGBD_ONBOARDING_WINDOW_SECONDS = 3.0
-RGBD_ONBOARDING_TARGET_SAMPLES = 160_000
+RGBD_ONBOARDING_TARGET_SAMPLES = 16_384
 RGBD_ONBOARDING_FACE_ABSOLUTE_TOLERANCE_METERS = 0.18
 RGBD_ONBOARDING_FACE_RELATIVE_TOLERANCE = 0.22
 RGBD_ONBOARDING_LIDAR_SUPPORT_DISTANCE_METERS = 0.15
@@ -394,7 +394,8 @@ RGBD_ONBOARDING_LIDAR_HARD_REJECT_DISTANCE_METERS = 0.28
 RGBD_ONBOARDING_MAX_FACE_EDGE_METERS = 0.75
 RGBD_ONBOARDING_MIN_COMPONENT_FACES = 8
 RGBD_ONBOARDING_MIN_COMPONENT_FACE_RATIO = 0.003
-RGBD_ONBOARDING_LIDAR_PIXEL_BUCKETS = 28
+RGBD_ONBOARDING_LIDAR_PIXEL_BUCKETS = 96
+RGBD_ONBOARDING_LIDAR_MAX_SUPPORT_CANDIDATES = 64
 
 
 @dataclass(frozen=True)
@@ -841,7 +842,10 @@ class TexturedMeshStage:
         if profile.single_frame_diagnostic:
             return
 
-        await report(self.name, 72, f"Projecting keyframes into a texture atlas for {profile.name}")
+        if profile.rgbd_onboarding_mesh:
+            await report(self.name, 72, f"Preparing single-keyframe RGB-D onboarding mesh for {profile.name}")
+        else:
+            await report(self.name, 72, f"Projecting keyframes into a texture atlas for {profile.name}")
         keyframes = json.loads((job_dir / "work" / "keyframe_manifest.json").read_text(encoding="utf-8"))
         depth_manifest_path = job_dir / "work" / "depth_frame_manifest.json"
         depth_frames = json.loads(depth_manifest_path.read_text(encoding="utf-8")) if depth_manifest_path.exists() else []
@@ -2693,6 +2697,7 @@ def build_single_keyframe_rgbd_onboarding_mesh(
             "sampleStep": sample_step,
             "sampledColumnCount": len(x_samples),
             "sampledRowCount": len(y_samples),
+            "targetSamples": RGBD_ONBOARDING_TARGET_SAMPLES,
             "invalidDepthSampleCount": invalid_depth_count,
             "rejectedFaceCount": sum(rejected_face_reasons.values()),
             "rejectedFaceReasons": rejected_face_reasons,
@@ -2844,6 +2849,7 @@ def prune_rgbd_onboarding_mesh_with_lidar(
             "supportDepthDeltaMeters": RGBD_ONBOARDING_LIDAR_DEPTH_SUPPORT_METERS,
             "hardRejectDepthDeltaMeters": RGBD_ONBOARDING_LIDAR_HARD_REJECT_DEPTH_METERS,
             "hardRejectDistanceMeters": RGBD_ONBOARDING_LIDAR_HARD_REJECT_DISTANCE_METERS,
+            "maxSupportCandidatesPerFace": RGBD_ONBOARDING_LIDAR_MAX_SUPPORT_CANDIDATES,
             "averageLidarSupportDistanceMeters": (
                 round(sum(support_distances) / len(support_distances), 5)
                 if support_distances else None
@@ -2915,6 +2921,8 @@ def build_lidar_projection_support_index(arkit_mesh: FusedMesh, depth_frame: dic
         "worldToCamera": world_to_camera,
         "cellSizePixels": cell_size,
         "bucketCount": len(buckets),
+        "pixelBucketTarget": RGBD_ONBOARDING_LIDAR_PIXEL_BUCKETS,
+        "maxCandidatesPerLookup": RGBD_ONBOARDING_LIDAR_MAX_SUPPORT_CANDIDATES,
         "inputVertexCount": len(arkit_mesh.vertices),
         "inputFaceCount": len(arkit_mesh.faces),
         "projectedVertexCount": projected_count,
@@ -2957,8 +2965,11 @@ def rgbd_onboarding_lidar_face_decision(
     if not candidates:
         return {"keep": True, "reason": "lidar_sparse_keep"}
 
-    nearest_distance = min(length(subtract(candidate["world"], centroid)) for candidate in candidates)
-    nearest_depth_delta = min(abs(float(candidate["depth"]) - projected_depth) for candidate in candidates)
+    nearest_distance = math.inf
+    nearest_depth_delta = math.inf
+    for candidate in candidates:
+        nearest_distance = min(nearest_distance, length(subtract(candidate["world"], centroid)))
+        nearest_depth_delta = min(nearest_depth_delta, abs(float(candidate["depth"]) - projected_depth))
     if (
         nearest_distance <= RGBD_ONBOARDING_LIDAR_SUPPORT_DISTANCE_METERS
         or nearest_depth_delta <= RGBD_ONBOARDING_LIDAR_DEPTH_SUPPORT_METERS
@@ -2992,13 +3003,15 @@ def nearby_lidar_support_candidates(support_index: dict, u: float, v: float) -> 
     center_cell = (int(u) // cell_size, int(v) // cell_size)
     buckets: dict[tuple[int, int], list[dict]] = support_index["buckets"]
     candidates: list[dict] = []
+    max_candidates = max(1, int(support_index.get("maxCandidatesPerLookup") or RGBD_ONBOARDING_LIDAR_MAX_SUPPORT_CANDIDATES))
     for radius in (1, 2):
         candidates.clear()
         for cy in range(center_cell[1] - radius, center_cell[1] + radius + 1):
             for cx in range(center_cell[0] - radius, center_cell[0] + radius + 1):
                 candidates.extend(buckets.get((cx, cy), []))
         if candidates:
-            return list(candidates)
+            candidates.sort(key=lambda candidate: (float(candidate["u"]) - u) ** 2 + (float(candidate["v"]) - v) ** 2)
+            return list(candidates[:max_candidates])
     return []
 
 
