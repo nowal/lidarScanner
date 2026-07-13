@@ -384,6 +384,16 @@ RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_ABSOLUTE_METERS = 0.18
 RGBD_HERO_PATCH_PRIMARY_OWNER_DEPTH_EDGE_RELATIVE = 0.16
 RGBD_HERO_PATCH_PRIMARY_OWNER_MIN_VALID_NEIGHBORS = 3
 RGBD_ONBOARDING_WINDOW_SECONDS = 3.0
+RGBD_ONBOARDING_PAIR_WINDOW_SECONDS = 5.0
+RGBD_ONBOARDING_PAIR_PRIMARY_WINDOW_SECONDS = 1.25
+RGBD_ONBOARDING_PAIR_TARGET_TIME_DELTA_SECONDS = 2.5
+RGBD_ONBOARDING_PAIR_MIN_TIME_DELTA_SECONDS = 0.35
+RGBD_ONBOARDING_PAIR_OVERLAP_SAMPLE_COUNT = 2_048
+RGBD_ONBOARDING_PAIR_MIN_DEPTH_AGREEMENT_RATIO = 0.10
+RGBD_ONBOARDING_PAIR_DEPTH_ABSOLUTE_TOLERANCE_METERS = 0.22
+RGBD_ONBOARDING_PAIR_DEPTH_RELATIVE_TOLERANCE = 0.18
+RGBD_ONBOARDING_TSDF_VOXEL_LENGTH_METERS = 0.04
+RGBD_ONBOARDING_TSDF_SDF_TRUNC_METERS = 0.14
 RGBD_ONBOARDING_TARGET_SAMPLES = 16_384
 RGBD_ONBOARDING_FACE_ABSOLUTE_TOLERANCE_METERS = 0.18
 RGBD_ONBOARDING_FACE_RELATIVE_TOLERANCE = 0.22
@@ -844,7 +854,7 @@ class TexturedMeshStage:
             return
 
         if profile.rgbd_onboarding_mesh:
-            await report(self.name, 72, f"Preparing single-keyframe RGB-D onboarding mesh for {profile.name}")
+            await report(self.name, 72, f"Preparing RGB-D onboarding mesh for {profile.name}")
         else:
             await report(self.name, 72, f"Projecting keyframes into a texture atlas for {profile.name}")
         keyframes = json.loads((job_dir / "work" / "keyframe_manifest.json").read_text(encoding="utf-8"))
@@ -852,28 +862,60 @@ class TexturedMeshStage:
         depth_frames = json.loads(depth_manifest_path.read_text(encoding="utf-8")) if depth_manifest_path.exists() else []
         mesh = read_fused_mesh_json(job_dir / "work" / "fused_mesh.json")
         if profile.rgbd_onboarding_mesh:
-            await report(self.name, 74, "Building single-keyframe RGB-D onboarding mesh")
-            onboarding_stats = write_single_keyframe_rgbd_onboarding_mesh(
-                keyframes=keyframes,
-                depth_frames=depth_frames,
-                work_dir=job_dir / "work",
-                arkit_mesh=mesh,
-                output_obj_path=job_dir / "work" / "rgbd_onboarding_mesh.obj",
-                output_mtl_path=job_dir / "work" / "rgbd_onboarding_mesh.mtl",
-                output_texture_path=job_dir / "work" / "rgbd_onboarding_texture.png",
-                output_debug_path=job_dir / "work" / "rgbd_onboarding_diagnostics.json",
-                output_overlay_path=job_dir / "work" / "rgbd_onboarding_overlay.png",
-                output_usdz_path=None,
-                profile=profile,
-            )
+            work_dir = job_dir / "work"
+            output_obj_path = work_dir / "rgbd_onboarding_mesh.obj"
+            output_mtl_path = work_dir / "rgbd_onboarding_mesh.mtl"
+            output_texture_path = work_dir / "rgbd_onboarding_texture.png"
+            output_debug_path = work_dir / "rgbd_onboarding_diagnostics.json"
+            output_overlay_path = work_dir / "rgbd_onboarding_overlay.png"
+            await report(self.name, 74, "Building two-keyframe RGB-D TSDF onboarding mesh")
+            try:
+                onboarding_stats = await write_two_keyframe_rgbd_onboarding_mesh(
+                    keyframes=keyframes,
+                    depth_frames=depth_frames,
+                    work_dir=work_dir,
+                    output_obj_path=output_obj_path,
+                    output_mtl_path=output_mtl_path,
+                    output_texture_path=output_texture_path,
+                    output_debug_path=output_debug_path,
+                    profile=profile,
+                    report=report,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Two-keyframe RGB-D onboarding mesh unavailable; falling back to single frame: %s", exc)
+                onboarding_stats = {
+                    "available": False,
+                    "reason": str(exc),
+                    "strategy": "best_two_rgbd_keyframes_first_five_seconds_tsdf_weighted_texture",
+                }
+
+            if not onboarding_stats.get("available"):
+                await report(
+                    self.name,
+                    76,
+                    "Two-keyframe RGB-D TSDF unavailable; falling back to single-keyframe RGB-D mesh",
+                )
+                onboarding_stats = write_single_keyframe_rgbd_onboarding_mesh(
+                    keyframes=keyframes,
+                    depth_frames=depth_frames,
+                    work_dir=work_dir,
+                    arkit_mesh=mesh,
+                    output_obj_path=output_obj_path,
+                    output_mtl_path=output_mtl_path,
+                    output_texture_path=output_texture_path,
+                    output_debug_path=output_debug_path,
+                    output_overlay_path=output_overlay_path,
+                    output_usdz_path=None,
+                    profile=profile,
+                )
             if onboarding_stats.get("available"):
                 await report(
                     self.name,
                     80,
                     (
                         "Built RGB-D onboarding mesh "
-                        f"({onboarding_stats.get('prunedFaceCount', 0)} faces from "
-                        f"{onboarding_stats.get('selectedKeyframeId')})"
+                        f"({onboarding_stats.get('prunedFaceCount', 0)} faces via "
+                        f"{onboarding_stats.get('strategy', 'rgbd_onboarding')})"
                     ),
                 )
             else:
@@ -2037,6 +2079,815 @@ def write_rgbd_single_frame_mesh_obj(
     }
 
 
+async def write_two_keyframe_rgbd_onboarding_mesh(
+    *,
+    keyframes: list[dict],
+    depth_frames: list[dict],
+    work_dir: Path,
+    output_obj_path: Path,
+    output_mtl_path: Path,
+    output_texture_path: Path,
+    output_debug_path: Path,
+    profile: ProcessingProfile | None = None,
+    report: StageReporter | None = None,
+) -> dict:
+    profile = profile or PROCESSING_PROFILES["fast_onboarding"]
+    paired_frames = pair_rgbd_frames(keyframes, depth_frames, work_dir)
+    if not paired_frames:
+        stats = unavailable_two_keyframe_rgbd_onboarding_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=0,
+            reason="No RGB/depth frame pair could be matched by colorKeyframeId or timestamp.",
+            profile=profile,
+        )
+        output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    selected_pairs, selection_stats = select_two_keyframe_rgbd_onboarding_pairs(
+        paired_frames,
+        work_dir=work_dir,
+    )
+    if len(selected_pairs) < 2:
+        stats = unavailable_two_keyframe_rgbd_onboarding_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=len(paired_frames),
+            reason=selection_stats.get("reason", "No blendable two-frame RGB-D onboarding pair was found."),
+            profile=profile,
+        )
+        stats.update({"selection": selection_stats})
+        output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    if report is not None:
+        await report(JobStage.texturing, 75, "Fusing best two RGB-D keyframes with TSDF")
+
+    selected_keyframes = [pair[0] for pair in selected_pairs]
+    selected_depth_frames = [pair[1] for pair in selected_pairs]
+    tsdf_profile = replace(
+        profile,
+        name=f"{profile.name}_two_frame_tsdf_onboarding",
+        max_rgbd_frames=2,
+        use_rgbd_geometry=True,
+        planar_chart_projection_mode="blend",
+        preserve_texture_render_mesh=True,
+        dense_single_view_texture=False,
+        rgbd_onboarding_mesh=True,
+    )
+    tsdf_obj_path = work_dir / "rgbd_onboarding_tsdf_untextured.obj"
+    tsdf_json_path = work_dir / "rgbd_onboarding_tsdf_untextured.json"
+    tsdf_stats = write_rgbd_tsdf_mesh(
+        keyframes=selected_keyframes,
+        depth_frames=selected_depth_frames,
+        work_dir=work_dir,
+        output_obj_path=tsdf_obj_path,
+        output_json_path=tsdf_json_path,
+        profile=tsdf_profile,
+        selected_frames=selected_pairs,
+        selection_stats=selection_stats,
+        accept_low_confidence_depth=True,
+        fill_depth_holes=True,
+        voxel_length_meters=RGBD_ONBOARDING_TSDF_VOXEL_LENGTH_METERS,
+        sdf_trunc_meters=RGBD_ONBOARDING_TSDF_SDF_TRUNC_METERS,
+    )
+    mesh = read_fused_mesh_json(tsdf_json_path)
+    if not mesh.faces:
+        stats = unavailable_two_keyframe_rgbd_onboarding_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=len(paired_frames),
+            reason="Two-keyframe TSDF fusion produced an empty mesh.",
+            profile=profile,
+        )
+        stats.update({"selection": selection_stats, "mesh": tsdf_stats})
+        output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    if report is not None:
+        await report(JobStage.texturing, 77, "Projecting blended texture from both RGB-D keyframes")
+
+    loaded_keyframes = load_projection_keyframes(
+        selected_keyframes,
+        work_dir / "keyframes",
+        depth_frames=selected_depth_frames,
+        work_dir=work_dir,
+    )
+    if len(loaded_keyframes) < 2:
+        stats = unavailable_two_keyframe_rgbd_onboarding_stats(
+            keyframes=keyframes,
+            depth_frames=depth_frames,
+            paired_count=len(paired_frames),
+            reason="Selected RGB-D pair could not be decoded for texture projection.",
+            profile=profile,
+        )
+        stats.update({"selection": selection_stats, "mesh": tsdf_stats})
+        output_debug_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        return stats
+
+    texture_depth_preparation = apply_prepared_rgbd_depth_frames_to_projection_keyframes(
+        loaded_keyframes,
+        selected_depth_frames,
+        work_dir,
+    )
+    texture_profile = replace(
+        profile,
+        name=f"{profile.name}_two_frame_weighted_texture",
+        planar_chart_projection_mode="blend",
+        write_texture_debug_preview=False,
+        preserve_texture_render_mesh=True,
+        dense_single_view_texture=False,
+        rgbd_onboarding_mesh=True,
+    )
+    render_mesh = make_texture_render_mesh(mesh, profile=texture_profile)
+
+    async def texture_report(progress: float, message: str) -> None:
+        if report is not None:
+            await report(JobStage.texturing, min(max(progress, 76.0), 80.0), message)
+
+    texture_debug_path = work_dir / "rgbd_onboarding_texture_debug.json"
+    textured_stats = await write_textured_obj(
+        mesh=render_mesh,
+        keyframes=loaded_keyframes,
+        output_obj_path=output_obj_path,
+        output_mtl_path=output_mtl_path,
+        output_texture_path=output_texture_path,
+        output_debug_path=texture_debug_path,
+        output_debug_preview_path=None,
+        output_projection_overlay_dir=None,
+        output_textured_usdz_path=None,
+        output_textured_glb_path=None,
+        output_uv_checker_glb_path=None,
+        output_coverage_debug_glb_path=None,
+        output_coverage_debug_report_path=None,
+        report_progress=texture_report,
+        is_cancelled=None,
+        profile=texture_profile,
+    )
+    if output_obj_path.exists():
+        obj_text = output_obj_path.read_text(encoding="utf-8")
+        output_obj_path.write_text(
+            obj_text.replace("\no textured_mesh\n", "\no rgbd_onboarding_mesh\n").replace(
+                "o textured_mesh\n",
+                "o rgbd_onboarding_mesh\n",
+                1,
+            ),
+            encoding="utf-8",
+        )
+
+    texture_diagnostics = textured_stats.get("diagnostics") or {}
+    texture_atlas = texture_diagnostics.get("textureAtlas") or {}
+    selected_left = selection_stats.get("selectedPair", {}).get("left", {})
+    selected_right = selection_stats.get("selectedPair", {}).get("right", {})
+    final_vertex_count = len(render_mesh.vertices)
+    final_face_count = len(render_mesh.faces)
+    diagnostics = {
+        "available": True,
+        "profile": profile.name,
+        "strategy": "best_two_rgbd_keyframes_first_five_seconds_tsdf_weighted_texture",
+        "preferredPreviewCandidate": True,
+        "becamePreferredPreview": True,
+        "pairedFrameCount": len(paired_frames),
+        "candidateCount": selection_stats.get("eligibleCandidateCount", 0),
+        "totalCandidateCount": selection_stats.get("totalCandidateCount", 0),
+        "firstTimestamp": selection_stats.get("firstTimestamp"),
+        "onboardingWindowSeconds": RGBD_ONBOARDING_WINDOW_SECONDS,
+        "pairWindowSeconds": RGBD_ONBOARDING_PAIR_WINDOW_SECONDS,
+        "selectedCandidateRank": 1,
+        "selectedKeyframeId": selected_left.get("keyframeId"),
+        "selectedDepthFrameId": selected_left.get("depthFrameId"),
+        "selectedKeyframeIds": [
+            pair[0].get("id")
+            for pair in selected_pairs
+            if pair[0].get("id")
+        ],
+        "selectedDepthFrameIds": [
+            pair[1].get("id")
+            for pair in selected_pairs
+            if pair[1].get("id")
+        ],
+        "selectedColorKeyframeId": selected_left.get("colorKeyframeId"),
+        "selectedTimestamp": selected_left.get("sourceTimestamp"),
+        "secondsFromCaptureStart": selected_left.get("secondsFromCaptureStart"),
+        "selectedScore": selection_stats.get("selectedPair", {}).get("score"),
+        "selectedScoreBreakdown": selection_stats.get("selectedPair", {}).get("scoreBreakdown"),
+        "validDepthRatio": min(
+            float(selected_left.get("validDepthRatio") or 0.0),
+            float(selected_right.get("validDepthRatio") or 0.0),
+        ),
+        "centralCoverageRatio": min(
+            float(selected_left.get("centralCoverageRatio") or 0.0),
+            float(selected_right.get("centralCoverageRatio") or 0.0),
+        ),
+        "depthEdgeChaosRatio": max(
+            float(selected_left.get("depthEdgeChaosRatio") or 0.0),
+            float(selected_right.get("depthEdgeChaosRatio") or 0.0),
+        ),
+        "highConfidenceRatio": min(
+            float(selected_left.get("highConfidenceRatio") or 0.0),
+            float(selected_right.get("highConfidenceRatio") or 0.0),
+        ),
+        "rawVertexCount": final_vertex_count,
+        "rawFaceCount": final_face_count,
+        "prunedVertexCount": final_vertex_count,
+        "prunedFaceCount": final_face_count,
+        "textureSize": [
+            texture_atlas.get("width", textured_stats.get("atlasWidth")),
+            texture_atlas.get("height", textured_stats.get("atlasHeight")),
+        ],
+        "sourceDepthResolution": selected_pairs[0][1].get("depthResolution"),
+        "depthPreparation": {
+            "acceptedLowConfidenceDepth": True,
+            "fillDepthHoles": True,
+            "textureProjectionDepthFrames": texture_depth_preparation,
+        },
+        "mesh": {
+            **tsdf_stats,
+            "rawVertexCount": final_vertex_count,
+            "rawFaceCount": final_face_count,
+            "finalVertexCount": final_vertex_count,
+            "finalFaceCount": final_face_count,
+            "renderMesh": textured_stats.get("renderMesh", {}),
+        },
+        "pruning": {
+            "enabled": False,
+            "strategy": "two_frame_tsdf_fusion_no_lidar_face_pruning",
+            "reason": "LiDAR is used as a geometric consistency check upstream; TSDF fusion owns the onboarding preview geometry.",
+            "rawVertexCount": final_vertex_count,
+            "rawFaceCount": final_face_count,
+            "finalVertexCount": final_vertex_count,
+            "finalFaceCount": final_face_count,
+            "pruneReasonCounts": {"two_frame_tsdf_keep": final_face_count},
+        },
+        "textureProjection": textured_stats,
+        "selection": selection_stats,
+        "artifacts": {
+            "obj": {
+                "format": "obj",
+                "path": output_obj_path.name,
+                "available": output_obj_path.exists(),
+                "vertexCount": final_vertex_count,
+                "uvCoordinateCount": textured_stats.get("uvCoordinateCount", 0),
+                "faceCount": final_face_count,
+            },
+            "mtl": {
+                "format": "mtl",
+                "path": output_mtl_path.name,
+                "available": output_mtl_path.exists(),
+            },
+            "texture": {
+                "format": "png",
+                "path": output_texture_path.name,
+                "available": output_texture_path.exists(),
+                "width": textured_stats.get("atlasWidth"),
+                "height": textured_stats.get("atlasHeight"),
+            },
+            "overlay": {
+                "format": "png",
+                "path": None,
+                "available": False,
+                "reason": "Two-keyframe TSDF onboarding preview does not export a single-frame overlay.",
+            },
+            "usdz": {
+                "format": "usdz",
+                "path": None,
+                "available": False,
+                "reason": "USDZ export was not requested.",
+            },
+            "diagnostics": {
+                "format": "json",
+                "path": output_debug_path.name,
+                "available": True,
+            },
+        },
+        "candidateSummary": selection_stats.get("candidateSummary", []),
+        "skippedCandidates": selection_stats.get("skippedCandidates", []),
+        "warnings": selection_stats.get("warnings", []),
+    }
+    output_debug_path.write_text(json.dumps(diagnostics, indent=2), encoding="utf-8")
+    return diagnostics
+
+
+def unavailable_two_keyframe_rgbd_onboarding_stats(
+    *,
+    keyframes: list[dict],
+    depth_frames: list[dict],
+    paired_count: int,
+    reason: str,
+    profile: ProcessingProfile | None = None,
+) -> dict:
+    return {
+        "available": False,
+        "profile": profile.name if profile is not None else "fast_onboarding",
+        "strategy": "best_two_rgbd_keyframes_first_five_seconds_tsdf_weighted_texture",
+        "reason": reason,
+        "keyframeCount": len(keyframes),
+        "depthFrameCount": len(depth_frames),
+        "pairedFrameCount": paired_count,
+        "pairWindowSeconds": RGBD_ONBOARDING_PAIR_WINDOW_SECONDS,
+        "becamePreferredPreview": False,
+        "artifacts": {
+            "obj": {"format": "obj", "path": "rgbd_onboarding_mesh.obj", "available": False},
+            "mtl": {"format": "mtl", "path": "rgbd_onboarding_mesh.mtl", "available": False},
+            "texture": {"format": "png", "path": "rgbd_onboarding_texture.png", "available": False},
+            "overlay": {"format": "png", "path": None, "available": False},
+            "usdz": {"format": "usdz", "path": None, "available": False},
+            "diagnostics": {"format": "json", "path": "rgbd_onboarding_diagnostics.json", "available": True},
+        },
+    }
+
+
+def apply_prepared_rgbd_depth_frames_to_projection_keyframes(
+    keyframes: list[ProjectionKeyframe],
+    depth_frames: list[dict],
+    work_dir: Path,
+) -> dict:
+    prepared_by_id: dict[str, ProjectionDepthFrame] = {}
+    records: list[dict] = []
+    skipped: list[dict] = []
+    for depth_frame in depth_frames:
+        resolution = depth_frame.get("depthResolution") or []
+        transform = depth_frame.get("cameraTransform") or []
+        intrinsics = depth_frame.get("intrinsics") or []
+        depth_path = depth_frame.get("path")
+        if len(resolution) != 2 or len(transform) != 16 or len(intrinsics) != 9 or not depth_path:
+            skipped.append({
+                "depthFrameId": depth_frame.get("id"),
+                "reason": "missing_resolution_transform_intrinsics_or_path",
+            })
+            continue
+
+        width, height = int(resolution[0]), int(resolution[1])
+        try:
+            depth_values = read_float32_depth_values(work_dir / depth_path, width, height)
+            confidence_values = read_confidence_values(depth_frame, work_dir, width, height)
+            prepared = prepare_rgbd_hero_patch_depth_grid(
+                depth_values=depth_values,
+                confidence_values=confidence_values,
+                width=width,
+                height=height,
+            )
+        except Exception as exc:  # noqa: BLE001
+            skipped.append({
+                "depthFrameId": depth_frame.get("id"),
+                "reason": str(exc),
+            })
+            continue
+
+        color_keyframe_id = str(depth_frame.get("colorKeyframeId")) if depth_frame.get("colorKeyframeId") else None
+        projection_depth = ProjectionDepthFrame(
+            id=str(depth_frame.get("id")) if depth_frame.get("id") else None,
+            color_keyframe_id=color_keyframe_id,
+            width=width,
+            height=height,
+            world_to_camera=invert_rigid_transform(transform),
+            intrinsics=intrinsics,
+            depth_values=prepared["depthValues"],
+            confidence_values=None,
+            timestamp=safe_float(depth_frame.get("timestamp")),
+            path=str(depth_path),
+            confidence_path=str(depth_frame.get("confidencePath")) if depth_frame.get("confidencePath") else None,
+        )
+        if color_keyframe_id:
+            prepared_by_id[color_keyframe_id] = projection_depth
+        if projection_depth.id:
+            prepared_by_id.setdefault(projection_depth.id, projection_depth)
+        records.append({
+            "depthFrameId": projection_depth.id,
+            "colorKeyframeId": color_keyframe_id,
+            "width": width,
+            "height": height,
+            "acceptedLowConfidenceDepth": True,
+            "confidenceValuesForVisibility": "ignored_after_preparation",
+            "stats": prepared["stats"],
+        })
+
+    assigned_count = 0
+    for keyframe in keyframes:
+        if keyframe.id and keyframe.id in prepared_by_id:
+            keyframe.depth_frame = prepared_by_id[keyframe.id]
+            assigned_count += 1
+
+    return {
+        "enabled": True,
+        "algorithm": "accept_low_confidence_depth_and_fill_holes_for_texture_visibility",
+        "preparedDepthFrameCount": len(records),
+        "assignedKeyframeCount": assigned_count,
+        "records": records,
+        "skipped": skipped,
+    }
+
+
+def select_two_keyframe_rgbd_onboarding_pairs(
+    paired_frames: list[tuple[dict, dict, Path, Path]],
+    *,
+    work_dir: Path,
+) -> tuple[list[tuple[dict, dict, Path, Path]], dict]:
+    if not paired_frames:
+        return [], {
+            "strategy": "best_two_rgbd_keyframes_first_five_seconds_overlap_tsdf",
+            "available": False,
+            "reason": "No RGB-D frame pairs were available.",
+        }
+
+    timestamps = [
+        float(frame[1].get("timestamp") or frame[0].get("timestamp") or 0.0)
+        for frame in paired_frames
+    ]
+    first_timestamp = min(timestamps) if timestamps else 0.0
+    scan_midpoint = (min(timestamps) + max(timestamps)) / 2 if timestamps else 0.0
+    scan_span = max(max(timestamps) - min(timestamps), 1e-6) if timestamps else 1.0
+    candidates: list[dict] = []
+    skipped_candidates: list[dict] = []
+    warnings: list[str] = []
+
+    for index, pair in enumerate(paired_frames):
+        try:
+            candidate = rgbd_onboarding_candidate_metrics(
+                index=index,
+                pair=pair,
+                work_dir=work_dir,
+                first_timestamp=first_timestamp,
+                scan_midpoint=scan_midpoint,
+                scan_span=scan_span,
+            )
+            seconds_from_start = float(candidate.get("secondsFromCaptureStart") or 0.0)
+            candidate["withinPairWindow"] = seconds_from_start <= RGBD_ONBOARDING_PAIR_WINDOW_SECONDS + 1e-6
+            if not candidate["withinPairWindow"]:
+                candidate["rejectionReasons"] = dedupe_preserve_order(
+                    list(candidate.get("rejectionReasons") or []) + ["outside_first_five_seconds"]
+                )
+            candidates.append(candidate)
+        except Exception as exc:  # noqa: BLE001
+            skipped_candidates.append({
+                "index": index,
+                "reason": str(exc),
+            })
+
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.get("withinPairWindow")
+        and int(candidate.get("meshablePixelCount") or 0) >= 3
+        and float(candidate.get("validDepthRatio") or 0.0) >= 0.02
+    ]
+    pair_records: list[dict] = []
+    depth_cache: dict[str, dict] = {}
+    for left_index, left in enumerate(eligible):
+        for right in eligible[left_index + 1:]:
+            left_pair = left["pair"]
+            right_pair = right["pair"]
+            time_delta = abs(
+                float(left.get("sourceTimestamp") or 0.0)
+                - float(right.get("sourceTimestamp") or 0.0)
+            )
+            if time_delta < RGBD_ONBOARDING_PAIR_MIN_TIME_DELTA_SECONDS:
+                continue
+            left_pose = pose_from_transform(
+                left_pair[1].get("cameraTransform") or left_pair[0].get("cameraTransform") or [],
+                left.get("sourceTimestamp"),
+            )
+            right_pose = pose_from_transform(
+                right_pair[1].get("cameraTransform") or right_pair[0].get("cameraTransform") or [],
+                right.get("sourceTimestamp"),
+            )
+            pose_delta = pose_delta_summary(left_pose, right_pose)
+            overlap = rgbd_onboarding_pair_overlap_metrics(
+                left_pair,
+                right_pair,
+                work_dir=work_dir,
+                depth_cache=depth_cache,
+            )
+            score, score_breakdown = rgbd_onboarding_pair_score(
+                left,
+                right,
+                overlap,
+                pose_delta,
+                time_delta,
+            )
+            blendable = (
+                overlap.get("bidirectionalAgreementRatio", 0.0)
+                >= RGBD_ONBOARDING_PAIR_MIN_DEPTH_AGREEMENT_RATIO
+            )
+            pair_records.append({
+                "left": left,
+                "right": right,
+                "overlap": overlap,
+                "poseDelta": pose_delta,
+                "timeDeltaSeconds": round(time_delta, 4),
+                "score": score,
+                "scoreBreakdown": score_breakdown,
+                "blendable": blendable,
+            })
+
+    blendable_pairs = [record for record in pair_records if record["blendable"]]
+    ranked_pairs = sorted(
+        blendable_pairs or pair_records,
+        key=lambda record: (
+            bool(record["blendable"]),
+            float(record["score"]),
+            float(record["overlap"].get("bidirectionalAgreementRatio", 0.0)),
+        ),
+        reverse=True,
+    )
+    selected_record = ranked_pairs[0] if ranked_pairs else None
+    selected_pairs = (
+        [selected_record["left"]["pair"], selected_record["right"]["pair"]]
+        if selected_record is not None and selected_record.get("blendable")
+        else []
+    )
+    selected_ids = {
+        id(selected_record["left"]),
+        id(selected_record["right"]),
+    } if selected_record is not None else set()
+
+    stats = {
+        "strategy": "best_two_rgbd_keyframes_first_five_seconds_overlap_tsdf",
+        "available": selected_record is not None and selected_record.get("blendable", False),
+        "reason": None if selected_pairs else "No candidate pair had enough overlapping depth agreement.",
+        "firstTimestamp": first_timestamp,
+        "pairWindowSeconds": RGBD_ONBOARDING_PAIR_WINDOW_SECONDS,
+        "primaryWindowSeconds": RGBD_ONBOARDING_PAIR_PRIMARY_WINDOW_SECONDS,
+        "targetTimeDeltaSeconds": RGBD_ONBOARDING_PAIR_TARGET_TIME_DELTA_SECONDS,
+        "minTimeDeltaSeconds": RGBD_ONBOARDING_PAIR_MIN_TIME_DELTA_SECONDS,
+        "minDepthAgreementRatio": RGBD_ONBOARDING_PAIR_MIN_DEPTH_AGREEMENT_RATIO,
+        "totalCandidateCount": len(candidates),
+        "eligibleCandidateCount": len(eligible),
+        "pairCandidateCount": len(pair_records),
+        "blendablePairCount": len(blendable_pairs),
+        "selectedPair": (
+            rgbd_onboarding_pair_record_summary(selected_record)
+            if selected_record is not None
+            else None
+        ),
+        "pairSummary": [
+            rgbd_onboarding_pair_record_summary(record)
+            for record in ranked_pairs[:24]
+        ],
+        "candidateSummary": [
+            rgbd_onboarding_candidate_summary(candidate, selected=id(candidate) in selected_ids)
+            for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True)[:80]
+        ],
+        "skippedCandidates": skipped_candidates,
+        "warnings": dedupe_preserve_order(warnings),
+    }
+    return selected_pairs, stats
+
+
+def rgbd_onboarding_pair_score(
+    left: dict,
+    right: dict,
+    overlap: dict,
+    pose_delta: dict,
+    time_delta: float,
+) -> tuple[float, dict]:
+    quality_score = (
+        float(left.get("score") or 0.0)
+        + float(right.get("score") or 0.0)
+    ) * 0.18
+    overlap_score = float(overlap.get("bidirectionalAgreementRatio") or 0.0) * 4.0
+    projected_score = float(overlap.get("bidirectionalProjectedRatio") or 0.0) * 1.35
+    coverage_score = min(
+        (
+            float(left.get("centralCoverageRatio") or 0.0)
+            + float(right.get("centralCoverageRatio") or 0.0)
+        ) / 1.25,
+        1.0,
+    ) * 1.0
+    time_score = (
+        1.0
+        - min(
+            abs(time_delta - RGBD_ONBOARDING_PAIR_TARGET_TIME_DELTA_SECONDS)
+            / max(RGBD_ONBOARDING_PAIR_TARGET_TIME_DELTA_SECONDS, 1e-6),
+            1.0,
+        )
+    ) * 0.75
+    translation = float(pose_delta.get("translationMeters") or 0.0)
+    baseline_score = min(translation / 0.35, 1.0) * 0.55
+    angle = float(pose_delta.get("angleDegrees") or 0.0)
+    angle_penalty = min(angle / 60.0, 1.0) * 0.45
+    early_anchor_seconds = min(
+        float(left.get("secondsFromCaptureStart") or 0.0),
+        float(right.get("secondsFromCaptureStart") or 0.0),
+    )
+    early_anchor_score = (
+        1.0
+        - min(
+            early_anchor_seconds / max(RGBD_ONBOARDING_PAIR_PRIMARY_WINDOW_SECONDS, 1e-6),
+            1.0,
+        )
+    ) * 0.25
+    breakdown = {
+        "candidateQuality": round(quality_score, 6),
+        "depthAgreementOverlap": round(overlap_score, 6),
+        "projectedOverlap": round(projected_score, 6),
+        "centralCoverage": round(coverage_score, 6),
+        "timeDelta": round(time_score, 6),
+        "baseline": round(baseline_score, 6),
+        "earlyAnchor": round(early_anchor_score, 6),
+        "largeAnglePenalty": round(-angle_penalty, 6),
+    }
+    return round(sum(breakdown.values()), 6), breakdown
+
+
+def rgbd_onboarding_pair_record_summary(record: dict | None) -> dict | None:
+    if record is None:
+        return None
+    return {
+        "left": rgbd_onboarding_candidate_summary(record["left"], selected=True),
+        "right": rgbd_onboarding_candidate_summary(record["right"], selected=True),
+        "score": record.get("score"),
+        "scoreBreakdown": record.get("scoreBreakdown"),
+        "blendable": record.get("blendable"),
+        "timeDeltaSeconds": record.get("timeDeltaSeconds"),
+        "poseDelta": record.get("poseDelta"),
+        "overlap": record.get("overlap"),
+    }
+
+
+def rgbd_onboarding_pair_overlap_metrics(
+    left_pair: tuple[dict, dict, Path, Path],
+    right_pair: tuple[dict, dict, Path, Path],
+    *,
+    work_dir: Path,
+    depth_cache: dict[str, dict] | None = None,
+) -> dict:
+    depth_cache = depth_cache if depth_cache is not None else {}
+    left_to_right = rgbd_onboarding_directional_overlap_metrics(
+        left_pair,
+        right_pair,
+        work_dir=work_dir,
+        depth_cache=depth_cache,
+    )
+    right_to_left = rgbd_onboarding_directional_overlap_metrics(
+        right_pair,
+        left_pair,
+        work_dir=work_dir,
+        depth_cache=depth_cache,
+    )
+    return {
+        "leftToRight": left_to_right,
+        "rightToLeft": right_to_left,
+        "bidirectionalProjectedRatio": round(
+            min(
+                float(left_to_right.get("projectedRatio") or 0.0),
+                float(right_to_left.get("projectedRatio") or 0.0),
+            ),
+            6,
+        ),
+        "bidirectionalAgreementRatio": round(
+            min(
+                float(left_to_right.get("agreementRatio") or 0.0),
+                float(right_to_left.get("agreementRatio") or 0.0),
+            ),
+            6,
+        ),
+        "agreedSampleCount": int(left_to_right.get("agreedSampleCount") or 0)
+        + int(right_to_left.get("agreedSampleCount") or 0),
+        "projectedSampleCount": int(left_to_right.get("projectedSampleCount") or 0)
+        + int(right_to_left.get("projectedSampleCount") or 0),
+        "sampledSourceDepthCount": int(left_to_right.get("sampledSourceDepthCount") or 0)
+        + int(right_to_left.get("sampledSourceDepthCount") or 0),
+    }
+
+
+def rgbd_onboarding_directional_overlap_metrics(
+    source_pair: tuple[dict, dict, Path, Path],
+    target_pair: tuple[dict, dict, Path, Path],
+    *,
+    work_dir: Path,
+    depth_cache: dict[str, dict],
+) -> dict:
+    source_keyframe, source_depth_frame, _source_color_path, source_depth_path = source_pair
+    target_keyframe, target_depth_frame, _target_color_path, target_depth_path = target_pair
+    try:
+        source = cached_rgbd_depth_for_pair(source_depth_frame, source_depth_path, work_dir, depth_cache)
+        target = cached_rgbd_depth_for_pair(target_depth_frame, target_depth_path, work_dir, depth_cache)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "available": False,
+            "reason": str(exc),
+            "sourceKeyframeId": source_keyframe.get("id"),
+            "targetKeyframeId": target_keyframe.get("id"),
+        }
+
+    total = source["width"] * source["height"]
+    sample_step = max(1, int(math.ceil(math.sqrt(total / RGBD_ONBOARDING_PAIR_OVERLAP_SAMPLE_COUNT))))
+    source_valid_count = 0
+    projected_count = 0
+    agreed_count = 0
+    depth_error_sum = 0.0
+    max_depth_error = 0.0
+    target_world_to_camera = invert_rigid_transform(target_depth_frame.get("cameraTransform") or [])
+
+    for y in range(0, source["height"], sample_step):
+        for x in range(0, source["width"], sample_step):
+            source_depth = float(source["depthValues"][y * source["width"] + x])
+            if not math.isfinite(source_depth) or source_depth <= 0 or source_depth > RGBD_DEPTH_TRUNC_METERS:
+                continue
+
+            source_valid_count += 1
+            world = backproject_depth_sample_to_world(
+                x,
+                y,
+                source_depth,
+                source_depth_frame.get("intrinsics") or [],
+                source_depth_frame.get("cameraTransform") or [],
+            )
+            projection = project_world_point_values(
+                world,
+                target_world_to_camera,
+                target_depth_frame.get("intrinsics") or [],
+                target["width"],
+                target["height"],
+            )
+            if projection is None:
+                continue
+
+            u, v, projected_depth = projection
+            target_depth = sample_cached_rgbd_depth(target, u, v)
+            if target_depth is None:
+                continue
+
+            projected_count += 1
+            tolerance = max(
+                RGBD_ONBOARDING_PAIR_DEPTH_ABSOLUTE_TOLERANCE_METERS,
+                min(source_depth, target_depth, projected_depth) * RGBD_ONBOARDING_PAIR_DEPTH_RELATIVE_TOLERANCE,
+            )
+            depth_error = abs(float(target_depth) - projected_depth)
+            max_depth_error = max(max_depth_error, depth_error)
+            depth_error_sum += depth_error
+            if depth_error <= tolerance:
+                agreed_count += 1
+
+    return {
+        "available": True,
+        "sourceKeyframeId": source_keyframe.get("id"),
+        "sourceDepthFrameId": source_depth_frame.get("id"),
+        "targetKeyframeId": target_keyframe.get("id"),
+        "targetDepthFrameId": target_depth_frame.get("id"),
+        "sampleStep": sample_step,
+        "sampledSourceDepthCount": source_valid_count,
+        "projectedSampleCount": projected_count,
+        "agreedSampleCount": agreed_count,
+        "projectedRatio": round(projected_count / max(source_valid_count, 1), 6),
+        "agreementRatio": round(agreed_count / max(source_valid_count, 1), 6),
+        "agreementOfProjectedRatio": round(agreed_count / max(projected_count, 1), 6),
+        "meanDepthErrorMeters": round(depth_error_sum / max(projected_count, 1), 4),
+        "maxDepthErrorMeters": round(max_depth_error, 4),
+        "absoluteToleranceMeters": RGBD_ONBOARDING_PAIR_DEPTH_ABSOLUTE_TOLERANCE_METERS,
+        "relativeTolerance": RGBD_ONBOARDING_PAIR_DEPTH_RELATIVE_TOLERANCE,
+    }
+
+
+def cached_rgbd_depth_for_pair(
+    depth_frame: dict,
+    depth_path: Path,
+    work_dir: Path,
+    depth_cache: dict[str, dict],
+) -> dict:
+    cache_key = str(depth_path)
+    cached = depth_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    width, height = [int(value) for value in depth_frame["depthResolution"]]
+    depth_values = read_float32_depth_values(depth_path, width, height)
+    confidence_values = read_confidence_values(depth_frame, work_dir, width, height)
+    prepared = prepare_rgbd_hero_patch_depth_grid(
+        depth_values=depth_values,
+        confidence_values=confidence_values,
+        width=width,
+        height=height,
+    )
+    cached = {
+        "width": width,
+        "height": height,
+        "depthValues": prepared["depthValues"],
+        "stats": prepared["stats"],
+    }
+    depth_cache[cache_key] = cached
+    return cached
+
+
+def sample_cached_rgbd_depth(depth_record: dict, u: float, v: float) -> float | None:
+    center_x = int(round(u))
+    center_y = int(round(v))
+    values: list[float] = []
+    for y in range(center_y - 1, center_y + 2):
+        if y < 0 or y >= depth_record["height"]:
+            continue
+        for x in range(center_x - 1, center_x + 2):
+            if x < 0 or x >= depth_record["width"]:
+                continue
+            depth = float(depth_record["depthValues"][y * depth_record["width"] + x])
+            if math.isfinite(depth) and 0 < depth <= RGBD_DEPTH_TRUNC_METERS:
+                values.append(depth)
+    if not values:
+        return None
+    return median_float(values)
+
+
 def write_single_keyframe_rgbd_onboarding_mesh(
     *,
     keyframes: list[dict],
@@ -2470,9 +3321,13 @@ def rgbd_onboarding_candidate_summary(candidate: dict, *, selected: bool) -> dic
         "index": candidate.get("index"),
         "keyframeId": candidate.get("keyframeId"),
         "depthFrameId": candidate.get("depthFrameId"),
+        "colorKeyframeId": candidate.get("pair", ({}, {}))[1].get("colorKeyframeId")
+        if candidate.get("pair")
+        else None,
         "sourceTimestamp": candidate.get("sourceTimestamp"),
         "secondsFromCaptureStart": candidate.get("secondsFromCaptureStart"),
         "withinOnboardingWindow": candidate.get("withinOnboardingWindow"),
+        "withinPairWindow": candidate.get("withinPairWindow"),
         "score": candidate.get("score"),
         "scoreBreakdown": candidate.get("scoreBreakdown"),
         "validDepthRatio": candidate.get("validDepthRatio"),
@@ -6255,35 +7110,59 @@ def write_rgbd_tsdf_mesh(
     output_obj_path: Path,
     output_json_path: Path,
     profile: ProcessingProfile | None = None,
+    selected_frames: list[tuple[dict, dict, Path, Path]] | None = None,
+    selection_stats: dict | None = None,
+    accept_low_confidence_depth: bool = False,
+    fill_depth_holes: bool = False,
+    voxel_length_meters: float | None = None,
+    sdf_trunc_meters: float | None = None,
 ) -> dict:
     profile = profile or PROCESSING_PROFILES["full_quality"]
     np, o3d = load_open3d_modules()
     paired_frames = pair_rgbd_frames(keyframes, depth_frames, work_dir)
     if not paired_frames:
         raise RGBDFusionUnavailable("No RGB/depth frames could be paired for TSDF fusion.")
-    selected_frames = select_rgbd_pairs_for_profile(paired_frames, profile)
+    selected_frames = selected_frames or select_rgbd_pairs_for_profile(paired_frames, profile)
+    if not selected_frames:
+        raise RGBDFusionUnavailable("No RGB/depth frames were selected for TSDF fusion.")
+    voxel_length = float(voxel_length_meters or RGBD_VOXEL_LENGTH_METERS)
+    sdf_trunc = float(sdf_trunc_meters or RGBD_SDF_TRUNC_METERS)
 
     volume = o3d.pipelines.integration.ScalableTSDFVolume(
-        voxel_length=RGBD_VOXEL_LENGTH_METERS,
-        sdf_trunc=RGBD_SDF_TRUNC_METERS,
+        voxel_length=voxel_length,
+        sdf_trunc=sdf_trunc,
         color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
     )
     integrated_count = 0
+    skipped_frame_records: list[dict] = []
 
     for keyframe, depth_frame, color_path, depth_path in selected_frames:
         width, height = [int(value) for value in depth_frame["depthResolution"]]
-        depth_array = np.frombuffer(depth_path.read_bytes(), dtype=np.dtype("<f4")).reshape((height, width))
+        depth_values = read_float32_depth_values(depth_path, width, height)
+        confidence_values = read_confidence_values(depth_frame, work_dir, width, height)
+        if fill_depth_holes:
+            prepared_depth = prepare_rgbd_hero_patch_depth_grid(
+                depth_values=depth_values,
+                confidence_values=confidence_values,
+                width=width,
+                height=height,
+            )
+            depth_values = prepared_depth["depthValues"]
+        depth_array = np.asarray(depth_values, dtype=np.float32).reshape((height, width))
         depth_array = np.nan_to_num(depth_array, nan=0, posinf=0, neginf=0).astype(np.float32)
         depth_array[(depth_array <= 0) | (depth_array > RGBD_DEPTH_TRUNC_METERS)] = 0
 
-        confidence_path = depth_frame.get("confidencePath")
-        if confidence_path:
-            confidence_file = work_dir / confidence_path
-            if confidence_file.exists():
-                confidence = np.frombuffer(confidence_file.read_bytes(), dtype=np.uint8).reshape((height, width))
-                depth_array[confidence == 0] = 0
+        if confidence_values is not None and not accept_low_confidence_depth:
+            confidence = np.frombuffer(confidence_values, dtype=np.uint8).reshape((height, width))
+            depth_array[confidence == 0] = 0
 
         if int(np.count_nonzero(depth_array)) < max(64, width * height * 0.01):
+            skipped_frame_records.append({
+                "keyframeId": keyframe.get("id"),
+                "depthFrameId": depth_frame.get("id"),
+                "reason": "too_few_valid_depth_samples",
+                "validDepthSampleCount": int(np.count_nonzero(depth_array)),
+            })
             continue
 
         color_array = np.asarray(Image.open(color_path).convert("RGB").resize((width, height), Image.Resampling.BILINEAR))
@@ -6317,9 +7196,16 @@ def write_rgbd_tsdf_mesh(
         "pairedFrameCount": len(paired_frames),
         "sampledDepthFrameCount": len(selected_frames),
         "integratedDepthFrameCount": integrated_count,
-        "voxelLengthMeters": RGBD_VOXEL_LENGTH_METERS,
-        "sdfTruncMeters": RGBD_SDF_TRUNC_METERS,
+        "skippedDepthFrameCount": len(skipped_frame_records),
+        "skippedDepthFrames": skipped_frame_records,
+        "selectedKeyframeIds": [pair[0].get("id") for pair in selected_frames if pair[0].get("id")],
+        "selectedDepthFrameIds": [pair[1].get("id") for pair in selected_frames if pair[1].get("id")],
+        "voxelLengthMeters": voxel_length,
+        "sdfTruncMeters": sdf_trunc,
         "depthTruncMeters": RGBD_DEPTH_TRUNC_METERS,
+        "acceptLowConfidenceDepth": accept_low_confidence_depth,
+        "fillDepthHoles": fill_depth_holes,
+        "selection": selection_stats or {},
         "postprocess": postprocess_stats,
         "profile": processing_profile_stats(profile),
     })
@@ -6335,9 +7221,16 @@ def write_rgbd_tsdf_mesh(
         "pairedFrameCount": len(paired_frames),
         "sampledDepthFrameCount": len(selected_frames),
         "integratedDepthFrameCount": integrated_count,
-        "voxelLengthMeters": RGBD_VOXEL_LENGTH_METERS,
-        "sdfTruncMeters": RGBD_SDF_TRUNC_METERS,
+        "skippedDepthFrameCount": len(skipped_frame_records),
+        "skippedDepthFrames": skipped_frame_records,
+        "selectedKeyframeIds": [pair[0].get("id") for pair in selected_frames if pair[0].get("id")],
+        "selectedDepthFrameIds": [pair[1].get("id") for pair in selected_frames if pair[1].get("id")],
+        "voxelLengthMeters": voxel_length,
+        "sdfTruncMeters": sdf_trunc,
         "depthTruncMeters": RGBD_DEPTH_TRUNC_METERS,
+        "acceptLowConfidenceDepth": accept_low_confidence_depth,
+        "fillDepthHoles": fill_depth_holes,
+        "selection": selection_stats or {},
         "postprocess": postprocess_stats,
         "profile": processing_profile_stats(profile),
         "path": "rgbd_fused_mesh.obj",

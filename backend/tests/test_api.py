@@ -1140,6 +1140,121 @@ def test_rgbd_hero_patch_depth_preparation_accepts_low_confidence_and_fills_hole
     assert prepared["depthValues"][4] == pytest.approx(1.0)
 
 
+def make_onboarding_pair_fixture(
+    tmp_path,
+    *,
+    index: int,
+    timestamp: float,
+    tx: float,
+    width: int = 32,
+    height: int = 24,
+):
+    (tmp_path / "keyframes").mkdir(exist_ok=True)
+    image_path = tmp_path / "keyframes" / f"keyframe_{index}.jpg"
+    Image.new("RGB", (width, height), (120 + index * 20, 105, 90)).save(image_path)
+    depth_path = tmp_path / f"depth_{index}.bin"
+    depth_path.write_bytes(array("f", [1.0] * (width * height)).tobytes())
+    confidence_path = tmp_path / f"confidence_{index}.bin"
+    confidence_path.write_bytes(bytes([2] * (width * height)))
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        tx, 0, 0, 1,
+    ]
+    intrinsics = [
+        32, 0, 0,
+        0, 32, 0,
+        width / 2, height / 2, 1,
+    ]
+    keyframe = {
+        "id": f"kf-{index}",
+        "path": image_path.name,
+        "timestamp": timestamp,
+        "cameraTransform": transform,
+        "intrinsics": intrinsics,
+        "imageResolution": [width, height],
+        "trackingState": "normal",
+    }
+    depth_frame = {
+        "id": f"depth-{index}",
+        "path": depth_path.name,
+        "confidencePath": confidence_path.name,
+        "timestamp": timestamp,
+        "colorKeyframeId": keyframe["id"],
+        "cameraTransform": transform,
+        "intrinsics": intrinsics,
+        "depthResolution": [width, height],
+        "depthFormat": "float32",
+        "confidenceFormat": "uint8",
+    }
+    return keyframe, depth_frame
+
+
+def test_two_keyframe_rgbd_onboarding_pair_selection_prefers_blendable_first_five_seconds(tmp_path):
+    keyframes = []
+    depth_frames = []
+    for index, timestamp, tx in [
+        (0, 0.0, 0.0),
+        (1, 2.4, 0.05),
+        (2, 4.2, 2.0),
+        (3, 7.0, 0.1),
+    ]:
+        keyframe, depth_frame = make_onboarding_pair_fixture(
+            tmp_path,
+            index=index,
+            timestamp=timestamp,
+            tx=tx,
+        )
+        keyframes.append(keyframe)
+        depth_frames.append(depth_frame)
+
+    selected, stats = pipeline.select_two_keyframe_rgbd_onboarding_pairs(
+        pipeline.pair_rgbd_frames(keyframes, depth_frames, tmp_path),
+        work_dir=tmp_path,
+    )
+
+    selected_keyframe_ids = [pair[0]["id"] for pair in selected]
+    assert selected_keyframe_ids == ["kf-0", "kf-1"]
+    assert stats["available"] is True
+    assert stats["selectedPair"]["blendable"] is True
+    assert stats["selectedPair"]["timeDeltaSeconds"] == pytest.approx(2.4)
+    assert stats["selectedPair"]["overlap"]["bidirectionalAgreementRatio"] >= 0.5
+    assert stats["pairWindowSeconds"] == pipeline.RGBD_ONBOARDING_PAIR_WINDOW_SECONDS
+    assert any(
+        candidate["keyframeId"] == "kf-3" and "outside_first_five_seconds" in candidate["rejectionReasons"]
+        for candidate in stats["candidateSummary"]
+    )
+
+
+def test_two_keyframe_rgbd_onboarding_pair_selection_requires_two_first_five_second_frames(tmp_path):
+    keyframes = []
+    depth_frames = []
+    for index, timestamp, tx in [
+        (0, 0.0, 0.0),
+        (1, 6.0, 0.05),
+    ]:
+        keyframe, depth_frame = make_onboarding_pair_fixture(
+            tmp_path,
+            index=index,
+            timestamp=timestamp,
+            tx=tx,
+        )
+        keyframes.append(keyframe)
+        depth_frames.append(depth_frame)
+
+    selected, stats = pipeline.select_two_keyframe_rgbd_onboarding_pairs(
+        pipeline.pair_rgbd_frames(keyframes, depth_frames, tmp_path),
+        work_dir=tmp_path,
+    )
+
+    assert selected == []
+    assert stats["available"] is False
+    assert stats["eligibleCandidateCount"] == 1
+    assert stats["pairCandidateCount"] == 0
+    assert stats["reason"] == "No candidate pair had enough overlapping depth agreement."
+
+
 def test_rgbd_pair_selection_prefers_first_pair_plus_timed_supplements():
     def make_pair(index: int, timestamp: float) -> dict:
         return {
