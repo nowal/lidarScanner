@@ -1315,7 +1315,7 @@ def test_two_keyframe_rgbd_onboarding_pair_selection_adds_blendable_full_capture
         (0, 0.0, 0.0),
         (1, 2.4, 0.05),
         (2, 4.2, 2.0),
-        (3, 7.0, 0.1),
+        (3, 7.0, 0.45),
     ]:
         keyframe, depth_frame = make_onboarding_pair_fixture(
             tmp_path,
@@ -1344,9 +1344,15 @@ def test_two_keyframe_rgbd_onboarding_pair_selection_adds_blendable_full_capture
     assert stats["selectedPair"]["overlap"]["bidirectionalAgreementRatio"] >= 0.5
     assert stats["pairWindowSeconds"] == pipeline.RGBD_ONBOARDING_PAIR_WINDOW_SECONDS
     assert stats["candidatePoolCount"] <= pipeline.RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT
+    assert stats["selectedCoverageBinCount"] > 0
+    assert stats["selectedCoverageRatio"] > 0
     assert any(
         frame["keyframeId"] == "kf-3" and frame["selectionRole"] == "supplemental"
         for frame in stats["selectedFrames"]
+    )
+    assert any(
+        frame["candidate"]["keyframeId"] == "kf-3" and frame["newCoverageBinCount"] > 0
+        for frame in stats["supplementalFrames"]
     )
 
 
@@ -1921,6 +1927,43 @@ def test_planar_chart_local_fill_does_not_smear_across_large_holes():
     assert texture_pixels[0, 4] == fallback_color
     assert mask_pixels[47, 4] == 128
     assert texture_pixels[47, 4] == fallback_color
+
+
+def test_fallback_texture_color_smoothing_blends_adjacent_face_tiles():
+    mesh = make_grid_mesh(1)
+    texture = Image.new("RGB", (8, 4), pipeline.FALLBACK_COLOR)
+    pixels = texture.load()
+    for y in range(4):
+        for x in range(4):
+            pixels[x, y] = (80, 80, 80)
+        for x in range(4, 8):
+            pixels[x, y] = (200, 200, 200)
+    layout = pipeline.TextureAtlasLayout(
+        width=8,
+        height=4,
+        tile_size=4,
+        columns=2,
+        tile_start_y=0,
+        planar_charts=[],
+        face_to_chart={},
+        face_to_tile_index={0: 0, 1: 1},
+        strategy="test_per_face_tiles",
+        stats={},
+    )
+
+    stats = pipeline.smooth_fallback_texture_face_colors(
+        texture,
+        mesh,
+        layout,
+        ["fallback", "projected"],
+        enabled=True,
+    )
+
+    assert stats["enabled"] is True
+    assert stats["smoothedFaceCount"] == 1
+    assert pixels[1, 1][0] > 80
+    assert pixels[1, 1][0] < 200
+    assert pixels[5, 1] == (200, 200, 200)
 
 
 def test_direct_planar_chart_leaves_far_owner_projection_holes_neutral():

@@ -270,6 +270,8 @@ FAST_ONBOARDING_TEXTURE_SURFACE_DENSIFY_MAX_ITERATIONS = 10
 DENSE_SINGLE_VIEW_HERO_MAX_FACE_SAMPLES = 20_000
 DENSE_SINGLE_VIEW_EDGE_MARGIN_PIXELS = 1.0
 DENSE_SINGLE_VIEW_MIN_FACING = 0.02
+TEXTURE_FALLBACK_COLOR_SMOOTHING_ITERATIONS = 2
+TEXTURE_FALLBACK_COLOR_SMOOTHING_BLEND = 0.58
 TEXTURE_RENDER_MIN_CLUSTER_METERS = 0.006
 TEXTURE_RENDER_MAX_CLUSTER_METERS = 0.08
 TEXTURE_RENDER_SMOOTHING_ITERATIONS = 8
@@ -394,11 +396,17 @@ RGBD_ONBOARDING_PAIR_DEPTH_ABSOLUTE_TOLERANCE_METERS = 0.22
 RGBD_ONBOARDING_PAIR_DEPTH_RELATIVE_TOLERANCE = 0.18
 RGBD_ONBOARDING_TSDF_VOXEL_LENGTH_METERS = 0.04
 RGBD_ONBOARDING_TSDF_SDF_TRUNC_METERS = 0.14
-RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES = 5
-RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT = 14
+RGBD_ONBOARDING_TSDF_MIN_KEYFRAMES = 2
+RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES = 7
+RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT = 18
 RGBD_ONBOARDING_TSDF_TEMPORAL_BUCKET_COUNT = 5
-RGBD_ONBOARDING_TSDF_CANDIDATES_PER_BUCKET = 2
+RGBD_ONBOARDING_TSDF_CANDIDATES_PER_BUCKET = 3
 RGBD_ONBOARDING_TSDF_BLEND_FALLBACK_FACE_LIMIT = 2_000
+RGBD_ONBOARDING_COVERAGE_SAMPLE_COUNT = 768
+RGBD_ONBOARDING_COVERAGE_VOXEL_METERS = 0.18
+RGBD_ONBOARDING_TSDF_TARGET_COVERAGE_RATIO = 0.86
+RGBD_ONBOARDING_TSDF_MIN_MARGINAL_COVERAGE_RATIO = 0.045
+RGBD_ONBOARDING_TSDF_LOW_COVERAGE_MIN_MARGINAL_RATIO = 0.02
 RGBD_ONBOARDING_TARGET_SAMPLES = 16_384
 RGBD_ONBOARDING_FACE_ABSOLUTE_TOLERANCE_METERS = 0.18
 RGBD_ONBOARDING_FACE_RELATIVE_TOLERANCE = 0.22
@@ -2618,6 +2626,14 @@ def select_multi_keyframe_rgbd_onboarding_pairs(
     if selected_record is not None and selected_record.get("blendable"):
         selected_candidates = [selected_record["left"], selected_record["right"]]
 
+    total_coverage_bins = set().union(
+        *(rgbd_onboarding_candidate_coverage_bins(candidate) for candidate in candidate_pool)
+    ) if candidate_pool else set()
+    selected_coverage_bins = set().union(
+        *(rgbd_onboarding_candidate_coverage_bins(candidate) for candidate in selected_candidates)
+    ) if selected_candidates else set()
+    coverage_stop_reason = None
+
     while len(selected_candidates) < RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES:
         selected_candidate_ids = {id(candidate) for candidate in selected_candidates}
         best_supplement = None
@@ -2639,6 +2655,8 @@ def select_multi_keyframe_rgbd_onboarding_pairs(
                 selected_candidates,
                 blendable_overlap_records,
                 scan_span=scan_span,
+                selected_coverage_bins=selected_coverage_bins,
+                total_coverage_bins=total_coverage_bins,
             )
             supplement = {
                 "candidate": candidate,
@@ -2646,15 +2664,40 @@ def select_multi_keyframe_rgbd_onboarding_pairs(
                 "scoreBreakdown": score_breakdown,
                 "bestOverlap": best_overlap,
                 "blendableOverlapCount": len(blendable_overlap_records),
+                "newCoverageBinCount": int(score_breakdown.get("newCoverageBinCount") or 0),
+                "coverageGainRatio": float(score_breakdown.get("coverageGainRatio") or 0.0),
+                "candidateNovelCoverageRatio": float(score_breakdown.get("candidateNovelCoverageRatio") or 0.0),
             }
             if best_supplement is None or score > best_supplement["score"]:
                 best_supplement = supplement
 
         if best_supplement is None:
+            coverage_stop_reason = "no_blendable_supplemental_coverage_candidate"
+            break
+
+        selected_coverage_ratio = (
+            len(selected_coverage_bins) / max(len(total_coverage_bins), 1)
+            if total_coverage_bins
+            else 1.0
+        )
+        min_gain = (
+            RGBD_ONBOARDING_TSDF_LOW_COVERAGE_MIN_MARGINAL_RATIO
+            if selected_coverage_ratio < RGBD_ONBOARDING_TSDF_TARGET_COVERAGE_RATIO
+            else RGBD_ONBOARDING_TSDF_MIN_MARGINAL_COVERAGE_RATIO
+        )
+        if (
+            len(selected_candidates) >= RGBD_ONBOARDING_TSDF_MIN_KEYFRAMES
+            and best_supplement["coverageGainRatio"] < min_gain
+        ):
+            coverage_stop_reason = "marginal_coverage_below_threshold"
             break
 
         selected_candidates.append(best_supplement["candidate"])
         supplemental_records.append(best_supplement)
+        selected_coverage_bins.update(rgbd_onboarding_candidate_coverage_bins(best_supplement["candidate"]))
+
+    if coverage_stop_reason is None and len(selected_candidates) >= RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES:
+        coverage_stop_reason = "max_selected_frame_count_reached"
 
     selected_pairs = [candidate["pair"] for candidate in selected_candidates]
     selected_ids = {id(candidate) for candidate in selected_candidates}
@@ -2675,15 +2718,28 @@ def select_multi_keyframe_rgbd_onboarding_pairs(
         "targetTimeDeltaSeconds": RGBD_ONBOARDING_PAIR_TARGET_TIME_DELTA_SECONDS,
         "minTimeDeltaSeconds": RGBD_ONBOARDING_PAIR_MIN_TIME_DELTA_SECONDS,
         "minDepthAgreementRatio": RGBD_ONBOARDING_PAIR_MIN_DEPTH_AGREEMENT_RATIO,
+        "minSelectedFrameCount": RGBD_ONBOARDING_TSDF_MIN_KEYFRAMES,
         "maxSelectedFrameCount": RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES,
         "candidatePoolLimit": RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT,
         "temporalBucketCount": RGBD_ONBOARDING_TSDF_TEMPORAL_BUCKET_COUNT,
+        "targetCoverageRatio": RGBD_ONBOARDING_TSDF_TARGET_COVERAGE_RATIO,
+        "minMarginalCoverageRatio": RGBD_ONBOARDING_TSDF_MIN_MARGINAL_COVERAGE_RATIO,
+        "lowCoverageMinMarginalCoverageRatio": RGBD_ONBOARDING_TSDF_LOW_COVERAGE_MIN_MARGINAL_RATIO,
         "totalCandidateCount": len(candidates),
         "eligibleCandidateCount": len(eligible),
         "candidatePoolCount": len(candidate_pool),
         "pairCandidateCount": len(pair_records),
         "blendablePairCount": len(blendable_pairs),
         "selectedFrameCount": len(selected_pairs),
+        "totalCandidateCoverageBinCount": len(total_coverage_bins),
+        "selectedCoverageBinCount": len(selected_coverage_bins),
+        "selectedCoverageRatio": round(
+            (len(selected_coverage_bins) / max(len(total_coverage_bins), 1))
+            if total_coverage_bins
+            else 0.0,
+            6,
+        ),
+        "coverageStopReason": coverage_stop_reason,
         "selectedScore": round(selected_score, 6),
         "selectedScoreBreakdown": {
             "anchorPair": selected_record.get("score") if selected_record is not None else None,
@@ -2712,6 +2768,9 @@ def select_multi_keyframe_rgbd_onboarding_pairs(
                 "score": record.get("score"),
                 "scoreBreakdown": record.get("scoreBreakdown"),
                 "blendableOverlapCount": record.get("blendableOverlapCount"),
+                "newCoverageBinCount": record.get("newCoverageBinCount"),
+                "coverageGainRatio": record.get("coverageGainRatio"),
+                "candidateNovelCoverageRatio": record.get("candidateNovelCoverageRatio"),
                 "bestOverlap": rgbd_onboarding_pair_record_summary(record.get("bestOverlap")),
             }
             for record in supplemental_records
@@ -2755,6 +2814,15 @@ def rgbd_onboarding_multi_candidate_pool(
     )
     for candidate in quality_sorted[:RGBD_ONBOARDING_TSDF_CANDIDATES_PER_BUCKET * 2]:
         selected[id(candidate)] = candidate
+    for candidate in sorted(
+        eligible,
+        key=lambda item: (
+            int(item.get("coverageBinCount") or 0),
+            float(item.get("score") or 0.0),
+        ),
+        reverse=True,
+    )[:RGBD_ONBOARDING_TSDF_CANDIDATES_PER_BUCKET * 2]:
+        selected[id(candidate)] = candidate
 
     buckets: list[list[dict]] = [[] for _ in range(max(1, RGBD_ONBOARDING_TSDF_TEMPORAL_BUCKET_COUNT))]
     for candidate in eligible:
@@ -2776,16 +2844,53 @@ def rgbd_onboarding_multi_candidate_pool(
 
     pool = list(selected.values())
     if len(pool) > RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT:
-        pool = sorted(
-            pool,
-            key=lambda item: (
-                float(item.get("score") or 0.0),
-                float(item.get("validDepthRatio") or 0.0),
-            ),
-            reverse=True,
-        )[:RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT]
+        pool = rgbd_onboarding_prune_candidate_pool_for_coverage(pool, RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT)
 
     return sorted(pool, key=lambda item: float(item.get("sourceTimestamp") or 0.0))
+
+
+def rgbd_onboarding_prune_candidate_pool_for_coverage(candidates: list[dict], limit: int) -> list[dict]:
+    if len(candidates) <= limit:
+        return candidates
+
+    quality_sorted = sorted(
+        candidates,
+        key=lambda item: (
+            float(item.get("score") or 0.0),
+            float(item.get("validDepthRatio") or 0.0),
+            int(item.get("coverageBinCount") or 0),
+        ),
+        reverse=True,
+    )
+    selected = quality_sorted[:min(4, limit)]
+    selected_ids = {id(candidate) for candidate in selected}
+    selected_bins = set().union(*(rgbd_onboarding_candidate_coverage_bins(candidate) for candidate in selected))
+    while len(selected) < limit:
+        best_candidate = None
+        best_score = -math.inf
+        for candidate in candidates:
+            if id(candidate) in selected_ids:
+                continue
+            coverage_bins = rgbd_onboarding_candidate_coverage_bins(candidate)
+            new_bin_count = len(coverage_bins - selected_bins)
+            score = (
+                new_bin_count * 0.015
+                + min(float(candidate.get("score") or 0.0) / 8.0, 1.0)
+                + min(int(candidate.get("coverageBinCount") or 0) / 256.0, 1.0) * 0.35
+            )
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+        if best_candidate is None:
+            break
+        selected.append(best_candidate)
+        selected_ids.add(id(best_candidate))
+        selected_bins.update(rgbd_onboarding_candidate_coverage_bins(best_candidate))
+    return selected
+
+
+def rgbd_onboarding_candidate_coverage_bins(candidate: dict) -> set[tuple[int, int, int]]:
+    return set(candidate.get("coverageBins") or [])
 
 
 def rgbd_onboarding_pair_key(left: dict, right: dict) -> tuple[int, int]:
@@ -2800,6 +2905,8 @@ def rgbd_onboarding_supplemental_candidate_score(
     overlap_records: list[dict],
     *,
     scan_span: float,
+    selected_coverage_bins: set[tuple[int, int, int]],
+    total_coverage_bins: set[tuple[int, int, int]],
 ) -> tuple[float, dict, dict]:
     best_overlap = max(
         overlap_records,
@@ -2830,17 +2937,44 @@ def rgbd_onboarding_supplemental_candidate_score(
     projected_score = min(best_projected / 0.35, 1.0) * 0.55
     central_score = float(candidate.get("centralCoverageRatio") or 0.0) * 0.35
     edge_penalty = min(float(candidate.get("depthEdgeChaosRatio") or 0.0) / 0.95, 1.0) * 0.25
+    coverage_bins = rgbd_onboarding_candidate_coverage_bins(candidate)
+    new_coverage_bin_count = len(coverage_bins - selected_coverage_bins)
+    coverage_gain_ratio = (
+        new_coverage_bin_count / max(len(total_coverage_bins), 1)
+        if total_coverage_bins
+        else 0.0
+    )
+    candidate_novel_coverage_ratio = new_coverage_bin_count / max(len(coverage_bins), 1)
+    coverage_gain_score = min(
+        coverage_gain_ratio / max(RGBD_ONBOARDING_TSDF_MIN_MARGINAL_COVERAGE_RATIO * 2.0, 1e-6),
+        1.0,
+    ) * 1.6
+    candidate_novelty_score = min(candidate_novel_coverage_ratio / 0.45, 1.0) * 0.75
 
     breakdown = {
         "candidateQuality": round(quality_score, 6),
         "timeSpread": round(time_spread_score, 6),
         "poseNovelty": round(pose_novelty_score, 6),
+        "coverageGain": round(coverage_gain_score, 6),
+        "candidateNovelCoverage": round(candidate_novelty_score, 6),
         "bestDepthAgreementOverlap": round(overlap_score, 6),
         "bestProjectedOverlap": round(projected_score, 6),
         "centralCoverage": round(central_score, 6),
         "depthEdgePenalty": round(-edge_penalty, 6),
+        "newCoverageBinCount": new_coverage_bin_count,
+        "coverageGainRatio": round(coverage_gain_ratio, 6),
+        "candidateNovelCoverageRatio": round(candidate_novel_coverage_ratio, 6),
     }
-    return round(sum(breakdown.values()), 6), breakdown, best_overlap
+    score_terms = [
+        value
+        for key, value in breakdown.items()
+        if key not in {
+            "newCoverageBinCount",
+            "coverageGainRatio",
+            "candidateNovelCoverageRatio",
+        }
+    ]
+    return round(sum(score_terms), 6), breakdown, best_overlap
 
 
 def rgbd_onboarding_pair_score(
@@ -3460,6 +3594,13 @@ def rgbd_onboarding_candidate_metrics(
     color_quality = image_quality_stats_for_path(color_path)
     central_coverage = central_valid_depth_ratio(depth_values, confidence_values, width, height)
     edge_chaos = depth_edge_chaos_ratio(depth_values, width, height)
+    coverage_bins, coverage_sample_step = rgbd_onboarding_depth_coverage_bins(
+        depth_values=depth_values,
+        width=width,
+        height=height,
+        intrinsics=depth_frame.get("intrinsics") or [],
+        camera_transform=depth_frame.get("cameraTransform") or [],
+    )
     meshable_pixels = sum(
         1
         for value in depth_values
@@ -3515,9 +3656,49 @@ def rgbd_onboarding_candidate_metrics(
         "depthEdgeChaosRatio": round(edge_chaos, 6),
         "meshablePixelCount": meshable_pixels,
         "meshablePixelRatio": round(meshable_ratio, 6),
+        "coverageBins": coverage_bins,
+        "coverageBinCount": len(coverage_bins),
+        "coverageSampleStep": coverage_sample_step,
+        "coverageVoxelMeters": RGBD_ONBOARDING_COVERAGE_VOXEL_METERS,
         "poseConfidence": round(pose_score, 4),
         "rejectionReasons": rejection_reasons,
     }
+
+
+def rgbd_onboarding_depth_coverage_bins(
+    *,
+    depth_values: array,
+    width: int,
+    height: int,
+    intrinsics: list[float],
+    camera_transform: list[float],
+) -> tuple[set[tuple[int, int, int]], int]:
+    if width <= 0 or height <= 0 or len(intrinsics) < 9 or len(camera_transform) < 16:
+        return set(), 1
+
+    total_pixels = width * height
+    sample_step = max(1, int(math.ceil(math.sqrt(total_pixels / RGBD_ONBOARDING_COVERAGE_SAMPLE_COUNT))))
+    voxel = max(RGBD_ONBOARDING_COVERAGE_VOXEL_METERS, 1e-6)
+    bins: set[tuple[int, int, int]] = set()
+    for y in range(0, height, sample_step):
+        for x in range(0, width, sample_step):
+            index = y * width + x
+            depth = float(depth_values[index])
+            if not math.isfinite(depth) or depth <= 0 or depth > RGBD_DEPTH_TRUNC_METERS:
+                continue
+            world = backproject_depth_sample_to_world(
+                x,
+                y,
+                depth,
+                intrinsics,
+                camera_transform,
+            )
+            bins.add((
+                int(math.floor(world[0] / voxel)),
+                int(math.floor(world[1] / voxel)),
+                int(math.floor(world[2] / voxel)),
+            ))
+    return bins, sample_step
 
 
 def rgbd_onboarding_candidate_summary(candidate: dict, *, selected: bool) -> dict:
@@ -3544,6 +3725,7 @@ def rgbd_onboarding_candidate_summary(candidate: dict, *, selected: bool) -> dic
         "centralCoverageRatio": candidate.get("centralCoverageRatio"),
         "depthEdgeChaosRatio": candidate.get("depthEdgeChaosRatio"),
         "meshablePixelCount": candidate.get("meshablePixelCount"),
+        "coverageBinCount": candidate.get("coverageBinCount"),
         "nonOverexposedRatio": candidate.get("nonOverexposedRatio"),
         "nonUnderexposedRatio": candidate.get("nonUnderexposedRatio"),
         "rgbSharpnessScore": candidate.get("rgbSharpnessScore"),
@@ -10688,10 +10870,24 @@ async def write_textured_obj(
             )
             chart_stats["maxFillRadius"] = int(context_stats.get("maxFillRadius", 0))
             chart_stats["projectedPixelRatio"] = round(projected / max(filled, 1), 4)
+
+    fallback_color_smoothing_stats = smooth_fallback_texture_face_colors(
+        texture,
+        mesh,
+        atlas_layout_spec,
+        coverage_face_statuses,
+        enabled=(
+            parallel_result is None
+            and source_image_atlas_layout is None
+            and profile.fallback_texture_face_limit is not None
+        ),
+    )
+    texture_pixels = texture.load()
     atlas_layout_debug_stats = {
         **atlas_layout_spec.stats,
         "charts": planar_chart_texture_stats or atlas_layout_spec.stats.get("charts", []),
         "fallbackBudget": fallback_budget_stats,
+        "fallbackColorSmoothing": fallback_color_smoothing_stats,
     }
     if source_image_atlas_layout is not None:
         non_chart_face_count = fallback_total
@@ -10758,6 +10954,7 @@ async def write_textured_obj(
         "fallbackHighQualityFaceCount": fallback_budget_stats.get("fallbackHighQualityFaceCount", 0),
         "solidProjectedFaceCount": solid_projected_face_count,
         "solidFallbackFaceCount": solid_fallback_face_count,
+        "fallbackColorSmoothing": fallback_color_smoothing_stats,
         "solidSceneColor": list(solid_scene_color),
         "solidSceneColorProjected": solid_scene_color_projected,
         "sourceKeyframeCount": len(source_keyframes),
@@ -11782,6 +11979,171 @@ def atlas_tile_for_layout(face_index: int, layout: TextureAtlasLayout) -> tuple[
     column = tile_index % layout.columns
     row = tile_index // layout.columns
     return column * layout.tile_size, layout.tile_start_y + row * layout.tile_size
+
+
+def smooth_fallback_texture_face_colors(
+    texture: Image.Image,
+    mesh: FusedMesh,
+    layout: TextureAtlasLayout,
+    coverage_face_statuses: list[str],
+    *,
+    enabled: bool,
+) -> dict:
+    if not enabled:
+        return {
+            "enabled": False,
+            "reason": "disabled_for_this_texture_mode",
+        }
+    if not mesh.faces or layout.tile_size <= 0:
+        return {
+            "enabled": False,
+            "reason": "empty_mesh_or_no_fallback_tiles",
+        }
+
+    eligible_statuses = {"fallback", "fallback_unobserved", "projected_solid"}
+    neighbor_source_statuses = eligible_statuses | {"projected"}
+    eligible_faces = [
+        face_index
+        for face_index, status in enumerate(coverage_face_statuses)
+        if status in eligible_statuses
+        and face_index in layout.face_to_tile_index
+        and face_index not in layout.face_to_chart
+    ]
+    if not eligible_faces:
+        return {
+            "enabled": True,
+            "smoothedFaceCount": 0,
+            "reason": "no_fallback_like_faces",
+        }
+
+    pixels = texture.load()
+    face_colors: dict[int, tuple[int, int, int]] = {}
+    for face_index, status in enumerate(coverage_face_statuses):
+        if (
+            status not in neighbor_source_statuses
+            or face_index not in layout.face_to_tile_index
+            or face_index in layout.face_to_chart
+        ):
+            continue
+        tile = atlas_tile_for_layout(face_index, layout)
+        face_colors[face_index] = average_texture_tile_color(
+            pixels,
+            texture.width,
+            texture.height,
+            tile,
+            layout.tile_size,
+        )
+
+    neighbors = mesh_face_neighbors(mesh.faces)
+    changed_faces: set[int] = set()
+    total_delta = 0.0
+    for _iteration in range(TEXTURE_FALLBACK_COLOR_SMOOTHING_ITERATIONS):
+        next_colors = dict(face_colors)
+        for face_index in eligible_faces:
+            own_color = face_colors.get(face_index)
+            if own_color is None:
+                continue
+            neighbor_colors = [
+                face_colors[neighbor]
+                for neighbor in neighbors[face_index]
+                if neighbor in face_colors
+            ]
+            if not neighbor_colors:
+                continue
+            neighbor_color = average_rgb_colors(neighbor_colors)
+            blended_color = blend_rgb_colors(
+                own_color,
+                neighbor_color,
+                TEXTURE_FALLBACK_COLOR_SMOOTHING_BLEND,
+            )
+            delta = color_distance(own_color, blended_color)
+            if delta > 0.5:
+                changed_faces.add(face_index)
+                total_delta += delta
+            next_colors[face_index] = blended_color
+        face_colors = next_colors
+
+    for face_index in eligible_faces:
+        color = face_colors.get(face_index)
+        if color is None:
+            continue
+        fill_texture_tile(texture.load(), atlas_tile_for_layout(face_index, layout), layout.tile_size, color)
+
+    return {
+        "enabled": True,
+        "algorithm": "adjacent_face_fallback_color_laplacian",
+        "iterations": TEXTURE_FALLBACK_COLOR_SMOOTHING_ITERATIONS,
+        "blend": TEXTURE_FALLBACK_COLOR_SMOOTHING_BLEND,
+        "eligibleFaceCount": len(eligible_faces),
+        "smoothedFaceCount": len(changed_faces),
+        "meanColorDelta": round(total_delta / max(len(changed_faces), 1), 3),
+        "statuses": sorted(eligible_statuses),
+    }
+
+
+def average_texture_tile_color(
+    pixels: object,
+    width: int,
+    height: int,
+    tile: tuple[int, int],
+    tile_size: int,
+) -> tuple[int, int, int]:
+    x0, y0 = tile
+    step = max(1, tile_size // 4)
+    red = green = blue = count = 0
+    for y in range(y0, min(y0 + tile_size, height), step):
+        for x in range(x0, min(x0 + tile_size, width), step):
+            color = pixels[x, y]
+            red += int(color[0])
+            green += int(color[1])
+            blue += int(color[2])
+            count += 1
+    if count == 0:
+        return FALLBACK_COLOR
+    return (round(red / count), round(green / count), round(blue / count))
+
+
+def average_rgb_colors(colors: list[tuple[int, int, int]]) -> tuple[int, int, int]:
+    if not colors:
+        return FALLBACK_COLOR
+    return (
+        round(sum(color[0] for color in colors) / len(colors)),
+        round(sum(color[1] for color in colors) / len(colors)),
+        round(sum(color[2] for color in colors) / len(colors)),
+    )
+
+
+def blend_rgb_colors(
+    base: tuple[int, int, int],
+    target: tuple[int, int, int],
+    blend: float,
+) -> tuple[int, int, int]:
+    amount = clamp_float(blend, 0.0, 1.0)
+    return (
+        clamp_color(base[0] * (1.0 - amount) + target[0] * amount),
+        clamp_color(base[1] * (1.0 - amount) + target[1] * amount),
+        clamp_color(base[2] * (1.0 - amount) + target[2] * amount),
+    )
+
+
+def color_distance(left: tuple[int, int, int], right: tuple[int, int, int]) -> float:
+    return math.sqrt(
+        (int(left[0]) - int(right[0])) ** 2
+        + (int(left[1]) - int(right[1])) ** 2
+        + (int(left[2]) - int(right[2])) ** 2
+    )
+
+
+def fill_texture_tile(
+    pixels: object,
+    tile: tuple[int, int],
+    tile_size: int,
+    color: tuple[int, int, int],
+) -> None:
+    x0, y0 = tile
+    for y in range(y0, y0 + tile_size):
+        for x in range(x0, x0 + tile_size):
+            pixels[x, y] = color
 
 
 def planar_chart_point(
