@@ -324,6 +324,15 @@ TEXTURE_COLOR_SATURATION_BOOST = 1.12
 TEXTURE_COLOR_CONTRAST_BOOST = 1.05
 TEXTURE_BLEND_MAX_FACE_CANDIDATES = 6
 TEXTURE_BLEND_MAX_PIXEL_SAMPLES = 5
+TEXTURE_ONBOARDING_MAX_TEXTURE_KEYFRAMES = 6
+TEXTURE_ONBOARDING_MAX_BLEND_CANDIDATES = 4
+TEXTURE_ONBOARDING_CHART_MEDIUM_PIXEL_COUNT = 450_000
+TEXTURE_ONBOARDING_CHART_LARGE_PIXEL_COUNT = 900_000
+TEXTURE_ONBOARDING_CHART_MEDIUM_RASTER_STRIDE = 3
+TEXTURE_ONBOARDING_CHART_LARGE_RASTER_STRIDE = 4
+TEXTURE_ONBOARDING_FALLBACK_SOLID_GROUP_PLANE_BIN_METERS = 0.24
+TEXTURE_ONBOARDING_FALLBACK_SOLID_GROUP_POSITION_BIN_METERS = 0.55
+TEXTURE_ONBOARDING_FALLBACK_SOLID_GROUP_NORMAL_SCALE = 10
 TEXTURE_BLEND_MIN_FACING = 0.18
 TEXTURE_BLEND_EDGE_MARGIN_RATIO = 0.018
 TEXTURE_VISIBILITY_RASTER_MAX_SIZE = 768
@@ -757,11 +766,24 @@ class RGBDGeometryFusionStage:
 
     async def run(self, job_dir: Path, report: StageReporter, is_cancelled: CancellationCheck) -> None:
         profile = read_processing_profile(job_dir / "work")
-        await report(self.name, 72, f"Trying RGBD TSDF fusion for {profile.name}")
         keyframes = json.loads((job_dir / "work" / "keyframe_manifest.json").read_text(encoding="utf-8"))
         depth_frames = json.loads((job_dir / "work" / "depth_frame_manifest.json").read_text(encoding="utf-8"))
         stats_path = job_dir / "work" / "rgbd_fusion_stats.json"
+        if profile.rgbd_onboarding_mesh:
+            stats_path.write_text(json.dumps({
+                "available": bool(depth_frames),
+                "used": False,
+                "reason": "Generic RGB-D fusion skipped because the RGB-D onboarding stage performs adaptive TSDF fusion for preview geometry.",
+                "depthFrameCount": len(depth_frames),
+                "keyframeCount": len(keyframes),
+                "geometrySource": "rgbd_onboarding_stage",
+                "geometryPreserved": True,
+                "profile": processing_profile_stats(profile),
+            }, indent=2), encoding="utf-8")
+            await report(self.name, 76, f"Generic RGBD fusion skipped for {profile.name}")
+            return
 
+        await report(self.name, 72, f"Trying RGBD TSDF fusion for {profile.name}")
         arkit_mesh = read_fused_mesh_json(job_dir / "work" / "arkit_fused_mesh.json")
         if profile.single_frame_diagnostic:
             stats_path.write_text(json.dumps({
@@ -2204,6 +2226,11 @@ async def write_multi_keyframe_rgbd_onboarding_mesh(
         selected_depth_frames,
         work_dir,
     )
+    selected_frame_records = selection_stats.get("selectedFrames") or []
+    texture_keyframes, texture_keyframe_selection = select_onboarding_texture_keyframes(
+        loaded_keyframes,
+        selected_frame_records,
+    )
     texture_profile = replace(
         profile,
         name=f"{profile.name}_{len(selected_pairs)}_frame_weighted_texture",
@@ -2223,7 +2250,7 @@ async def write_multi_keyframe_rgbd_onboarding_mesh(
     texture_debug_path = work_dir / "rgbd_onboarding_texture_debug.json"
     textured_stats = await write_textured_obj(
         mesh=render_mesh,
-        keyframes=loaded_keyframes,
+        keyframes=texture_keyframes,
         output_obj_path=output_obj_path,
         output_mtl_path=output_mtl_path,
         output_texture_path=output_texture_path,
@@ -2252,7 +2279,6 @@ async def write_multi_keyframe_rgbd_onboarding_mesh(
 
     texture_diagnostics = textured_stats.get("diagnostics") or {}
     texture_atlas = texture_diagnostics.get("textureAtlas") or {}
-    selected_frame_records = selection_stats.get("selectedFrames") or []
     selected_primary = selected_frame_records[0] if selected_frame_records else {}
     selected_anchor_pair = selection_stats.get("selectedPair") or {}
     selected_ratios = {
@@ -2301,6 +2327,7 @@ async def write_multi_keyframe_rgbd_onboarding_mesh(
             if pair[1].get("id")
         ],
         "selectedFrameCount": len(selected_pairs),
+        "textureKeyframeSelection": texture_keyframe_selection,
         "selectedColorKeyframeId": selected_primary.get("colorKeyframeId"),
         "selectedTimestamp": selected_primary.get("sourceTimestamp"),
         "secondsFromCaptureStart": selected_primary.get("secondsFromCaptureStart"),
@@ -7916,6 +7943,21 @@ def fuse_mesh_anchors(mesh_anchors: list[dict], quantization: float = 1e-5) -> F
 
     stats = {
         "geometrySource": "arkit_mesh_anchor_fusion",
+        "geometryPreserved": True,
+        "geometryPreservation": {
+            "source": "arkit_fused_mesh",
+            "fused": "fused_mesh",
+            "sourceVertexCount": len(vertices),
+            "sourceFaceCount": len(faces),
+            "fusedVertexCount": len(vertices),
+            "fusedFaceCount": len(faces),
+            "sameVertexCount": True,
+            "sameFaceCount": True,
+            "maxVertexDeltaMeters": 0.0,
+            "meanVertexDeltaMeters": 0.0,
+            "faceMismatchCount": 0,
+            "geometryPreserved": True,
+        },
         "anchorCount": len(mesh_anchors),
         "originalVertexCount": original_vertex_count,
         "originalFaceCount": original_face_count,
@@ -9052,6 +9094,92 @@ def load_projection_keyframes(
             depth_frame=depth_by_keyframe_id.get(str(keyframe.get("id"))) if keyframe.get("id") else None,
         ))
     return loaded
+
+
+def select_onboarding_texture_keyframes(
+    keyframes: list[ProjectionKeyframe],
+    selected_frame_records: list[dict] | None,
+    *,
+    limit: int = TEXTURE_ONBOARDING_MAX_TEXTURE_KEYFRAMES,
+) -> tuple[list[ProjectionKeyframe], dict]:
+    source_count = len(keyframes)
+    limit = max(1, int(limit))
+    if source_count <= limit:
+        return keyframes, {
+            "enabled": False,
+            "reason": "source_keyframe_count_within_texture_budget",
+            "sourceKeyframeCount": source_count,
+            "selectedKeyframeCount": source_count,
+            "textureKeyframeLimit": limit,
+            "selectedKeyframeIds": [keyframe.debug_id for keyframe in keyframes],
+        }
+
+    records = selected_frame_records or []
+
+    def record_for_index(index: int) -> dict:
+        return records[index] if 0 <= index < len(records) and isinstance(records[index], dict) else {}
+
+    def frame_quality(index: int) -> float:
+        record = record_for_index(index)
+        valid_depth = float(record.get("validDepthRatio") or 0.0)
+        central_coverage = float(record.get("centralCoverageRatio") or 0.0)
+        high_confidence = float(record.get("highConfidenceRatio") or 0.0)
+        depth_edge_chaos = float(record.get("depthEdgeChaosRatio") or 0.0)
+        sharpness = float(record.get("rgbSharpnessScore") or 0.0)
+        return (
+            valid_depth * 1.2
+            + central_coverage * 1.4
+            + high_confidence * 0.35
+            + min(sharpness / 20.0, 1.0) * 0.25
+            - depth_edge_chaos * 0.8
+        )
+
+    def timestamp_for_index(index: int) -> float:
+        timestamp = keyframes[index].timestamp
+        if timestamp is None:
+            timestamp = safe_float(record_for_index(index).get("sourceTimestamp"))
+        return float(timestamp) if timestamp is not None else float(index)
+
+    timestamps = [timestamp_for_index(index) for index in range(source_count)]
+    span = max(max(timestamps) - min(timestamps), float(source_count - 1), 1.0)
+    qualities = [frame_quality(index) for index in range(source_count)]
+    best_index = max(range(source_count), key=lambda index: (qualities[index], -index))
+    selected_indices: set[int] = {0, source_count - 1, best_index}
+
+    while len(selected_indices) < limit:
+        best_candidate = None
+        best_score = -math.inf
+        for index in range(source_count):
+            if index in selected_indices:
+                continue
+            nearest_time_distance = min(
+                abs(timestamps[index] - timestamps[selected_index])
+                for selected_index in selected_indices
+            )
+            temporal_spread = min(nearest_time_distance / span, 1.0)
+            score = qualities[index] * 1.4 + temporal_spread * 1.1
+            if score > best_score:
+                best_candidate = index
+                best_score = score
+        if best_candidate is None:
+            break
+        selected_indices.add(best_candidate)
+
+    ordered_indices = sorted(selected_indices)
+    selected_keyframes = [keyframes[index] for index in ordered_indices]
+    dropped_indices = [index for index in range(source_count) if index not in selected_indices]
+    return selected_keyframes, {
+        "enabled": True,
+        "strategy": "quality_temporal_spread_texture_subset",
+        "sourceKeyframeCount": source_count,
+        "selectedKeyframeCount": len(selected_keyframes),
+        "textureKeyframeLimit": limit,
+        "selectedIndexes": ordered_indices,
+        "droppedIndexes": dropped_indices,
+        "selectedKeyframeIds": [keyframes[index].debug_id for index in ordered_indices],
+        "droppedKeyframeIds": [keyframes[index].debug_id for index in dropped_indices],
+        "qualityScores": [round(value, 4) for value in qualities],
+    }
 
 
 def build_keyframe_color_correction(images: list[Image.Image], max_samples: int = 160_000) -> dict:
@@ -10449,16 +10577,37 @@ async def write_textured_obj(
     else:
         solid_scene_color = FALLBACK_COLOR
         solid_scene_color_projected = False
+    solid_grouping_enabled = solid_fallback_grouping_enabled(profile, active_projection_mode)
+    solid_fallback_group_cache: dict[tuple, dict] = {}
+    solid_fallback_group_stats = {
+        "enabled": solid_grouping_enabled,
+        "algorithm": "nearby_face_solid_projection_cache" if solid_grouping_enabled else None,
+        "cacheHitFaceCount": 0,
+        "cacheMissFaceCount": 0,
+        "cacheStoredGroupCount": 0,
+        "planeBinMeters": TEXTURE_ONBOARDING_FALLBACK_SOLID_GROUP_PLANE_BIN_METERS,
+        "positionBinMeters": TEXTURE_ONBOARDING_FALLBACK_SOLID_GROUP_POSITION_BIN_METERS,
+        "normalScale": TEXTURE_ONBOARDING_FALLBACK_SOLID_GROUP_NORMAL_SCALE,
+    }
 
     planar_chart_contexts: dict[int, dict] = {}
     planar_chart_texture_stats: list[dict] = []
     if parallel_result is None and atlas_layout_spec.planar_charts:
+        chart_stride_values = [
+            planar_chart_raster_stride_for_profile(chart, profile)
+            for chart in atlas_layout_spec.planar_charts
+        ]
+        stride_label = (
+            str(chart_stride_values[0])
+            if len(set(chart_stride_values)) == 1
+            else f"{min(chart_stride_values)}-{max(chart_stride_values)}"
+        )
         if report_progress is not None:
             await report_progress(
                 82.5,
                 (
                     f"Texturing {len(atlas_layout_spec.planar_charts)} planar room charts "
-                    f"({active_projection_mode}, stride {max(1, profile.planar_chart_raster_stride)})"
+                    f"({active_projection_mode}, stride {stride_label})"
                 ),
             )
             await asyncio.sleep(0)
@@ -10468,10 +10617,12 @@ async def write_textured_obj(
                 raise asyncio.CancelledError
 
             region_points = chart_region_points(chart)
+            chart_sample_stride = planar_chart_raster_stride_for_profile(chart, profile)
             all_candidates = texture_projection_candidates_for_region(
                 region_points,
                 chart.normal,
                 keyframes,
+                max_candidates=texture_blend_candidate_limit_for_profile(profile, active_projection_mode),
                 relaxed=active_projection_mode == "dense_single_view",
             )
             owner_candidate = (
@@ -10479,7 +10630,11 @@ async def write_textured_obj(
                 if active_projection_mode in {"direct", "dense_single_view"} and all_candidates
                 else None
             )
-            candidates = [owner_candidate] if owner_candidate is not None else all_candidates
+            candidates = (
+                [owner_candidate]
+                if owner_candidate is not None
+                else limit_texture_projection_candidates_for_profile(all_candidates, profile, active_projection_mode)
+            )
             if candidates:
                 selected_key = candidates[0].keyframe_debug_id
                 selected_keyframe_face_counts[selected_key] = (
@@ -10509,7 +10664,7 @@ async def write_textured_obj(
                 candidates,
                 resolve_chart_fallback_color,
                 secondary_candidates=all_candidates[1:] if owner_candidate is not None else [],
-                sample_stride=max(1, profile.planar_chart_raster_stride),
+                sample_stride=chart_sample_stride,
                 projection_mode=active_projection_mode,
             )
             planar_chart_contexts[chart.chart_id] = {
@@ -10570,11 +10725,12 @@ async def write_textured_obj(
                 **planar_chart_stats(chart),
                 "candidateKeyframeCount": len(all_candidates),
                 "rasterCandidateKeyframeCount": len(candidates),
+                "candidateLimit": texture_blend_candidate_limit_for_profile(profile, active_projection_mode),
                 "ownerKeyframeId": owner_candidate.keyframe_debug_id if owner_candidate is not None else None,
                 "ownerAngleDegrees": owner_angle_degrees,
                 "ownerDepthErrorMeters": owner_depth_error_meters,
                 "ownerDepthStatus": owner_depth_status,
-                "sampleStride": max(1, profile.planar_chart_raster_stride),
+                "sampleStride": chart_sample_stride,
                 "projectionMode": active_projection_mode,
             })
             if report_progress is not None:
@@ -10782,17 +10938,46 @@ async def write_textured_obj(
             solid_sample_count = 1 if solid_scene_color_projected else 0
             solid_sample_keys: tuple[str, ...] = ()
             solid_blend: TextureBlendResult | None = None
-            if active_projection_mode in {"direct", "dense_single_view", "blend"}:
+            solid_candidate_count = 0
+            solid_group_key = (
+                fallback_solid_face_group_key(
+                    face_vertices,
+                    face_owner_labels[face_index] if face_index < len(face_owner_labels) else None,
+                )
+                if solid_grouping_enabled
+                else None
+            )
+            solid_cached = (
+                solid_fallback_group_cache.get(solid_group_key)
+                if solid_group_key is not None
+                else None
+            )
+            if solid_cached is not None:
+                solid_fallback_group_stats["cacheHitFaceCount"] += 1
+                solid_color = solid_cached["color"]
+                solid_is_projected = bool(solid_cached["is_projected"])
+                solid_sample_count = int(solid_cached["sample_count"])
+                solid_sample_keys = tuple(solid_cached.get("sample_keys") or ())
+            elif active_projection_mode in {"direct", "dense_single_view", "blend"}:
+                if solid_grouping_enabled:
+                    solid_fallback_group_stats["cacheMissFaceCount"] += 1
                 face_center = triangle_center(face_vertices[0], face_vertices[1], face_vertices[2])
                 face_normal = triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2])
                 if active_projection_mode == "blend":
                     solid_candidates = texture_projection_candidates(
                         face_vertices,
                         keyframes,
+                        max_candidates=texture_blend_candidate_limit_for_profile(profile, active_projection_mode),
                         relaxed=False,
                         face_index=face_index,
                     )
                     solid_candidates = prioritize_owner_candidate(solid_candidates, face_owner_labels[face_index])
+                    solid_candidates = limit_texture_projection_candidates_for_profile(
+                        solid_candidates,
+                        profile,
+                        active_projection_mode,
+                    )
+                    solid_candidate_count = len(solid_candidates)
                     if solid_candidates:
                         solid_blend = blend_projected_texture_sample(face_center, solid_candidates)
                         if solid_blend.accepted_sample_count > 0:
@@ -10819,6 +11004,17 @@ async def write_textured_obj(
                         solid_is_projected = True
                         solid_sample_count = 1
                         solid_sample_keys = (direct_sample[1],)
+                if (
+                    solid_group_key is not None
+                    and (solid_is_projected or solid_candidate_count == 0)
+                ):
+                    solid_fallback_group_cache[solid_group_key] = {
+                        "color": solid_color,
+                        "is_projected": solid_is_projected,
+                        "sample_count": solid_sample_count,
+                        "sample_keys": solid_sample_keys,
+                    }
+                    solid_fallback_group_stats["cacheStoredGroupCount"] = len(solid_fallback_group_cache)
             solid_stats = fill_solid_texture_tile(
                 texture_pixels,
                 mask_pixels,
@@ -10916,11 +11112,16 @@ async def write_textured_obj(
         ),
     )
     texture_pixels = texture.load()
+    planar_chart_stride_values = [
+        int(chart_stats.get("sampleStride", profile.planar_chart_raster_stride))
+        for chart_stats in planar_chart_texture_stats
+    ] or [max(1, profile.planar_chart_raster_stride)]
     atlas_layout_debug_stats = {
         **atlas_layout_spec.stats,
         "charts": planar_chart_texture_stats or atlas_layout_spec.stats.get("charts", []),
         "fallbackBudget": fallback_budget_stats,
         "fallbackColorSmoothing": fallback_color_smoothing_stats,
+        "solidFallbackGrouping": solid_fallback_group_stats,
     }
     if source_image_atlas_layout is not None:
         non_chart_face_count = fallback_total
@@ -10980,6 +11181,7 @@ async def write_textured_obj(
         "textureWorkerCount": parallel_worker_count,
         "parallelEnabled": parallel_worker_count > 1,
         "planarChartRasterStride": max(1, profile.planar_chart_raster_stride),
+        "planarChartRasterStrideRange": [min(planar_chart_stride_values), max(planar_chart_stride_values)],
         "planarChartProjectionMode": profile.planar_chart_projection_mode,
         "activeProjectionMode": active_projection_mode,
         "planarChartCount": len(atlas_layout_spec.planar_charts),
@@ -10987,6 +11189,7 @@ async def write_textured_obj(
         "fallbackHighQualityFaceCount": fallback_budget_stats.get("fallbackHighQualityFaceCount", 0),
         "solidProjectedFaceCount": solid_projected_face_count,
         "solidFallbackFaceCount": solid_fallback_face_count,
+        "solidFallbackGrouping": solid_fallback_group_stats,
         "fallbackColorSmoothing": fallback_color_smoothing_stats,
         "solidSceneColor": list(solid_scene_color),
         "solidSceneColorProjected": solid_scene_color_projected,
@@ -11999,6 +12202,66 @@ def planar_chart_stats(chart: PlanarTextureChart) -> dict:
             round(chart.max_v - chart.min_v, 4),
         ],
     }
+
+
+
+
+def texture_blend_candidate_limit_for_profile(profile: ProcessingProfile, projection_mode: str) -> int:
+    if profile.rgbd_onboarding_mesh and projection_mode == "blend":
+        return min(TEXTURE_BLEND_MAX_FACE_CANDIDATES, TEXTURE_ONBOARDING_MAX_BLEND_CANDIDATES)
+    return TEXTURE_BLEND_MAX_FACE_CANDIDATES
+
+
+def limit_texture_projection_candidates_for_profile(
+    candidates: list,
+    profile: ProcessingProfile,
+    projection_mode: str,
+) -> list:
+    limit = texture_blend_candidate_limit_for_profile(profile, projection_mode)
+    return candidates[:limit]
+
+
+def planar_chart_raster_stride_for_profile(chart: PlanarTextureChart, profile: ProcessingProfile) -> int:
+    base_stride = max(1, int(profile.planar_chart_raster_stride))
+    if not profile.rgbd_onboarding_mesh:
+        return base_stride
+
+    pixel_count = max(0, int(chart.width)) * max(0, int(chart.height))
+    if pixel_count >= TEXTURE_ONBOARDING_CHART_LARGE_PIXEL_COUNT:
+        return max(base_stride, TEXTURE_ONBOARDING_CHART_LARGE_RASTER_STRIDE)
+    if pixel_count >= TEXTURE_ONBOARDING_CHART_MEDIUM_PIXEL_COUNT:
+        return max(base_stride, TEXTURE_ONBOARDING_CHART_MEDIUM_RASTER_STRIDE)
+    return base_stride
+
+
+def solid_fallback_grouping_enabled(profile: ProcessingProfile, projection_mode: str) -> bool:
+    return (
+        profile.rgbd_onboarding_mesh
+        and projection_mode == "blend"
+        and profile.fallback_texture_face_limit is not None
+    )
+
+
+def fallback_solid_face_group_key(
+    face_vertices: list[tuple[float, float, float]],
+    owner_label: str | None,
+) -> tuple:
+    face_center = triangle_center(face_vertices[0], face_vertices[1], face_vertices[2])
+    face_normal = triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2])
+    if face_normal == (0.0, 0.0, 0.0):
+        face_normal = (0.0, 1.0, 0.0)
+
+    normal_bucket = tuple(
+        int(round(component * TEXTURE_ONBOARDING_FALLBACK_SOLID_GROUP_NORMAL_SCALE))
+        for component in face_normal
+    )
+    plane_offset = dot(face_center, face_normal)
+    plane_bucket = int(round(plane_offset / max(TEXTURE_ONBOARDING_FALLBACK_SOLID_GROUP_PLANE_BIN_METERS, 1e-6)))
+    position_bucket = tuple(
+        int(math.floor(component / max(TEXTURE_ONBOARDING_FALLBACK_SOLID_GROUP_POSITION_BIN_METERS, 1e-6)))
+        for component in face_center
+    )
+    return (owner_label or "unowned", normal_bucket, plane_bucket, position_bucket)
 
 
 def atlas_tile(face_index: int, tile_size: int, columns: int) -> tuple[int, int]:

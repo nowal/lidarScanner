@@ -179,6 +179,30 @@ def make_test_planar_chart(width: int, height: int) -> pipeline.PlanarTextureCha
     )
 
 
+def make_test_projection_keyframe(index: int, timestamp: float | None = None) -> pipeline.ProjectionKeyframe:
+    image = Image.new("RGB", (8, 8), (80 + index, 90, 100))
+    return pipeline.ProjectionKeyframe(
+        image=image,
+        width=image.width,
+        height=image.height,
+        world_to_camera=[
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1,
+        ],
+        camera_position=(0, 0, 0),
+        intrinsics=[
+            8, 0, 0,
+            0, 8, 0,
+            4, 4, 1,
+        ],
+        pixels=image.load(),
+        id=f"kf-{index}",
+        timestamp=float(index) if timestamp is None else timestamp,
+    )
+
+
 def test_job_store_rehydrates_persisted_job_records(tmp_path):
     store = JobStore(str(tmp_path))
     record = store.create_job()
@@ -2002,6 +2026,61 @@ def test_fallback_texture_color_smoothing_does_not_spread_between_fallback_tiles
     assert pixels[5, 1] == (200, 200, 200)
 
 
+def test_onboarding_planar_chart_stride_scales_with_chart_size():
+    profile = pipeline.PROCESSING_PROFILES["fast_onboarding"]
+
+    assert pipeline.planar_chart_raster_stride_for_profile(make_test_planar_chart(256, 256), profile) == 2
+    assert pipeline.planar_chart_raster_stride_for_profile(make_test_planar_chart(800, 600), profile) == 3
+    assert pipeline.planar_chart_raster_stride_for_profile(make_test_planar_chart(1200, 900), profile) == 4
+    assert (
+        pipeline.planar_chart_raster_stride_for_profile(
+            make_test_planar_chart(1200, 900),
+            pipeline.PROCESSING_PROFILES["full_quality"],
+        )
+        == 1
+    )
+
+
+def test_onboarding_blend_candidate_limit_is_lower_than_full_quality():
+    candidates = list(range(8))
+    profile = pipeline.PROCESSING_PROFILES["fast_onboarding"]
+
+    assert pipeline.texture_blend_candidate_limit_for_profile(profile, "blend") == 4
+    assert pipeline.texture_blend_candidate_limit_for_profile(profile, "direct") == 6
+    assert pipeline.limit_texture_projection_candidates_for_profile(candidates, profile, "blend") == [0, 1, 2, 3]
+
+
+def test_onboarding_texture_keyframe_selection_keeps_quality_and_temporal_spread():
+    keyframes = [make_test_projection_keyframe(index) for index in range(8)]
+    records = [
+        {
+            "validDepthRatio": 0.7,
+            "centralCoverageRatio": 0.2,
+            "highConfidenceRatio": 0.5,
+            "depthEdgeChaosRatio": 0.4,
+            "rgbSharpnessScore": 6,
+            "sourceTimestamp": float(index),
+        }
+        for index in range(8)
+    ]
+    records[4].update({
+        "validDepthRatio": 1.0,
+        "centralCoverageRatio": 0.9,
+        "highConfidenceRatio": 1.0,
+        "depthEdgeChaosRatio": 0.05,
+        "rgbSharpnessScore": 18,
+    })
+
+    selected, stats = pipeline.select_onboarding_texture_keyframes(keyframes, records, limit=4)
+
+    selected_ids = [keyframe.debug_id for keyframe in selected]
+    assert stats["enabled"] is True
+    assert stats["selectedKeyframeCount"] == 4
+    assert "kf-0" in selected_ids
+    assert "kf-7" in selected_ids
+    assert "kf-4" in selected_ids
+
+
 def test_direct_planar_chart_leaves_far_owner_projection_holes_neutral():
     transform = [
         1, 0, 0, 0,
@@ -2632,7 +2711,7 @@ async def test_fast_onboarding_profile_prefers_single_keyframe_rgbd_onboarding_m
 
         rgbd_stats = (await client.get(f"/api/v1/jobs/{job_id}/result/rgbd_fusion_stats.json", headers=headers)).json()
         assert rgbd_stats["used"] is False
-        assert rgbd_stats["geometrySource"] == "arkit_mesh_anchor_fusion"
+        assert rgbd_stats["geometrySource"] == "rgbd_onboarding_stage"
         assert rgbd_stats["geometryPreserved"] is True
         assert rgbd_stats["profile"]["name"] == "fast_onboarding"
         assert rgbd_stats["profile"]["maxKeyframes"] is None
