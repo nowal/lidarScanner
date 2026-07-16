@@ -1308,7 +1308,7 @@ def make_onboarding_pair_fixture(
     return keyframe, depth_frame
 
 
-def test_two_keyframe_rgbd_onboarding_pair_selection_prefers_blendable_first_five_seconds(tmp_path):
+def test_two_keyframe_rgbd_onboarding_pair_selection_adds_blendable_full_capture_supplements(tmp_path):
     keyframes = []
     depth_frames = []
     for index, timestamp, tx in [
@@ -1326,30 +1326,36 @@ def test_two_keyframe_rgbd_onboarding_pair_selection_prefers_blendable_first_fiv
         keyframes.append(keyframe)
         depth_frames.append(depth_frame)
 
-    selected, stats = pipeline.select_two_keyframe_rgbd_onboarding_pairs(
+    selected, stats = pipeline.select_multi_keyframe_rgbd_onboarding_pairs(
         pipeline.pair_rgbd_frames(keyframes, depth_frames, tmp_path),
         work_dir=tmp_path,
     )
 
     selected_keyframe_ids = [pair[0]["id"] for pair in selected]
-    assert selected_keyframe_ids == ["kf-0", "kf-1"]
     assert stats["available"] is True
+    assert stats["strategy"] == "best_multi_rgbd_keyframes_full_capture_overlap_tsdf"
+    assert stats["selectedFrameCount"] >= 3
+    assert "kf-0" in selected_keyframe_ids
+    assert "kf-1" in selected_keyframe_ids
+    assert "kf-3" in selected_keyframe_ids
+    assert "kf-2" not in selected_keyframe_ids
     assert stats["selectedPair"]["blendable"] is True
     assert stats["selectedPair"]["timeDeltaSeconds"] == pytest.approx(2.4)
     assert stats["selectedPair"]["overlap"]["bidirectionalAgreementRatio"] >= 0.5
     assert stats["pairWindowSeconds"] == pipeline.RGBD_ONBOARDING_PAIR_WINDOW_SECONDS
+    assert stats["candidatePoolCount"] <= pipeline.RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT
     assert any(
-        candidate["keyframeId"] == "kf-3" and "outside_first_five_seconds" in candidate["rejectionReasons"]
-        for candidate in stats["candidateSummary"]
+        frame["keyframeId"] == "kf-3" and frame["selectionRole"] == "supplemental"
+        for frame in stats["selectedFrames"]
     )
 
 
-def test_two_keyframe_rgbd_onboarding_pair_selection_requires_two_first_five_second_frames(tmp_path):
+def test_two_keyframe_rgbd_onboarding_pair_selection_requires_blendable_anchor_pair(tmp_path):
     keyframes = []
     depth_frames = []
     for index, timestamp, tx in [
         (0, 0.0, 0.0),
-        (1, 6.0, 0.05),
+        (1, 6.0, 2.0),
     ]:
         keyframe, depth_frame = make_onboarding_pair_fixture(
             tmp_path,
@@ -1360,16 +1366,17 @@ def test_two_keyframe_rgbd_onboarding_pair_selection_requires_two_first_five_sec
         keyframes.append(keyframe)
         depth_frames.append(depth_frame)
 
-    selected, stats = pipeline.select_two_keyframe_rgbd_onboarding_pairs(
+    selected, stats = pipeline.select_multi_keyframe_rgbd_onboarding_pairs(
         pipeline.pair_rgbd_frames(keyframes, depth_frames, tmp_path),
         work_dir=tmp_path,
     )
 
     assert selected == []
     assert stats["available"] is False
-    assert stats["eligibleCandidateCount"] == 1
-    assert stats["pairCandidateCount"] == 0
-    assert stats["reason"] == "No candidate pair had enough overlapping depth agreement."
+    assert stats["eligibleCandidateCount"] == 2
+    assert stats["pairCandidateCount"] == 1
+    assert stats["blendablePairCount"] == 0
+    assert stats["reason"] == "No candidate pool pair had enough overlapping depth agreement."
 
 
 def test_rgbd_pair_selection_prefers_first_pair_plus_timed_supplements():
