@@ -1038,6 +1038,73 @@ async def test_fast_planar_chart_uses_single_owner_keyframe(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_blend_fallback_budget_uses_projected_solid_color_for_remaining_faces(tmp_path):
+    transform = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]
+    intrinsics = [
+        120, 0, 0,
+        0, 120, 0,
+        64, 64, 1,
+    ]
+    red = Image.new("RGB", (128, 128), (210, 70, 70))
+    green = Image.new("RGB", (128, 128), (70, 210, 70))
+    keyframes = [
+        pipeline.ProjectionKeyframe(
+            image=red,
+            width=red.width,
+            height=red.height,
+            world_to_camera=pipeline.invert_rigid_transform(transform),
+            camera_position=(0, 0, 0),
+            intrinsics=intrinsics,
+            pixels=red.load(),
+            id="red",
+        ),
+        pipeline.ProjectionKeyframe(
+            image=green,
+            width=green.width,
+            height=green.height,
+            world_to_camera=pipeline.invert_rigid_transform(transform),
+            camera_position=(0, 0, 0),
+            intrinsics=intrinsics,
+            pixels=green.load(),
+            id="green",
+        ),
+    ]
+    mesh = make_centered_wall_grid(size=3, spacing=0.08)
+    profile = pipeline.replace(
+        pipeline.PROCESSING_PROFILES["fast_onboarding"],
+        planar_chart_projection_mode="blend",
+        fallback_texture_face_limit=1,
+    )
+
+    stats = await pipeline.write_textured_obj(
+        mesh=mesh,
+        keyframes=keyframes,
+        output_obj_path=tmp_path / "textured.obj",
+        output_mtl_path=tmp_path / "textured.mtl",
+        output_texture_path=tmp_path / "texture.png",
+        output_debug_path=tmp_path / "debug.json",
+        profile=profile,
+    )
+
+    fallback_budget = stats["atlasLayout"]["fallbackBudget"]
+    processing = stats["diagnostics"]["processing"]
+    projection = stats["diagnostics"]["projection"]
+
+    assert fallback_budget["fallbackHighQualityFaceCount"] == 1
+    assert fallback_budget["fallbackSolidFaceCount"] == len(mesh.faces) - 1
+    assert processing["solidProjectedFaceCount"] == len(mesh.faces) - 1
+    assert processing["solidFallbackFaceCount"] == 0
+    assert stats["projectionCoverage"] == 1.0
+    assert projection["blendedPixelCount"] > 0
+    assert {item["keyframe"] for item in projection["keyframeContributionCounts"]} == {"red", "green"}
+
+
+@pytest.mark.asyncio
 async def test_fast_direct_projection_rejects_occluded_samples_and_stays_neutral(tmp_path):
     transform = [
         1, 0, 0, 0,

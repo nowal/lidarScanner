@@ -394,6 +394,7 @@ RGBD_ONBOARDING_PAIR_DEPTH_ABSOLUTE_TOLERANCE_METERS = 0.22
 RGBD_ONBOARDING_PAIR_DEPTH_RELATIVE_TOLERANCE = 0.18
 RGBD_ONBOARDING_TSDF_VOXEL_LENGTH_METERS = 0.04
 RGBD_ONBOARDING_TSDF_SDF_TRUNC_METERS = 0.14
+RGBD_ONBOARDING_TSDF_BLEND_FALLBACK_FACE_LIMIT = 2_000
 RGBD_ONBOARDING_TARGET_SAMPLES = 16_384
 RGBD_ONBOARDING_FACE_ABSOLUTE_TOLERANCE_METERS = 0.18
 RGBD_ONBOARDING_FACE_RELATIVE_TOLERANCE = 0.22
@@ -2195,6 +2196,7 @@ async def write_two_keyframe_rgbd_onboarding_mesh(
         name=f"{profile.name}_two_frame_weighted_texture",
         planar_chart_projection_mode="blend",
         write_texture_debug_preview=False,
+        fallback_texture_face_limit=RGBD_ONBOARDING_TSDF_BLEND_FALLBACK_FACE_LIMIT,
         preserve_texture_render_mesh=True,
         dense_single_view_texture=False,
         rgbd_onboarding_mesh=True,
@@ -10355,23 +10357,46 @@ async def write_textured_obj(
         else:
             solid_color = solid_scene_color
             solid_is_projected = solid_scene_color_projected
-            if active_projection_mode in {"direct", "dense_single_view"}:
-                direct_sample = (
-                    dense_single_view_surface_color(
-                        triangle_center(face_vertices[0], face_vertices[1], face_vertices[2]),
-                        triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2]),
+            solid_sample_count = 1 if solid_scene_color_projected else 0
+            solid_sample_keys: tuple[str, ...] = ()
+            solid_blend: TextureBlendResult | None = None
+            if active_projection_mode in {"direct", "dense_single_view", "blend"}:
+                face_center = triangle_center(face_vertices[0], face_vertices[1], face_vertices[2])
+                face_normal = triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2])
+                if active_projection_mode == "blend":
+                    solid_candidates = texture_projection_candidates(
+                        face_vertices,
                         keyframes,
+                        relaxed=False,
+                        face_index=face_index,
                     )
-                    if active_projection_mode == "dense_single_view"
-                    else direct_projected_surface_color(
-                        triangle_center(face_vertices[0], face_vertices[1], face_vertices[2]),
-                        triangle_normal(face_vertices[0], face_vertices[1], face_vertices[2]),
-                        keyframes,
+                    solid_candidates = prioritize_owner_candidate(solid_candidates, face_owner_labels[face_index])
+                    if solid_candidates:
+                        solid_blend = blend_projected_texture_sample(face_center, solid_candidates)
+                        if solid_blend.accepted_sample_count > 0:
+                            solid_color = solid_blend.color
+                            solid_is_projected = True
+                            solid_sample_count = solid_blend.accepted_sample_count
+                            solid_sample_keys = solid_blend.keyframe_contribution_keys
+                else:
+                    direct_sample = (
+                        dense_single_view_surface_color(
+                            face_center,
+                            face_normal,
+                            keyframes,
+                        )
+                        if active_projection_mode == "dense_single_view"
+                        else direct_projected_surface_color(
+                            face_center,
+                            face_normal,
+                            keyframes,
+                        )
                     )
-                )
-                if direct_sample is not None:
-                    solid_color = direct_sample[0]
-                    solid_is_projected = True
+                    if direct_sample is not None:
+                        solid_color = direct_sample[0]
+                        solid_is_projected = True
+                        solid_sample_count = 1
+                        solid_sample_keys = (direct_sample[1],)
             solid_stats = fill_solid_texture_tile(
                 texture_pixels,
                 mask_pixels,
@@ -10381,13 +10406,28 @@ async def write_textured_obj(
             )
             filled_pixels = solid_stats["filledPixelCount"]
             rasterized_pixel_count += filled_pixels
+            if solid_blend is not None:
+                rejected_overexposed_sample_count += solid_blend.rejected_overexposed_sample_count
+                rejected_underexposed_sample_count += solid_blend.rejected_underexposed_sample_count
+                rejected_edge_sample_count += solid_blend.rejected_edge_sample_count
+                rejected_grazing_sample_count += solid_blend.rejected_grazing_sample_count
+                rejected_invalid_projection_sample_count += solid_blend.rejected_invalid_projection_sample_count
+                rejected_depth_edge_sample_count += solid_blend.rejected_depth_edge_sample_count
+                rejected_occluded_sample_count += solid_blend.rejected_occluded_sample_count
+                depth_tested_sample_count += solid_blend.depth_tested_sample_count
+                missing_depth_sample_count += solid_blend.missing_depth_sample_count
             if solid_is_projected:
                 projected_pixel_count += filled_pixels
-                single_sample_pixel_count += filled_pixels
-                accepted_projection_sample_count += filled_pixels
+                accepted_projection_sample_count += max(solid_sample_count, 1) * filled_pixels
+                if solid_sample_count > 1:
+                    blended_pixel_count += filled_pixels
+                else:
+                    single_sample_pixel_count += filled_pixels
                 textured_face_count += 1
                 fallback_projected_count += 1
                 solid_projected_face_count += 1
+                for key in solid_sample_keys:
+                    keyframe_contribution_counts[key] = keyframe_contribution_counts.get(key, 0) + filled_pixels
                 coverage_face_statuses[face_index] = "projected_solid"
             else:
                 fallback_pixel_count += filled_pixels
