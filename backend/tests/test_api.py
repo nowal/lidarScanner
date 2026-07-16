@@ -2092,6 +2092,18 @@ def test_onboarding_texture_keyframe_selection_keeps_quality_and_temporal_spread
     assert "kf-4" in selected_ids
 
 
+def test_onboarding_texture_keyframe_selection_defaults_to_all_keyframes():
+    keyframes = [make_test_projection_keyframe(index) for index in range(8)]
+
+    selected, stats = pipeline.select_onboarding_texture_keyframes(keyframes, None)
+
+    assert selected == keyframes
+    assert stats["enabled"] is False
+    assert stats["reason"] == "texture_keyframe_budget_disabled"
+    assert stats["selectedKeyframeCount"] == 8
+    assert stats["textureKeyframeLimit"] is None
+
+
 def test_direct_planar_chart_leaves_far_owner_projection_holes_neutral():
     transform = [
         1, 0, 0, 0,

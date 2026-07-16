@@ -324,7 +324,6 @@ TEXTURE_COLOR_SATURATION_BOOST = 1.12
 TEXTURE_COLOR_CONTRAST_BOOST = 1.05
 TEXTURE_BLEND_MAX_FACE_CANDIDATES = 6
 TEXTURE_BLEND_MAX_PIXEL_SAMPLES = 5
-TEXTURE_ONBOARDING_MAX_TEXTURE_KEYFRAMES = 6
 TEXTURE_ONBOARDING_MAX_BLEND_CANDIDATES = 4
 TEXTURE_ONBOARDING_CHART_MEDIUM_PIXEL_COUNT = 450_000
 TEXTURE_ONBOARDING_CHART_LARGE_PIXEL_COUNT = 900_000
@@ -9100,9 +9099,19 @@ def select_onboarding_texture_keyframes(
     keyframes: list[ProjectionKeyframe],
     selected_frame_records: list[dict] | None,
     *,
-    limit: int = TEXTURE_ONBOARDING_MAX_TEXTURE_KEYFRAMES,
+    limit: int | None = None,
 ) -> tuple[list[ProjectionKeyframe], dict]:
     source_count = len(keyframes)
+    if limit is None:
+        return keyframes, {
+            "enabled": False,
+            "reason": "texture_keyframe_budget_disabled",
+            "sourceKeyframeCount": source_count,
+            "selectedKeyframeCount": source_count,
+            "textureKeyframeLimit": None,
+            "selectedKeyframeIds": [keyframe.debug_id for keyframe in keyframes],
+        }
+
     limit = max(1, int(limit))
     if source_count <= limit:
         return keyframes, {
