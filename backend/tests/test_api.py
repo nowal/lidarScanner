@@ -4,6 +4,7 @@ import json
 import struct
 import zipfile
 from array import array
+from dataclasses import replace
 from io import BytesIO
 
 import pytest
@@ -2048,6 +2049,16 @@ def test_onboarding_blend_candidate_limit_is_lower_than_full_quality():
     assert pipeline.texture_blend_candidate_limit_for_profile(profile, "blend") == 4
     assert pipeline.texture_blend_candidate_limit_for_profile(profile, "direct") == 6
     assert pipeline.limit_texture_projection_candidates_for_profile(candidates, profile, "blend") == [0, 1, 2, 3]
+
+
+def test_onboarding_solid_fallback_grouping_stays_disabled():
+    profile = replace(
+        pipeline.PROCESSING_PROFILES["fast_onboarding"],
+        planar_chart_projection_mode="blend",
+        fallback_texture_face_limit=pipeline.RGBD_ONBOARDING_TSDF_BLEND_FALLBACK_FACE_LIMIT,
+    )
+
+    assert pipeline.solid_fallback_grouping_enabled(profile, "blend") is False
 
 
 def test_onboarding_texture_keyframe_selection_keeps_quality_and_temporal_spread():

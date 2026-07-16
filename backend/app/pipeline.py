@@ -12235,11 +12235,7 @@ def planar_chart_raster_stride_for_profile(chart: PlanarTextureChart, profile: P
 
 
 def solid_fallback_grouping_enabled(profile: ProcessingProfile, projection_mode: str) -> bool:
-    return (
-        profile.rgbd_onboarding_mesh
-        and projection_mode == "blend"
-        and profile.fallback_texture_face_limit is not None
-    )
+    return False
 
 
 def fallback_solid_face_group_key(
