@@ -397,10 +397,11 @@ RGBD_ONBOARDING_PAIR_DEPTH_RELATIVE_TOLERANCE = 0.18
 RGBD_ONBOARDING_TSDF_VOXEL_LENGTH_METERS = 0.04
 RGBD_ONBOARDING_TSDF_SDF_TRUNC_METERS = 0.14
 RGBD_ONBOARDING_TSDF_MIN_KEYFRAMES = 2
-RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES = 7
-RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT = 18
-RGBD_ONBOARDING_TSDF_TEMPORAL_BUCKET_COUNT = 5
-RGBD_ONBOARDING_TSDF_CANDIDATES_PER_BUCKET = 3
+RGBD_ONBOARDING_DYNAMIC_POOL_BASE_COUNT = 8
+RGBD_ONBOARDING_CANDIDATE_INTERVAL_SECONDS = 1.5
+RGBD_ONBOARDING_CANDIDATES_PER_INTERVAL = 2
+RGBD_ONBOARDING_SUPPLEMENTAL_TARGET_INTERVAL_SECONDS = 1.5
+RGBD_ONBOARDING_MAX_DEPTH_EDGE_CHAOS_RATIO = 0.90
 RGBD_ONBOARDING_TSDF_BLEND_FALLBACK_FACE_LIMIT = 2_000
 RGBD_ONBOARDING_COVERAGE_SAMPLE_COUNT = 768
 RGBD_ONBOARDING_COVERAGE_VOXEL_METERS = 0.18
@@ -2407,7 +2408,7 @@ def unavailable_multi_keyframe_rgbd_onboarding_stats(
         "depthFrameCount": len(depth_frames),
         "pairedFrameCount": paired_count,
         "pairWindowSeconds": RGBD_ONBOARDING_PAIR_WINDOW_SECONDS,
-        "maxSelectedFrameCount": RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES,
+        "selectionBudget": "duration_adaptive_coverage_gain",
         "becamePreferredPreview": False,
         "artifacts": {
             "obj": {"format": "obj", "path": "rgbd_onboarding_mesh.obj", "available": False},
@@ -2552,12 +2553,17 @@ def select_multi_keyframe_rgbd_onboarding_pairs(
         for candidate in candidates
         if int(candidate.get("meshablePixelCount") or 0) >= 3
         and float(candidate.get("validDepthRatio") or 0.0) >= 0.02
-        and float(candidate.get("depthEdgeChaosRatio") or 0.0) < 0.95
+        and float(candidate.get("depthEdgeChaosRatio") or 0.0) < RGBD_ONBOARDING_MAX_DEPTH_EDGE_CHAOS_RATIO
     ]
+    dynamic_candidate_pool_limit = rgbd_onboarding_dynamic_candidate_pool_limit(
+        scan_span=scan_span,
+        eligible_count=len(eligible),
+    )
     candidate_pool = rgbd_onboarding_multi_candidate_pool(
         eligible,
         first_timestamp=first_timestamp,
         scan_span=scan_span,
+        pool_limit=dynamic_candidate_pool_limit,
     )
     pair_records: list[dict] = []
     pair_records_by_key: dict[tuple[int, int], dict] = {}
@@ -2634,7 +2640,7 @@ def select_multi_keyframe_rgbd_onboarding_pairs(
     ) if selected_candidates else set()
     coverage_stop_reason = None
 
-    while len(selected_candidates) < RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES:
+    while len(selected_candidates) < len(candidate_pool):
         selected_candidate_ids = {id(candidate) for candidate in selected_candidates}
         best_supplement = None
         for candidate in candidate_pool:
@@ -2696,8 +2702,8 @@ def select_multi_keyframe_rgbd_onboarding_pairs(
         supplemental_records.append(best_supplement)
         selected_coverage_bins.update(rgbd_onboarding_candidate_coverage_bins(best_supplement["candidate"]))
 
-    if coverage_stop_reason is None and len(selected_candidates) >= RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES:
-        coverage_stop_reason = "max_selected_frame_count_reached"
+    if coverage_stop_reason is None and len(selected_candidates) >= len(candidate_pool):
+        coverage_stop_reason = "candidate_pool_exhausted"
 
     selected_pairs = [candidate["pair"] for candidate in selected_candidates]
     selected_ids = {id(candidate) for candidate in selected_candidates}
@@ -2718,10 +2724,13 @@ def select_multi_keyframe_rgbd_onboarding_pairs(
         "targetTimeDeltaSeconds": RGBD_ONBOARDING_PAIR_TARGET_TIME_DELTA_SECONDS,
         "minTimeDeltaSeconds": RGBD_ONBOARDING_PAIR_MIN_TIME_DELTA_SECONDS,
         "minDepthAgreementRatio": RGBD_ONBOARDING_PAIR_MIN_DEPTH_AGREEMENT_RATIO,
+        "maxDepthEdgeChaosRatio": RGBD_ONBOARDING_MAX_DEPTH_EDGE_CHAOS_RATIO,
         "minSelectedFrameCount": RGBD_ONBOARDING_TSDF_MIN_KEYFRAMES,
-        "maxSelectedFrameCount": RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES,
-        "candidatePoolLimit": RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT,
-        "temporalBucketCount": RGBD_ONBOARDING_TSDF_TEMPORAL_BUCKET_COUNT,
+        "selectionBudget": "duration_adaptive_coverage_gain",
+        "dynamicCandidatePoolLimit": dynamic_candidate_pool_limit,
+        "candidateIntervalSeconds": RGBD_ONBOARDING_CANDIDATE_INTERVAL_SECONDS,
+        "candidatesPerInterval": RGBD_ONBOARDING_CANDIDATES_PER_INTERVAL,
+        "temporalBucketCount": rgbd_onboarding_temporal_bucket_count(scan_span),
         "targetCoverageRatio": RGBD_ONBOARDING_TSDF_TARGET_COVERAGE_RATIO,
         "minMarginalCoverageRatio": RGBD_ONBOARDING_TSDF_MIN_MARGINAL_COVERAGE_RATIO,
         "lowCoverageMinMarginalCoverageRatio": RGBD_ONBOARDING_TSDF_LOW_COVERAGE_MIN_MARGINAL_RATIO,
@@ -2798,11 +2807,13 @@ def rgbd_onboarding_multi_candidate_pool(
     *,
     first_timestamp: float,
     scan_span: float,
+    pool_limit: int,
 ) -> list[dict]:
-    if len(eligible) <= RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT:
+    if len(eligible) <= pool_limit:
         return sorted(eligible, key=lambda item: float(item.get("sourceTimestamp") or 0.0))
 
     selected: dict[int, dict] = {}
+    bucket_count = rgbd_onboarding_temporal_bucket_count(scan_span)
     quality_sorted = sorted(
         eligible,
         key=lambda item: (
@@ -2812,7 +2823,8 @@ def rgbd_onboarding_multi_candidate_pool(
         ),
         reverse=True,
     )
-    for candidate in quality_sorted[:RGBD_ONBOARDING_TSDF_CANDIDATES_PER_BUCKET * 2]:
+    global_candidate_count = max(4, min(pool_limit // 3, bucket_count + 4))
+    for candidate in quality_sorted[:global_candidate_count]:
         selected[id(candidate)] = candidate
     for candidate in sorted(
         eligible,
@@ -2821,10 +2833,10 @@ def rgbd_onboarding_multi_candidate_pool(
             float(item.get("score") or 0.0),
         ),
         reverse=True,
-    )[:RGBD_ONBOARDING_TSDF_CANDIDATES_PER_BUCKET * 2]:
+    )[:global_candidate_count]:
         selected[id(candidate)] = candidate
 
-    buckets: list[list[dict]] = [[] for _ in range(max(1, RGBD_ONBOARDING_TSDF_TEMPORAL_BUCKET_COUNT))]
+    buckets: list[list[dict]] = [[] for _ in range(bucket_count)]
     for candidate in eligible:
         timestamp = float(candidate.get("sourceTimestamp") or first_timestamp)
         fraction = clamp_float((timestamp - first_timestamp) / max(scan_span, 1e-6), 0.0, 0.999999)
@@ -2839,14 +2851,31 @@ def rgbd_onboarding_multi_candidate_pool(
             ),
             reverse=True,
         )
-        for candidate in bucket[:RGBD_ONBOARDING_TSDF_CANDIDATES_PER_BUCKET]:
+        for candidate in bucket[:RGBD_ONBOARDING_CANDIDATES_PER_INTERVAL]:
             selected[id(candidate)] = candidate
 
     pool = list(selected.values())
-    if len(pool) > RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT:
-        pool = rgbd_onboarding_prune_candidate_pool_for_coverage(pool, RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT)
+    if len(pool) > pool_limit:
+        pool = rgbd_onboarding_prune_candidate_pool_for_coverage(pool, pool_limit)
 
     return sorted(pool, key=lambda item: float(item.get("sourceTimestamp") or 0.0))
+
+
+def rgbd_onboarding_temporal_bucket_count(scan_span: float) -> int:
+    return max(1, int(math.ceil(max(scan_span, 0.0) / max(RGBD_ONBOARDING_CANDIDATE_INTERVAL_SECONDS, 1e-6))))
+
+
+def rgbd_onboarding_dynamic_candidate_pool_limit(*, scan_span: float, eligible_count: int) -> int:
+    if eligible_count <= 0:
+        return 0
+    interval_budget = rgbd_onboarding_temporal_bucket_count(scan_span) * RGBD_ONBOARDING_CANDIDATES_PER_INTERVAL
+    return min(
+        eligible_count,
+        max(
+            RGBD_ONBOARDING_DYNAMIC_POOL_BASE_COUNT,
+            RGBD_ONBOARDING_DYNAMIC_POOL_BASE_COUNT + interval_budget,
+        ),
+    )
 
 
 def rgbd_onboarding_prune_candidate_pool_for_coverage(candidates: list[dict], limit: int) -> list[dict]:
@@ -2924,7 +2953,7 @@ def rgbd_onboarding_supplemental_candidate_score(
     selected_timestamps = [float(item.get("sourceTimestamp") or 0.0) for item in selected_candidates]
     nearest_time_delta = min((abs(timestamp - value) for value in selected_timestamps), default=0.0)
     time_spread_score = min(
-        nearest_time_delta / max(scan_span / max(RGBD_ONBOARDING_TSDF_MAX_KEYFRAMES - 1, 1), 1e-6),
+        nearest_time_delta / max(RGBD_ONBOARDING_SUPPLEMENTAL_TARGET_INTERVAL_SECONDS, 1e-6),
         1.0,
     ) * 1.25
 
@@ -2936,7 +2965,11 @@ def rgbd_onboarding_supplemental_candidate_score(
     overlap_score = min(best_agreement / max(RGBD_ONBOARDING_PAIR_MIN_DEPTH_AGREEMENT_RATIO * 3.5, 1e-6), 1.0) * 1.35
     projected_score = min(best_projected / 0.35, 1.0) * 0.55
     central_score = float(candidate.get("centralCoverageRatio") or 0.0) * 0.35
-    edge_penalty = min(float(candidate.get("depthEdgeChaosRatio") or 0.0) / 0.95, 1.0) * 0.25
+    edge_penalty = min(
+        float(candidate.get("depthEdgeChaosRatio") or 0.0)
+        / max(RGBD_ONBOARDING_MAX_DEPTH_EDGE_CHAOS_RATIO, 1e-6),
+        1.0,
+    ) * 0.65
     coverage_bins = rgbd_onboarding_candidate_coverage_bins(candidate)
     new_coverage_bin_count = len(coverage_bins - selected_coverage_bins)
     coverage_gain_ratio = (
@@ -12001,7 +12034,7 @@ def smooth_fallback_texture_face_colors(
         }
 
     eligible_statuses = {"fallback", "fallback_unobserved", "projected_solid"}
-    neighbor_source_statuses = eligible_statuses | {"projected"}
+    trusted_source_statuses = {"projected"}
     eligible_faces = [
         face_index
         for face_index, status in enumerate(coverage_face_statuses)
@@ -12018,9 +12051,11 @@ def smooth_fallback_texture_face_colors(
 
     pixels = texture.load()
     face_colors: dict[int, tuple[int, int, int]] = {}
+    source_face_indices: set[int] = set()
     for face_index, status in enumerate(coverage_face_statuses):
         if (
-            status not in neighbor_source_statuses
+            status not in eligible_statuses
+            and status not in trusted_source_statuses
             or face_index not in layout.face_to_tile_index
             or face_index in layout.face_to_chart
         ):
@@ -12033,6 +12068,8 @@ def smooth_fallback_texture_face_colors(
             tile,
             layout.tile_size,
         )
+        if status in trusted_source_statuses:
+            source_face_indices.add(face_index)
 
     neighbors = mesh_face_neighbors(mesh.faces)
     changed_faces: set[int] = set()
@@ -12046,7 +12083,7 @@ def smooth_fallback_texture_face_colors(
             neighbor_colors = [
                 face_colors[neighbor]
                 for neighbor in neighbors[face_index]
-                if neighbor in face_colors
+                if neighbor in source_face_indices and neighbor in face_colors
             ]
             if not neighbor_colors:
                 continue
@@ -12078,6 +12115,7 @@ def smooth_fallback_texture_face_colors(
         "smoothedFaceCount": len(changed_faces),
         "meanColorDelta": round(total_delta / max(len(changed_faces), 1), 3),
         "statuses": sorted(eligible_statuses),
+        "sourceStatuses": sorted(trusted_source_statuses),
     }
 
 

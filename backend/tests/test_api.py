@@ -1343,7 +1343,7 @@ def test_two_keyframe_rgbd_onboarding_pair_selection_adds_blendable_full_capture
     assert stats["selectedPair"]["timeDeltaSeconds"] == pytest.approx(2.4)
     assert stats["selectedPair"]["overlap"]["bidirectionalAgreementRatio"] >= 0.5
     assert stats["pairWindowSeconds"] == pipeline.RGBD_ONBOARDING_PAIR_WINDOW_SECONDS
-    assert stats["candidatePoolCount"] <= pipeline.RGBD_ONBOARDING_TSDF_CANDIDATE_POOL_LIMIT
+    assert stats["candidatePoolCount"] <= stats["dynamicCandidatePoolLimit"]
     assert stats["selectedCoverageBinCount"] > 0
     assert stats["selectedCoverageRatio"] > 0
     assert any(
@@ -1963,6 +1963,42 @@ def test_fallback_texture_color_smoothing_blends_adjacent_face_tiles():
     assert stats["smoothedFaceCount"] == 1
     assert pixels[1, 1][0] > 80
     assert pixels[1, 1][0] < 200
+    assert pixels[5, 1] == (200, 200, 200)
+
+
+def test_fallback_texture_color_smoothing_does_not_spread_between_fallback_tiles():
+    mesh = make_grid_mesh(1)
+    texture = Image.new("RGB", (8, 4), pipeline.FALLBACK_COLOR)
+    pixels = texture.load()
+    for y in range(4):
+        for x in range(4):
+            pixels[x, y] = (80, 80, 80)
+        for x in range(4, 8):
+            pixels[x, y] = (200, 200, 200)
+    layout = pipeline.TextureAtlasLayout(
+        width=8,
+        height=4,
+        tile_size=4,
+        columns=2,
+        tile_start_y=0,
+        planar_charts=[],
+        face_to_chart={},
+        face_to_tile_index={0: 0, 1: 1},
+        strategy="test_per_face_tiles",
+        stats={},
+    )
+
+    stats = pipeline.smooth_fallback_texture_face_colors(
+        texture,
+        mesh,
+        layout,
+        ["fallback", "fallback"],
+        enabled=True,
+    )
+
+    assert stats["enabled"] is True
+    assert stats["smoothedFaceCount"] == 0
+    assert pixels[1, 1] == (80, 80, 80)
     assert pixels[5, 1] == (200, 200, 200)
 
 
