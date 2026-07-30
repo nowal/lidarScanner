@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import shutil
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 from pathlib import Path
 
@@ -15,6 +17,8 @@ from .models import ArtifactLinks, JobStage, JobStatus, JobStatusResponse, now_u
 from .pipeline import DEFAULT_PIPELINE
 
 logger = logging.getLogger("lidarai.store")
+
+TERMINAL_STATUSES = {JobStatus.complete, JobStatus.failed, JobStatus.cancelled}
 
 
 @dataclass
@@ -41,9 +45,12 @@ class JobStore:
         self.jobs_path.mkdir(parents=True, exist_ok=True)
         self.jobs: dict[str, JobRecord] = {}
         self.subscribers: dict[str, list[asyncio.Queue[dict]]] = {}
+        self.cleanup_tasks: dict[str, asyncio.Task] = {}
         self._load_existing_jobs()
+        self._prune_stored_jobs(reason="startup")
 
     def create_job(self) -> JobRecord:
+        self._prune_stored_jobs(reason="pre_create")
         job_id = str(uuid.uuid4())
         now = now_utc().isoformat()
         record = JobRecord(
@@ -56,10 +63,22 @@ class JobStore:
             message="Job queued",
         )
         self.jobs[job_id] = record
-        self._job_dir(job_id).mkdir(parents=True, exist_ok=True)
-        (self._job_dir(job_id) / "upload").mkdir(parents=True, exist_ok=True)
-        (self._job_dir(job_id) / "work").mkdir(parents=True, exist_ok=True)
-        self._persist(record)
+        try:
+            self._create_job_dirs(record)
+            self._persist(record)
+        except OSError as exc:
+            if exc.errno != errno.ENOSPC:
+                self.jobs.pop(job_id, None)
+                raise
+            logger.warning("Storage full while creating job; pruning old jobs before retry", extra={"job_id": job_id})
+            self._prune_stored_jobs(reason="no_space")
+            try:
+                self._create_job_dirs(record)
+                self._persist(record)
+            except Exception:
+                self.jobs.pop(job_id, None)
+                shutil.rmtree(self._job_dir(job_id), ignore_errors=True)
+                raise
         return record
 
     def get(self, job_id: str) -> Optional[JobRecord]:
@@ -80,6 +99,11 @@ class JobStore:
 
     def _job_dir(self, job_id: str) -> Path:
         return self.jobs_path / job_id
+
+    def _create_job_dirs(self, record: JobRecord) -> None:
+        self._job_dir(record.job_id).mkdir(parents=True, exist_ok=True)
+        (self._job_dir(record.job_id) / "upload").mkdir(parents=True, exist_ok=True)
+        (self._job_dir(record.job_id) / "work").mkdir(parents=True, exist_ok=True)
 
     def upload_path(self, job_id: str) -> Path:
         return self._job_dir(job_id) / "upload" / "scan_payload.json"
@@ -269,6 +293,7 @@ class JobStore:
             extra={"job_id": record.job_id},
         )
         await self.publish(record)
+        self._schedule_terminal_cleanup(record)
 
     def _persist(self, record: JobRecord) -> None:
         status_json = self.to_response(record).model_dump(mode="json")
@@ -374,6 +399,145 @@ class JobStore:
             artifact_path=artifact_path,
             cancelled=bool(data.get("cancelled", False)),
         )
+
+    def _prune_stored_jobs(self, *, reason: str) -> None:
+        retention_days = max(0, settings.job_retention_days)
+        max_jobs = max(0, settings.job_retention_max_jobs)
+        min_free_bytes = max(0, settings.job_retention_min_free_mb) * 1024 * 1024
+        if retention_days == 0 and max_jobs == 0 and min_free_bytes == 0:
+            return
+        if not self.jobs_path.exists():
+            return
+
+        now_ts = time.time()
+        cutoff_ts = now_ts - retention_days * 24 * 60 * 60 if retention_days else None
+        job_infos = self._stored_job_infos()
+        candidate_ids: set[str] = set()
+
+        if cutoff_ts is not None:
+            for info in job_infos:
+                if info["is_active"]:
+                    continue
+                if info["status"] in TERMINAL_STATUSES and info["updated_ts"] < cutoff_ts:
+                    candidate_ids.add(info["job_id"])
+
+        if max_jobs:
+            sorted_infos = sorted(job_infos, key=lambda item: item["updated_ts"], reverse=True)
+            for info in sorted_infos[max_jobs:]:
+                if not info["is_active"] and info["status"] in TERMINAL_STATUSES:
+                    candidate_ids.add(info["job_id"])
+
+        deleted = 0
+        for info in sorted(job_infos, key=lambda item: item["updated_ts"]):
+            if info["job_id"] not in candidate_ids:
+                continue
+            if self._delete_job_dir(info["job_id"], info["path"], reason=reason):
+                deleted += 1
+
+        if min_free_bytes:
+            free_bytes = self._storage_free_bytes()
+            if free_bytes is not None and free_bytes < min_free_bytes:
+                remaining_infos = self._stored_job_infos()
+                for info in sorted(remaining_infos, key=lambda item: item["updated_ts"]):
+                    if free_bytes >= min_free_bytes:
+                        break
+                    if info["is_active"] or info["status"] not in TERMINAL_STATUSES:
+                        continue
+                    if self._delete_job_dir(info["job_id"], info["path"], reason=f"{reason}:free_space"):
+                        deleted += 1
+                        free_bytes = self._storage_free_bytes() or 0
+
+        if deleted:
+            logger.info("Pruned stored processor jobs", extra={"reason": reason, "deleted_count": deleted})
+
+    def _stored_job_infos(self) -> list[dict]:
+        infos: list[dict] = []
+        for job_dir in sorted(self.jobs_path.iterdir()):
+            if not job_dir.is_dir():
+                continue
+            job_id = job_dir.name
+            record = self.jobs.get(job_id) or self._load_record(job_dir, mark_interrupted_running=False)
+            status = record.status if record else None
+            updated_value = record.updated_at if record else None
+            updated_ts = self._timestamp_from_iso(updated_value) if updated_value else job_dir.stat().st_mtime
+            is_active = bool(record and record.status in {JobStatus.queued, JobStatus.running} and record.lock.locked())
+            infos.append(
+                {
+                    "job_id": job_id,
+                    "path": job_dir,
+                    "status": status,
+                    "updated_ts": updated_ts,
+                    "is_active": is_active,
+                }
+            )
+        return infos
+
+    def _delete_job_dir(self, job_id: str, job_dir: Path, *, reason: str) -> bool:
+        current_task = None
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            pass
+        task = self.cleanup_tasks.pop(job_id, None)
+        if task and task is not current_task and not task.done():
+            task.cancel()
+        record = self.jobs.get(job_id)
+        if record and record.status in {JobStatus.queued, JobStatus.running} and record.lock.locked():
+            return False
+        try:
+            shutil.rmtree(job_dir)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("Could not prune processor job", extra={"job_id": job_id, "reason": reason, "error": str(exc)})
+            return False
+        self.jobs.pop(job_id, None)
+        self.subscribers.pop(job_id, None)
+        logger.info("Pruned processor job", extra={"job_id": job_id, "reason": reason})
+        return True
+
+    def _schedule_terminal_cleanup(self, record: JobRecord) -> None:
+        delay_seconds = max(0, settings.job_delete_terminal_after_seconds)
+        if delay_seconds == 0 or record.status not in TERMINAL_STATUSES:
+            return
+        existing = self.cleanup_tasks.get(record.job_id)
+        if existing and not existing.done():
+            return
+        try:
+            self.cleanup_tasks[record.job_id] = asyncio.create_task(
+                self._delete_job_after_delay(record.job_id, delay_seconds)
+            )
+        except RuntimeError:
+            logger.warning("Could not schedule terminal job cleanup outside an event loop", extra={"job_id": record.job_id})
+
+    async def _delete_job_after_delay(self, job_id: str, delay_seconds: int) -> None:
+        try:
+            await asyncio.sleep(delay_seconds)
+            self._delete_job_dir(job_id, self._job_dir(job_id), reason="terminal_cleanup")
+        except asyncio.CancelledError:
+            raise
+        finally:
+            task = self.cleanup_tasks.get(job_id)
+            if task is asyncio.current_task():
+                self.cleanup_tasks.pop(job_id, None)
+
+    def _storage_free_bytes(self) -> Optional[int]:
+        try:
+            usage_path = self.base_path if self.base_path.exists() else self.base_path.parent
+            return shutil.disk_usage(usage_path).free
+        except OSError as exc:
+            logger.warning("Could not read storage free space", extra={"error": str(exc)})
+            return None
+
+    @staticmethod
+    def _timestamp_from_iso(value: str) -> float:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except ValueError:
+            return 0.0
 
     async def run_pipeline(self, record: JobRecord) -> None:
         async with record.lock:

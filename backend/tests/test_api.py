@@ -237,6 +237,35 @@ def test_job_store_loads_job_created_by_another_process(tmp_path):
     assert loaded.status == JobStatus.queued
 
 
+def test_job_store_prunes_old_terminal_jobs(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "job_retention_days", 0)
+    monkeypatch.setattr(settings, "job_retention_max_jobs", 0)
+    monkeypatch.setattr(settings, "job_retention_min_free_mb", 0)
+
+    store = JobStore(str(tmp_path))
+    old_record = store.create_job()
+    old_record.status = JobStatus.complete
+    old_record.stage = JobStage.complete
+    old_record.updated_at = "2000-01-01T00:00:00+00:00"
+    store._persist(old_record)
+    recent_record = store.create_job()
+    recent_record.status = JobStatus.complete
+    recent_record.stage = JobStage.complete
+    store._persist(recent_record)
+
+    old_dir = tmp_path / "jobs" / old_record.job_id
+    recent_dir = tmp_path / "jobs" / recent_record.job_id
+
+    monkeypatch.setattr(settings, "job_retention_days", 1)
+
+    reloaded_store = JobStore(str(tmp_path))
+
+    assert not old_dir.exists()
+    assert recent_dir.exists()
+    assert old_record.job_id not in reloaded_store.jobs
+    assert recent_record.job_id in reloaded_store.jobs
+
+
 def test_diagnostic_glb_exports_triangle_opaque_meshes(tmp_path):
     mesh = make_centered_wall_grid(size=1)
 

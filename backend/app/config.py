@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     auth_token: str = ""
     cors_origins: str = "*"
     job_timeout_seconds: int = 1200
+    job_retention_days: int = 0
+    job_retention_max_jobs: int = 0
+    job_retention_min_free_mb: int = 0
+    job_delete_terminal_after_seconds: int = 0
     default_processing_profile: str = "fast_onboarding"
     ai_provider: str = "openai"
     openai_api_key: str = ""

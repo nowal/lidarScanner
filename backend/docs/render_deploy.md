@@ -1,13 +1,13 @@
 # Render Deploy Guide
 
-This guide deploys the LiDAR processing backend as a single Render Web Service backed by a persistent disk. It is the fastest MVP path for real homeowner scans. The service is intentionally single-instance because the current backend stores job files on one local disk.
+This guide deploys the LiDAR processing backend as a single Render Web Service using ephemeral job storage. It is the fastest MVP path for real homeowner scans when long-term scan/result storage is handled elsewhere.
 
 ## What This Repo Provides
 
 - `render.yaml` at the repo root for Render Blueprint setup.
 - `backend/Dockerfile` with the Python and system packages needed for FastAPI, Pillow, and Open3D RGBD processing.
 - `backend/.dockerignore` so local virtualenvs, secrets, and scan artifacts are not copied into the Docker build.
-- Backend job rehydration from persisted disk records after Render restarts.
+- Short-lived backend job storage for active uploads, processing work files, and result download handoff.
 - Home AI chat endpoints backed by OpenAI Responses API calls over `httpx`, with local fallback responses when OpenAI is not configured.
 
 ## Before You Start
@@ -40,8 +40,6 @@ Starting from `https://dashboard.render.com`:
    - Instance type: `pro`
    - Region: `oregon`
    - Health check path: `/health`
-   - Disk mount path: `/var/data`
-   - Disk size: `20 GB`
 7. When Render prompts for `LIDARAI_AUTH_TOKEN`, paste the token you generated.
 8. When Render prompts for `LIDARAI_OPENAI_API_KEY`, paste an OpenAI API key if you want the Home Guide chat to use OpenAI in production.
    - Without an API key, `/api/v1/ai/home-chat` still returns the local fallback response shape.
@@ -86,16 +84,17 @@ backend
 ```
 
 8. Select instance type **Pro** for the first real scans. You can try **Standard** to save money, but upgrade if the logs show memory kills or scans fail during Open3D/texturing.
-9. Under **Advanced**, add a disk:
-   - Mount path: `/var/data`
-   - Size: `20 GB`
-10. Add environment variables:
+9. Add environment variables:
 
 ```text
-LIDARAI_STORAGE_DIR=/var/data
+LIDARAI_STORAGE_DIR=/tmp/lidarai-processor
 LIDARAI_AUTH_TOKEN=<your generated token>
 LIDARAI_CORS_ORIGINS=*
 LIDARAI_JOB_TIMEOUT_SECONDS=1200
+LIDARAI_JOB_RETENTION_DAYS=3
+LIDARAI_JOB_RETENTION_MAX_JOBS=25
+LIDARAI_JOB_RETENTION_MIN_FREE_MB=2048
+LIDARAI_JOB_DELETE_TERMINAL_AFTER_SECONDS=3600
 LIDARAI_DEFAULT_PROCESSING_PROFILE=fast_onboarding
 LIDARAI_TEXTURE_WORKERS=2
 LIDARAI_AI_PROVIDER=openai
@@ -109,8 +108,8 @@ LIDARAI_OPENAI_REQUEST_TIMEOUT_SECONDS=45
 LIDARAI_OPENAI_MAX_IMAGES_PER_REQUEST=1
 ```
 
-11. Set health check path to `/health`.
-12. Click **Create Web Service**.
+10. Set health check path to `/health`.
+11. Click **Create Web Service**.
 
 ## Home AI And OpenAI Settings
 
@@ -149,12 +148,13 @@ Run one small scan first, then a realistic room, then a whole-house scan.
 
 ## Operating Notes
 
-- Disk storage is local to this one Render service. Keep `numInstances` at `1`.
-- Render disks preserve only files under the mount path, so production storage must stay at `/var/data`.
-- Processor jobs and Home AI state both persist under `LIDARAI_STORAGE_DIR`. On Render this includes job files plus `ai_threads/` and `ai_events/` under `/var/data`.
+- Job storage is local to this one Render service. Keep `numInstances` at `1`.
+- Processor jobs use ephemeral storage under `LIDARAI_STORAGE_DIR`; on Render this is `/tmp/lidarai-processor`.
+- Completed, failed, and cancelled processor jobs can be pruned automatically with `LIDARAI_JOB_RETENTION_DAYS`, `LIDARAI_JOB_RETENTION_MAX_JOBS`, `LIDARAI_JOB_RETENTION_MIN_FREE_MB`, and `LIDARAI_JOB_DELETE_TERMINAL_AFTER_SECONDS`. Active queued/running jobs are not removed.
+- Because `/tmp` is ephemeral, processor job records/results and Home AI local thread/event files do not survive service restarts. Store anything you need long-term outside this service.
 - `LIDARAI_TEXTURE_WORKERS=2` is a conservative Render Pro starting point for photoreal texture work. Increase only after upgrading the service size and watching memory during real scans.
 - If jobs fail with memory errors, upgrade the service from `pro` to `pro plus`.
-- If the disk fills, increase the disk size from the service's **Disks** tab. Render lets you increase disk size later, but not decrease it.
+- If ephemeral storage fills during active scans, reduce scan payload size, reduce concurrent work, or move uploads/results to object storage.
 - A redeploy can interrupt an active processor run. The backend now reloads persisted job records after restart and marks interrupted running jobs as failed so the app can retry.
 - Home AI conversations use OpenAI stored response state when available and local JSONL analytics on the Render disk. If OpenAI returns auth, quota, rate-limit, or transient errors, the endpoint logs the error and returns the local fallback response shape so the app can keep moving.
 

@@ -11,13 +11,21 @@ services:
     autoDeployTrigger: commit
     envVars:
       - key: LIDARAI_STORAGE_DIR
-        value: /var/data
+        value: /tmp/lidarai-processor
       - key: LIDARAI_AUTH_TOKEN
         sync: false
       - key: LIDARAI_CORS_ORIGINS
         value: "*"
       - key: LIDARAI_JOB_TIMEOUT_SECONDS
         value: "1200"
+      - key: LIDARAI_JOB_RETENTION_DAYS
+        value: "3"
+      - key: LIDARAI_JOB_RETENTION_MAX_JOBS
+        value: "25"
+      - key: LIDARAI_JOB_RETENTION_MIN_FREE_MB
+        value: "2048"
+      - key: LIDARAI_JOB_DELETE_TERMINAL_AFTER_SECONDS
+        value: "3600"
       - key: LIDARAI_DEFAULT_PROCESSING_PROFILE
         value: fast_onboarding
       - key: LIDARAI_TEXTURE_WORKERS
@@ -40,7 +48,3 @@ services:
         value: "45"
       - key: LIDARAI_OPENAI_MAX_IMAGES_PER_REQUEST
         value: "1"
-    disk:
-      name: lidarai-processor-data
-      mountPath: /var/data
-      sizeGB: 20
