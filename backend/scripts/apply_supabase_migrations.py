@@ -110,6 +110,18 @@ def main() -> None:
             "create table if not exists public._migrations ("
             "name text primary key, applied_at timestamptz not null default now())",
         )
+        # The ledger is reachable through PostgREST like any other public
+        # table, and the anon key ships inside the iOS app -- so without
+        # this anyone holding the app could read our migration history.
+        # RLS on with no policies is the same service-role-only posture the
+        # flow tables use; the service role bypasses RLS, so the migration
+        # runner is unaffected. Supabase's advisor flags the table as
+        # CRITICAL until this runs (seen on the dev project, Sep 18).
+        run_query(
+            client,
+            ref,
+            "alter table public._migrations enable row level security",
+        )
         applied_rows = run_query(client, ref, "select name from public._migrations")
         applied = {row["name"] for row in applied_rows} if isinstance(applied_rows, list) else set()
 
