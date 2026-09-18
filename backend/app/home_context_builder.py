@@ -363,10 +363,38 @@ def _clean_text(value: Any, max_len: int) -> str | None:
     return text[:max_len]
 
 
+# Prompt-injection markers that must never survive from client-controlled
+# context fields (room names, notes, floorplan summary) into the model input.
+# The context packet is built by the client and an attacker hitting the API
+# directly can put anything here — defense-in-depth beyond the model's own
+# resistance (instruction-source-boundary principle).
+_INJECTION_MARKERS = re.compile(
+    r"(?ix)\b("
+    r"ignore\s+(?:all\s+|previous\s+|prior\s+|above\s+|the\s+)*(?:instructions?|rules?|prompts?)"
+    r"|disregard\s+(?:all\s+|the\s+)*(?:previous|prior|above|instructions?|rules?)"
+    r"|system\s*(prompt|message|override)"
+    r"|developer\s+mode"
+    r"|you\s+are\s+now"
+    r"|new\s+(instructions?|rules?|persona)"
+    r"|reveal\s+your"
+    r"|act\s+as\s+(a\s+)?(dan|general|unrestricted)"
+    r"|no\s+restrictions?"
+    r"|jailbreak"
+    r")\b"
+)
+
+
+def _neutralize_injection(text: str) -> str:
+    """Replace injection markers in untrusted context text with an inert
+    placeholder so the model reads them as removed noise, not instructions."""
+    return _INJECTION_MARKERS.sub("[removed]", text)
+
+
 def _naturalize_context_text(value: Any, max_len: int) -> str | None:
     text = _clean_text(value, max_len)
     if not text:
         return None
+    text = _neutralize_injection(text)
     replacements = [
         (r"\bRoomPlan captured area\b", "room area"),
         (r"\bRoomPlan-derived\b", "rough"),

@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Guide phone demo</title>
+<style>
+  /* The phone reproduces the app's chat surface (HomeAIStyle: paper, ink,
+     clay, brand-red homeowner bubble) with the home's floor plan pinned at
+     the top the way the app pins its viewer; the side is the server's truth. */
+  :root {
+    --bg:#101418; --panel:#1a2027; --panel2:#212a33; --text:#e8edf2; --dim:#8b98a5;
+    --accent:#4fa3ff; --good:#38c172; --warn:#e8a13c; --bad:#e0564f;
+    --paper:#FFFAF1; --paper-muted:#EFE5D5; --ink:#292119; --ink2:#7A6E61; --clay:#946652;
+    --brand:#980612; --stroke:rgba(125,102,82,.2);
+  }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--text); font:15px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif;
+         display:flex; flex-wrap:wrap; gap:26px; justify-content:center; align-items:flex-start; padding:22px; min-height:100vh; }
+  .phone { width:390px; max-width:100%; height:820px; background:#000; border-radius:46px; padding:14px;
+           box-shadow:0 24px 60px rgba(0,0,0,.55), inset 0 0 0 2px #2a2f36; display:flex; flex-direction:column; flex-shrink:0; }
+  .screen { background:var(--paper); color:var(--ink); border-radius:34px; flex:1; display:flex; flex-direction:column; overflow:hidden; }
+  .statusbar { display:flex; justify-content:space-between; padding:12px 24px 4px; font-size:12.5px; font-weight:600; color:var(--ink); }
+  .apphead { padding:4px 18px 8px; display:flex; justify-content:space-between; align-items:center; }
+  .apphead h1 { font-size:17px; color:var(--ink); }
+  .apphead .sub { font-size:12px; color:var(--ink2); }
+  .apphead button { background:none; border:0; color:var(--clay); font-size:12px; cursor:pointer; }
+  .planhead { background:#FBF5EA; border-top:1px solid var(--stroke); border-bottom:1px solid var(--stroke); position:relative; transition:height .25s ease; height:190px; overflow:hidden; }
+  .planhead.collapsed { height:44px; }
+  .planhead svg { width:100%; height:150px; display:block; }
+  .planhead .storeys { position:absolute; top:6px; left:10px; display:flex; gap:4px; }
+  .planhead .storeys button, .planhead .expand { background:#fff; border:1px solid var(--stroke); border-radius:12px; padding:2px 9px; font-size:11px; color:var(--ink); cursor:pointer; }
+  .planhead .storeys button.active { background:var(--clay); color:#fff; border-color:var(--clay); }
+  .planhead .expand { position:absolute; top:6px; right:10px; }
+  .planhead .thumb { position:absolute; bottom:6px; right:10px; width:64px; height:46px; object-fit:cover; border-radius:6px; border:1px solid var(--stroke); }
+  .planhead .roomstrip { display:flex; gap:6px; padding:8px 10px; overflow-x:auto; }
+  .planhead.collapsed svg, .planhead.collapsed .storeys, .planhead.collapsed .thumb { display:none; }
+  .planhead:not(.collapsed) .roomstrip { display:none; }
+  .roomstrip button { flex:0 0 auto; background:#fff; border:1px solid var(--stroke); border-radius:14px; padding:4px 10px; font-size:12px; color:var(--ink); cursor:pointer; white-space:nowrap; }
+  .roomstrip button.active { background:var(--clay); color:#fff; border-color:var(--clay); }
+  svg .room { fill:#fff; stroke:var(--clay); stroke-width:1.2; cursor:pointer; vector-effect:non-scaling-stroke; }
+  svg .room:hover { fill:#F3E6D5; }
+  svg .room.active { fill:#E8CDB8; stroke:var(--brand); stroke-width:2; }
+  svg .room.q { stroke-dasharray:4 3; }
+  svg text { font:11px -apple-system,"Segoe UI",sans-serif; fill:var(--ink); pointer-events:none; text-anchor:middle; }
+  svg text.area { font-size:9px; fill:var(--ink2); }
+  .chat { flex:1; overflow-y:auto; padding:12px 12px 6px; display:flex; flex-direction:column; gap:8px; }
+  .msg { max-width:84%; padding:9px 13px; border-radius:18px; font-size:14.5px; line-height:1.4; white-space:pre-wrap; }
+  .agent { background:#fff; color:var(--ink); border:1px solid var(--stroke); align-self:flex-start; border-bottom-left-radius:6px; }
+  .user { background:var(--brand); color:#fff; align-self:flex-end; border-bottom-right-radius:6px; }
+  .sys { align-self:center; color:var(--ink2); font-size:11.5px; padding:2px 8px; text-align:center; }
+  .typing { color:var(--ink2); font-style:italic; }
+  .draftcard, .quotecard { align-self:stretch; background:#fff; border:1px solid var(--stroke); border-radius:14px; padding:12px 14px; font-size:13.5px; color:var(--ink); }
+  .draftcard h3 { font-size:14px; margin-bottom:4px; }
+  .draftcard ul { margin:6px 0 8px 18px; color:var(--ink2); }
+  .draftcard button { background:var(--brand); border:0; color:#fff; font-weight:600; border-radius:10px; padding:9px 14px; cursor:pointer; font-size:13.5px; width:100%; }
+  .draftcard button:disabled { opacity:.45; }
+  .draftcard .sent { color:#2E7D53; font-weight:600; }
+  .quotecard .row { display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-top:1px dashed var(--stroke); }
+  .quotecard .row:first-of-type { border-top:0; }
+  .quotecard button { background:#fff; border:1px solid var(--clay); color:var(--clay); border-radius:8px; padding:4px 10px; cursor:pointer; font-size:12.5px; }
+  .quotecard button.chosen { background:var(--clay); color:#fff; }
+  .composer { display:flex; gap:8px; padding:10px 12px 14px; border-top:1px solid var(--stroke); background:var(--paper); }
+  .composer input { flex:1; background:#fff; border:1px solid var(--stroke); color:var(--ink); border-radius:20px; padding:10px 14px; font-size:14.5px; outline:none; }
+  .composer button { background:var(--brand); border:0; color:#fff; border-radius:50%; width:40px; height:40px; font-size:17px; cursor:pointer; }
+  .side { width:430px; max-width:100%; display:flex; flex-direction:column; gap:12px; }
+  .card { background:var(--panel); border:1px solid #28313b; border-radius:14px; padding:13px 15px; }
+  .card h2 { font-size:12.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin-bottom:8px; }
+  .kv { display:flex; justify-content:space-between; gap:12px; font-size:13.5px; padding:3px 0; border-bottom:1px dashed #262f38; }
+  .kv:last-child { border-bottom:0; }
+  .kv .k { color:var(--dim); flex-shrink:0; } .kv .v { text-align:right; word-break:break-word; }
+  .pill { padding:1px 9px; border-radius:10px; font-size:12px; white-space:nowrap; }
+  .on { background:rgba(56,193,114,.15); color:var(--good); } .off { background:rgba(224,86,79,.15); color:var(--bad); } .mid { background:rgba(232,161,60,.15); color:var(--warn); }
+  .stepline { font-size:14px; margin-bottom:6px; }
+  .controls { display:flex; flex-direction:column; gap:7px; }
+  .controls button, .toggle, select.pick { background:var(--panel2); color:var(--text); border:1px solid #303b46; border-radius:9px; padding:8px 12px; font-size:13.5px; cursor:pointer; text-align:left; font-family:inherit; width:100%; }
+  .controls button:hover { border-color:var(--accent); } .controls button:disabled { opacity:.4; cursor:default; }
+  .toggle.processing { border-color:var(--warn); } .toggle.complete { border-color:var(--good); }
+  .footnote { color:var(--dim); font-size:11.5px; line-height:1.4; }
+  .rooms { display:grid; gap:4px; }
+  .roomrow { display:flex; justify-content:space-between; gap:8px; font-size:13px; padding:5px 8px; border-radius:8px; background:var(--panel2); cursor:pointer; border:1px solid transparent; }
+  .roomrow:hover { border-color:var(--accent); } .roomrow.active { border-color:var(--good); }
+  .roomrow small { color:var(--dim); display:block; font-size:11.5px; }
+  .roomrow .n { white-space:nowrap; color:var(--dim); font-size:12px; text-align:right; }
+  pre { font:11.5px/1.4 Consolas,monospace; white-space:pre-wrap; word-break:break-word; color:#c9d3dc; max-height:260px; overflow:auto; }
+  details summary { cursor:pointer; color:var(--dim); font-size:12.5px; }
+</style>
+</head>
+<body>
+  <div class="phone"><div class="screen">
+    <div class="statusbar"><span>9:41</span><span>TakeShape</span><span>&#9679;&#9679;&#9679;</span></div>
+    <div class="apphead"><div><h1>Home Guide</h1><div class="sub" id="roomsub">loading your home…</div></div><button id="planToggle" title="Show or hide the plan">plan ▾</button></div>
+    <div class="planhead" id="planhead">
+      <div class="storeys" id="storeys"></div>
+      <svg id="plan" viewBox="0 0 360 150" preserveAspectRatio="xMidYMid meet"></svg>
+      <img class="thumb" id="thumb" alt="" hidden>
+      <div class="roomstrip" id="roomstrip"></div>
+    </div>
+    <div class="chat" id="chat"></div>
+    <form class="composer" id="composer">
+      <input id="box" placeholder="Message" autocomplete="off">
+      <button id="send" type="submit" title="Send">&#8593;</button>
+    </form>
+  </div></div>
+
+  <div class="side">
+    <div class="card">
+      <h2>Home</h2>
+      <select class="pick" id="homePick"></select>
+      <div id="homefacts" class="footnote" style="margin:8px 0 8px"></div>
+      <div class="rooms" id="rooms"></div>
+    </div>
+    <div class="card">
+      <h2>Flow machine (server truth)</h2>
+      <div class="stepline">step <b id="step">–</b> · <span id="stepname">–</span> <span id="wording" style="color:var(--dim);font-size:12px"></span></div>
+      <div class="kv"><span class="k">active room</span><span class="v" id="s-room">–</span></div>
+      <div class="kv"><span class="k">firstName</span><span class="v" id="s-name">–</span></div>
+      <div class="kv"><span class="k">zip</span><span class="v" id="s-zip">–</span></div>
+      <div class="kv"><span class="k">projectType</span><span class="v" id="s-proj">–</span></div>
+      <div class="kv"><span class="k">scope intent</span><span class="v" id="s-scopeintent">–</span></div>
+      <div class="kv"><span class="k">scopeOptions</span><span class="v" id="s-scope">–</span></div>
+      <div class="kv"><span class="k">materials</span><span class="v" id="s-mat">–</span></div>
+      <div class="kv"><span class="k">address</span><span class="v" id="s-addr">–</span></div>
+      <div class="kv"><span class="k">contact</span><span class="v" id="s-contact">–</span></div>
+      <div class="kv"><span class="k">quote request</span><span class="v" id="s-qr">–</span></div>
+    </div>
+    <div class="card">
+      <h2>Gates</h2>
+      <div class="kv"><span class="k">scan processing complete</span><span class="pill off" id="g-scan">no</span></div>
+      <div class="kv"><span class="k">may suggest more scanning (SOW §3)</span><span class="pill off" id="g-prompt">blocked</span></div>
+      <div class="kv"><span class="k">extension prompt mode</span><span class="pill mid" id="g-ext">closed</span></div>
+      <div class="kv"><span class="k">quote request possible</span><span class="pill off" id="g-quote">no</span></div>
+      <div class="kv"><span class="k">can submit (all slots)</span><span class="pill off" id="g-submit">no</span></div>
+    </div>
+    <div class="card controls">
+      <h2>Demo controls</h2>
+      <button class="toggle processing" id="scanToggle">Scan processing: <b>processing</b> — click to complete</button>
+      <button id="btnQuote" disabled>Submit quote request (step 9) — same as the card's Confirm</button>
+      <button id="btnOps" disabled>Operations enters 2 quotes (step 10)</button>
+      <button id="btnNews" disabled>Homeowner asks "any news on my quotes?"</button>
+      <button id="btnReset">Start a fresh conversation</button>
+      <div class="footnote">Same endpoints, context packet, flow-token echo and <code>homeId</code> as the iPhone app. Tapping a room on the plan sends a homeowner message; the server resolves the room.</div>
+    </div>
+    <div class="card" id="opscard" hidden>
+      <h2>What operations receives</h2>
+      <div id="ops"></div>
+      <details style="margin-top:6px"><summary>full package</summary><pre id="opsraw"></pre></details>
+    </div>
+  </div>
+
+<script>
+const qs = new URLSearchParams(location.search);
+const BASE = (qs.get('base') || localStorage.getItem('hg.base') || 'http://127.0.0.1:8010').replace(/\/$/, '');
+const OPS = qs.get('ops') || localStorage.getItem('hg.ops') || 'e2e-ops-token';
+let HOME_ID = qs.get('home') || 'quintin-house';
+const el = (id) => document.getElementById(id);
+const api = (p) => BASE + '/api/v1' + p;
+const opsHeaders = () => ({ 'Authorization': 'Bearer ' + OPS });
+
+let overview = null, homes = [], threadId = null, flowToken = null, messages = [];
+let scanState = 'processing', quoteRequestId = null, lastFlow = null, returnedQuotes = [], sending = false, storey = 1;
+
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function bubble(kind, text) { const d = document.createElement('div'); d.className = 'msg ' + kind; d.textContent = text; el('chat').appendChild(d); el('chat').scrollTop = 1e9; return d; }
+function sys(text) { const d = document.createElement('div'); d.className = 'sys'; d.textContent = text; el('chat').appendChild(d); el('chat').scrollTop = 1e9; }
+function shortName(name) { return name.length > 16 ? name.slice(0, 15) + '…' : name; }
+
+function buildContext() {
+  return {
+    contextVersion: 'home_ai_context_v1', scanId: HOME_ID, roomCount: overview.roomCount, rooms: [],
+    totals: { floorAreaSquareMeters: Math.round(overview.totalAreaSqFt / 10.7639), roomCount: overview.roomCount },
+    floorplanSummary: `${overview.roomCount} captured spaces across ${overview.storeys} level${overview.storeys === 1 ? '' : 's'}, about ${overview.totalAreaSqFt} sq ft.`,
+    meshSummary: { photorealStatus: scanState === 'complete' ? 'ready' : 'processing', keyframeCount: overview.photoCount },
+    selectedKeyframes: [], notes: [],
+  };
+}
+function scanContext() { return { scanId: HOME_ID, processingState: scanState, localModelReady: scanState === 'complete', scanMode: 'new_scan' }; }
+
+// --- the plan at the top of the chat ---------------------------------------
+function renderPlan() {
+  const rooms = overview.rooms || [];
+  const storeys = [...new Set(rooms.map(r => r.storey))].sort((a, b) => a - b);
+  if (!storeys.includes(storey)) storey = storeys[0] ?? 1;
+  // Labelled by order, not by the index's storey number (a two-floor home
+  // can carry storeys 1 and 3 when a landing was folded into the count).
+  el('storeys').innerHTML = storeys.length > 1 ? storeys.map((s, i) => `<button class="${s === storey ? 'active' : ''}" data-s="${s}">${i === 0 ? 'downstairs' : i === storeys.length - 1 ? 'upstairs' : 'floor ' + (i + 1)}</button>`).join('') : '';
+  el('storeys').querySelectorAll('button').forEach(b => b.onclick = () => { storey = Number(b.dataset.s); renderPlan(); });
+  const active = lastFlow?.home?.activeRoom?.key;
+  const here = rooms.filter(r => r.storey === storey && (r.polygon || []).length >= 3);
+  const svg = el('plan'); svg.innerHTML = '';
+  if (here.length) {
+    const pts = here.flatMap(r => r.polygon);
+    const minX = Math.min(...pts.map(p => p[0])), maxX = Math.max(...pts.map(p => p[0]));
+    const minZ = Math.min(...pts.map(p => p[1])), maxZ = Math.max(...pts.map(p => p[1]));
+    const W = 360, H = 150, pad = 10;
+    const scale = Math.min((W - 2 * pad) / Math.max(maxX - minX, .1), (H - 2 * pad) / Math.max(maxZ - minZ, .1));
+    const ox = (W - (maxX - minX) * scale) / 2, oz = (H - (maxZ - minZ) * scale) / 2;
+    const X = x => ox + (x - minX) * scale, Z = z => oz + (z - minZ) * scale;
+    for (const r of here) {
+      const d = r.polygon.map(([x, z], i) => `${i ? 'L' : 'M'}${X(x).toFixed(1)},${Z(z).toFixed(1)}`).join(' ') + ' Z';
+      const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      p.setAttribute('d', d); p.setAttribute('class', 'room' + (r.key === active ? ' active' : '') + (r.confidentName === false ? ' q' : ''));
+      p.addEventListener('click', () => goToRoom(r)); svg.appendChild(p);
+      const cx = r.polygon.reduce((a, p) => a + p[0], 0) / r.polygon.length, cz = r.polygon.reduce((a, p) => a + p[1], 0) / r.polygon.length;
+      const area = (r.areaSqFt || 0) * scale * scale / 10.7639;
+      if (area > 900) {
+        const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        t.setAttribute('x', X(cx)); t.setAttribute('y', Z(cz) + (area > 2400 ? -2 : 4)); t.textContent = shortName(r.name); svg.appendChild(t);
+        if (area > 2400) { const a = document.createElementNS('http://www.w3.org/2000/svg', 'text'); a.setAttribute('class', 'area'); a.setAttribute('x', X(cx)); a.setAttribute('y', Z(cz) + 10); a.textContent = `${Math.round(r.areaSqFt)} sq ft`; svg.appendChild(a); }
+      }
+    }
+  } else {
+    const t = document.createElementNS('http://www.w3.org/2000/svg', 'text'); t.setAttribute('x', 180); t.setAttribute('y', 80); t.textContent = 'no footprint in this index'; svg.appendChild(t);
+  }
+  const thumb = el('thumb'); thumb.hidden = true; thumb.src = `thumbs/${HOME_ID}.jpg`; thumb.onload = () => { thumb.hidden = false; }; thumb.onerror = () => { thumb.hidden = true; };
+  el('roomstrip').innerHTML = '';
+  for (const r of [...rooms].sort((a, b) => (a.storey - b.storey) || ((b.areaSqFt || 0) - (a.areaSqFt || 0)))) {
+    const b = document.createElement('button'); b.textContent = (r.confidentName === false ? '? ' : '') + r.name; b.className = r.key === active ? 'active' : '';
+    b.onclick = () => goToRoom(r); el('roomstrip').appendChild(b);
+  }
+}
+
+function renderRooms() {
+  const active = lastFlow?.home?.activeRoom?.key;
+  const list = [...(overview.rooms || [])].sort((a, b) => (a.storey - b.storey) || ((b.areaSqFt || 0) - (a.areaSqFt || 0)));
+  el('rooms').innerHTML = '';
+  for (const r of list) {
+    const row = document.createElement('div'); row.className = 'roomrow' + (r.key === active ? ' active' : '');
+    row.innerHTML = `<div>${r.confidentName === false ? '<span style="color:var(--warn)">? </span>' : ''}${esc(r.name)}<small>${esc((r.fixtures || []).slice(0, 4).join(', ') || r.nameBasis || '')}</small></div>`
+      + `<div class="n">${Math.round(r.areaSqFt || 0)} sq ft<small>floor ${r.storey} · ${r.photoCount} photos${r.hasModel ? ' · model' : ''}</small></div>`;
+    row.onclick = () => goToRoom(r); el('rooms').appendChild(row);
+  }
+  renderPlan();
+}
+async function goToRoom(room) {
+  if (sending) return;
+  if (room.storey !== storey) { storey = room.storey; }
+  if (!threadId) await openConversation();
+  await send(`Let's look at the ${room.name}.`);
+}
+
+function renderFlow(flow) {
+  lastFlow = flow || null;
+  const s = flow?.slots || {}, g = flow?.gates || {}, h = flow?.home || {};
+  el('step').textContent = flow?.step ?? '–'; el('stepname').textContent = flow?.stepName ?? '–';
+  el('wording').textContent = flow?.wordingId ? '· wording ' + flow.wordingId : '';
+  el('s-room').textContent = h.activeRoom ? `${h.activeRoom.name}${h.activeRoom.confidentName === false ? ' (uncertain)' : ''}` + (h.unresolvedRoom ? ` · asked about "${h.unresolvedRoom}" (not scanned)` : '') : (h.unresolvedRoom ? `"${h.unresolvedRoom}" is not in the scan` : '–');
+  el('s-name').textContent = s.firstName || '–'; el('s-zip').textContent = s.zip || '–'; el('s-proj').textContent = s.projectType || '–';
+  el('s-scopeintent').textContent = (s.scopeIntent || 'undecided') + ((s.scopeRooms || []).length ? ': ' + s.scopeRooms.join(', ') : '');
+  el('s-scope').textContent = (s.scopeOptions || []).join('; ') || '–'; el('s-mat').textContent = (s.materials || []).join(', ') || '–';
+  el('s-addr').textContent = s.addressCaptured ? 'captured (never on the wire)' : '–';
+  el('s-contact').textContent = s.contactCaptured ? 'captured' : '–';
+  el('s-qr').textContent = flow?.quoteRequest ? `${flow.quoteRequest.id} · ${flow.quoteRequest.status} · ${flow.quoteRequest.quotesReturnedCount} returned` : '–';
+  const pill = (id, on, yes, no) => { const e = el(id); e.textContent = on ? yes : no; e.className = 'pill ' + (on ? 'on' : 'off'); };
+  pill('g-scan', !!g.scanProcessingComplete, 'yes', 'no'); pill('g-prompt', !!g.canPromptAdditionalScan, 'allowed', 'blocked');
+  el('g-ext').textContent = g.extensionPromptMode || 'closed'; el('g-ext').className = 'pill ' + (g.extensionPromptMode === 'open' ? 'on' : g.extensionPromptMode === 'closed' ? 'off' : 'mid');
+  pill('g-quote', !!g.canRequestQuote, 'yes', 'no'); pill('g-submit', !!g.canSubmitQuoteRequest, 'yes', 'no');
+  if (flow?.quoteRequest) quoteRequestId = flow.quoteRequest.id;
+  el('btnQuote').disabled = !g.canSubmitQuoteRequest || !!quoteRequestId;
+  el('btnOps').disabled = !quoteRequestId; el('btnNews').disabled = !quoteRequestId;
+  if (h.activeRoom) { const r = (overview.rooms || []).find(x => x.key === h.activeRoom.key); if (r && r.storey !== storey) storey = r.storey; }
+  renderRooms();
+}
+
+function renderDraft(draft) {
+  if (!draft) return;
+  const card = document.createElement('div'); card.className = 'draftcard';
+  card.innerHTML = `<h3>${esc(draft.title || 'Quote request')}</h3><div>${esc(draft.homeownerSummary || '')}</div>`
+    + (draft.scopeNotes?.length ? '<ul>' + draft.scopeNotes.map(n => `<li>${esc(n)}</li>`).join('') + '</ul>' : '')
+    + (draft.missingDetails?.length ? `<div style="color:var(--ink2);font-size:12.5px;margin-bottom:6px">Still needed: ${esc(draft.missingDetails.join(', '))}</div>` : '')
+    + `<button ${lastFlow?.gates?.canSubmitQuoteRequest ? '' : 'disabled'}>Confirm and send to TakeShape</button>`;
+  card.querySelector('button').onclick = submitQuote;
+  el('chat').appendChild(card); el('chat').scrollTop = 1e9;
+}
+
+async function loadHome(id) {
+  HOME_ID = id; history.replaceState(null, '', `?home=${encodeURIComponent(id)}`);
+  const r = await fetch(api('/ops/homes/' + encodeURIComponent(id)), { headers: opsHeaders() });
+  if (!r.ok) { el('roomsub').textContent = `home "${id}" not found (${r.status})`; return false; }
+  overview = await r.json(); storey = 1;
+  el('roomsub').textContent = `${overview.roomCount} spaces · ${overview.totalAreaSqFt} sq ft` + (overview.storeys > 1 ? ` · ${overview.storeys} floors` : '');
+  const m = overview.models || {};
+  el('homefacts').textContent = `${overview.roomCount} areas · ${overview.storeys} floor${overview.storeys === 1 ? '' : 's'} · ${overview.totalAreaSqFt} sq ft · ${overview.photoCount} photos · ${m.stored ?? 0} of ${m.rooms ?? 0} room models stored · ${overview.namedConfidently} rooms named confidently`;
+  el('homePick').value = id; lastFlow = null; renderRooms();
+  return true;
+}
+
+async function openConversation() {
+  threadId = `phone-${HOME_ID.slice(0, 8)}-${Date.now().toString(36)}`; flowToken = null; messages = []; quoteRequestId = null; returnedQuotes = []; lastFlow = null;
+  el('chat').innerHTML = ''; el('opscard').hidden = true; renderRooms();
+  const t = bubble('agent typing', 'Looking at your home…');
+  try {
+    const r = await fetch(api('/ai/home-chat/opening'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadId, homeContext: buildContext(), homeId: HOME_ID, scanContext: scanContext() }) });
+    const data = await r.json(); t.remove();
+    if (!r.ok) { sys('opening failed: ' + JSON.stringify(data).slice(0, 200)); return; }
+    threadId = data.threadId; flowToken = data.flow?.token || null; messages.push(data.message);
+    bubble('agent', data.message.content); renderFlow(data.flow);
+  } catch (e) { t.remove(); sys('backend unreachable: ' + e); }
+}
+
+async function send(text) {
+  text = (text ?? el('box').value).trim(); if (!text || sending) return;
+  sending = true; el('box').value = ''; bubble('user', text);
+  const t = bubble('agent typing', '…');
+  try {
+    const r = await fetch(api('/ai/home-chat'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ threadId, message: text, messages, homeContext: buildContext(), homeId: HOME_ID, scanContext: scanContext(), flowToken: flowToken || undefined }) });
+    const data = await r.json(); t.remove();
+    if (!r.ok) { sys('turn failed: ' + JSON.stringify(data).slice(0, 200)); return; }
+    messages.push({ id: data.message.id, role: 'homeowner', content: text, createdAt: data.message.createdAt }, data.message);
+    flowToken = data.flow?.token || flowToken;
+    bubble('agent', data.message.content + (data.usedFallback ? '  (fallback copy)' : ''));
+    renderFlow(data.flow); renderDraft(data.quoteDraft);
+    if (data.flow?.quoteRequest?.status === 'presented' && returnedQuotes.length) renderQuotes();
+  } catch (e) { t.remove(); sys('backend unreachable: ' + e); }
+  finally { sending = false; }
+}
+
+async function submitQuote() {
+  const r = await fetch(api('/ai/quote-requests'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ threadId, flowToken, confirm: true, homeContext: buildContext() }) });
+  const data = await r.json();
+  if (r.status !== 201) { sys('submit ' + r.status + ': ' + JSON.stringify(data).slice(0, 240)); return; }
+  quoteRequestId = data.quoteRequestId; flowToken = data.flowToken || flowToken;
+  document.querySelectorAll('.draftcard button').forEach(b => b.replaceWith(Object.assign(document.createElement('div'), { className: 'sent', textContent: 'Sent to TakeShape' })));
+  bubble('agent', data.expectations?.copy || 'Your request is on its way to local providers.');
+  el('btnQuote').disabled = true; el('btnOps').disabled = false; el('btnNews').disabled = false;
+  await showOps();
+}
+async function showOps() {
+  if (!quoteRequestId) return;
+  const r = await fetch(api('/ops/quote-requests/' + quoteRequestId), { headers: opsHeaders() });
+  if (!r.ok) { el('ops').textContent = 'ops API said ' + r.status; el('opscard').hidden = false; return; }
+  const v = await r.json(); const p = v.project || {}, m = p.measurements || {};
+  const rows = [['request', v.quoteRequestId], ['homeowner', `${v.homeowner?.firstName || '–'} · ${v.homeowner?.contact?.email || v.homeowner?.contact?.phone || 'no contact'} · zip ${v.homeowner?.zip || '–'}`],
+    ['address', v.addressReleased ? 'RELEASED: ' + v.address : 'withheld until a quote is selected'],
+    ['service', p.serviceType], ['room', p.room || '–'], ['scope of work', p.scope?.label], ['scope options', (p.scopeOptions || []).join('; ')], ['materials', (p.materials || []).join(', ')],
+    ['measurements', m.paintableWallSquareFeet ? `${m.floorAreaSquareFeet} sq ft floor · ${m.paintableWallSquareFeet} sq ft paintable wall` : JSON.stringify(m).slice(0, 80)],
+    ['3D model', v.model?.url ? 'signed link (30 days)' : (v.model?.reason || 'not available')], ['identifiers', 'no thread, homeowner or job id in the package'], ['quotes uploaded', v.quotesUploaded]];
+  el('ops').innerHTML = rows.map(([k, val]) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(val ?? '–')}</span></div>`).join('');
+  el('opsraw').textContent = JSON.stringify(v, null, 1); el('opscard').hidden = false;
+}
+async function opsUploads() {
+  const r = await fetch(api(`/ops/quote-requests/${quoteRequestId}/quotes`), { method: 'POST', headers: { 'Content-Type': 'application/json', ...opsHeaders() },
+    body: JSON.stringify({ quotes: [
+      { providerName: 'Brightline Painting', priceUsd: 2450, notes: 'Walls and trim, two coats low-VOC; can start the week after next' },
+      { providerName: 'Harbor Coatings', priceLowUsd: 2100, priceHighUsd: 2900, notes: 'Range firms up after a site visit' }] }) });
+  if (!r.ok) { sys('ops upload ' + r.status); return; }
+  const q = await fetch(api('/ai/quote-requests/' + quoteRequestId)); if (q.ok) returnedQuotes = (await q.json()).quotes || [];
+  sys('Operations entered two quotes. Ask the agent for news.'); el('btnOps').disabled = true; await showOps();
+}
+function renderQuotes() {
+  const card = document.createElement('div'); card.className = 'quotecard';
+  card.innerHTML = '<b>Your quotes</b>' + returnedQuotes.map(q => `<div class="row"><span>${esc(q.providerName)} · ${q.priceUsd ? '$' + q.priceUsd.toLocaleString() : '$' + (q.priceLowUsd||0).toLocaleString() + '–$' + (q.priceHighUsd||0).toLocaleString()}</span><button data-id="${esc(q.id)}">Choose</button></div>`).join('');
+  card.querySelectorAll('button').forEach(b => b.onclick = async () => {
+    const r = await fetch(api(`/ai/quote-requests/${quoteRequestId}/select`), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ quoteId: b.dataset.id }) });
+    if (r.ok) { b.textContent = 'Chosen'; b.className = 'chosen'; sys('Your address is now shared with this provider only.'); await showOps(); } else sys('select ' + r.status);
+  });
+  el('chat').appendChild(card); el('chat').scrollTop = 1e9;
+}
+
+el('composer').onsubmit = (e) => { e.preventDefault(); send(); };
+el('planToggle').onclick = () => { const p = el('planhead'); p.classList.toggle('collapsed'); el('planToggle').textContent = p.classList.contains('collapsed') ? 'plan ▸' : 'plan ▾'; };
+el('scanToggle').onclick = () => {
+  scanState = scanState === 'complete' ? 'processing' : 'complete';
+  el('scanToggle').className = 'toggle ' + scanState;
+  el('scanToggle').innerHTML = `Scan processing: <b>${scanState}</b> — click to ${scanState === 'complete' ? 'reset' : 'complete'}`;
+  sys(`(scan processing → ${scanState}; the next turn reports it)`);
+};
+el('btnQuote').onclick = submitQuote; el('btnOps').onclick = opsUploads;
+el('btnNews').onclick = () => send('Any news on my quotes?');
+el('btnReset').onclick = openConversation;
+el('homePick').onchange = async () => { if (await loadHome(el('homePick').value)) await openConversation(); };
+
+(async () => {
+  try {
+    const r = await fetch(api('/ops/homes'), { headers: opsHeaders() });
+    homes = r.ok ? ((await r.json()).homes || []) : [];
+    const pick = el('homePick'); pick.innerHTML = '';
+    for (const h of homes) { const o = document.createElement('option'); o.value = h.homeId; o.textContent = `${h.homeId.includes('-') ? 'scan ' + h.homeId.slice(0, 8) : h.homeId} — ${h.roomCount} areas, ${h.totalAreaSqFt} sq ft` + (h.storeyCount > 1 ? `, ${h.storeyCount} floors` : ''); pick.appendChild(o); }
+    if (!homes.some(h => h.homeId === HOME_ID) && homes.length) HOME_ID = homes[0].homeId;
+    if (await loadHome(HOME_ID)) await openConversation();
+  } catch (e) { el('roomsub').textContent = 'backend unreachable'; }
+})();
+</script>
+</body>
+</html>

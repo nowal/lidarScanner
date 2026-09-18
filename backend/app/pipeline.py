@@ -1988,7 +1988,9 @@ def write_rgbd_colored_point_cloud_ply(samples: list[dict], output_path: Path) -
         x, y, z = sample["world"]
         r, g, b = sample["color"]
         lines.append(f"{x:.6f} {y:.6f} {z:.6f} {r} {g} {b}")
-    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # newline="\n": PLY is a Unix-newline format; the platform default would
+    # write CRLF on Windows and break strict parsers.
+    output_path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return {
         "path": output_path.name,
         "format": "ply",

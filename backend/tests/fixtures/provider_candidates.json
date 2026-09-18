@@ -1,0 +1,201 @@
+{
+  "_note": "Fictional provider rows shaped like the durable flow_partners table, for ranking tests. Names, numbers and links are invented; none is a real business or a TakeShape partner. This is NOT demo_assets/partners_seed.json and must not be used to seed a deployment.",
+  "rows": [
+    {
+      "name": "Cumberland Coatings",
+      "serviceTypes": ["Painting"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "phone": "(615) 555-0140", "website": "https://cumberlandcoatings.example",
+      "relationship": "prospect", "source": "google_places",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=1001", "rating": 4.8,
+         "reviewCount": 412, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T14:02:11+00:00", "placeId": "ChIJfixture1001"}
+      ]
+    },
+    {
+      "name": "Belmont Brush Co.",
+      "serviceTypes": ["Painting"], "zips": ["37212"], "zipPrefixes": ["372"],
+      "phone": "(615) 555-0141", "website": "https://belmontbrush.example",
+      "relationship": "prospect", "source": "google_places",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=1002", "rating": 4.5,
+         "reviewCount": 95, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T14:02:11+00:00", "placeId": "ChIJfixture1002"},
+        {"platform": "yelp", "profileUrl": "https://www.yelp.com/biz/belmont-brush-co-nashville", "rating": 4.0,
+         "reviewCount": 22, "followerCount": null, "source": "ops_entry",
+         "lastVerifiedAt": "2026-09-01T09:00:00+00:00"},
+        {"platform": "facebook", "profileUrl": "https://www.facebook.com/belmontbrushco", "rating": null,
+         "reviewCount": null, "followerCount": 1200, "source": "ops_entry",
+         "lastVerifiedAt": "2026-09-01T09:00:00+00:00"},
+        {"platform": "instagram", "profileUrl": "https://www.instagram.com/belmontbrushco/", "rating": null,
+         "reviewCount": null, "followerCount": 800, "source": "ops_entry",
+         "lastVerifiedAt": "2026-09-01T09:00:00+00:00"}
+      ]
+    },
+    {
+      "name": "Twelve South Painting",
+      "serviceTypes": ["Painting"], "zips": ["37204"], "zipPrefixes": ["372"],
+      "relationship": "prospect", "source": "google_places",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=1003", "rating": 5.0,
+         "reviewCount": 3, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T14:02:11+00:00", "placeId": "ChIJfixture1003"}
+      ]
+    },
+    {
+      "name": "Harpeth Finishes",
+      "serviceTypes": ["Painting"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "phone": "(615) 555-0143",
+      "relationship": "prospect", "source": "google_places",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=1004", "rating": 4.6,
+         "reviewCount": 150, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T14:02:11+00:00", "placeId": "ChIJfixture1004"}
+      ]
+    },
+    {
+      "name": "Music City Paint Pros",
+      "serviceTypes": ["Painting"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "phone": "(615) 555-0145", "providerId": "prov-fixture-5",
+      "relationship": "quoted", "source": "returned_quote",
+      "quotedCount": 3, "lastQuotedAt": "2026-09-06T17:40:00+00:00",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=1005", "rating": 3.8,
+         "reviewCount": 3, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T14:02:11+00:00", "placeId": "ChIJfixture1005"}
+      ]
+    },
+    {
+      "name": "Riverbend Interiors",
+      "serviceTypes": ["Painting"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "contactName": "Jordan", "phone": "(615) 555-0146", "email": "hello@riverbend.example",
+      "relationship": "partner"
+    },
+    {
+      "name": "Nolensville Wall Works",
+      "serviceTypes": ["Painting"], "zips": ["37211"], "zipPrefixes": ["372"],
+      "relationship": "prospect", "source": "sheet:providers",
+      "presences": [
+        {"platform": "yelp", "profileUrl": "https://www.yelp.com/biz/nolensville-wall-works", "rating": null,
+         "reviewCount": null, "followerCount": null, "source": "web_search_profile_link",
+         "lastVerifiedAt": "2026-09-08T14:05:00+00:00"}
+      ]
+    },
+
+    {
+      "name": "Sparkle & Co. Cleaning",
+      "serviceTypes": ["Interior Cleaning"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "relationship": "quoted", "source": "returned_quote",
+      "quotedCount": 1, "lastQuotedAt": "2026-09-05T11:00:00+00:00"
+    },
+    {
+      "name": "Germantown Home Care",
+      "serviceTypes": ["Interior Cleaning"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "relationship": "prospect", "source": "sheet:providers"
+    },
+    {
+      "name": "Fresh Nest Cleaning",
+      "serviceTypes": ["Interior Cleaning"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "contactName": "Riley", "relationship": "partner"
+    },
+
+    {
+      "name": "Hardwood Haven",
+      "serviceTypes": ["Flooring"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "relationship": "prospect", "source": "google_places",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=2001", "rating": 4.7,
+         "reviewCount": 210, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T14:10:00+00:00", "placeId": "ChIJfixture2001"}
+      ]
+    },
+    {
+      "name": "Plank & Grain",
+      "serviceTypes": ["Flooring"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "relationship": "prospect", "source": "google_places",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=2002", "rating": 4.3,
+         "reviewCount": 40, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T14:10:00+00:00", "placeId": "ChIJfixture2002"}
+      ]
+    },
+
+    {
+      "name": "Duck River Pressure Washing",
+      "serviceTypes": ["Power Washing"], "zips": ["37033"], "zipPrefixes": ["370"],
+      "phone": "(931) 555-0170",
+      "relationship": "prospect", "source": "google_places",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=4001", "rating": 4.9,
+         "reviewCount": 7, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T15:20:00+00:00", "placeId": "ChIJfixture4001"}
+      ]
+    },
+    {
+      "name": "Hickman County Exteriors",
+      "serviceTypes": ["Power Washing"], "zips": ["37033"], "zipPrefixes": ["370"],
+      "relationship": "prospect", "source": "sheet:providers"
+    },
+
+    {
+      "name": "Crystal Pane Window Co.",
+      "serviceTypes": ["Window Cleaning"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "phone": "(615) 555-0180", "website": "https://crystalpane.example",
+      "relationship": "prospect", "source": "google_places",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=5001", "rating": 4.9,
+         "reviewCount": 388, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T15:30:00+00:00", "placeId": "ChIJfixture5001"},
+        {"platform": "nextdoor", "profileUrl": "https://nextdoor.com/pages/crystal-pane-window-co", "rating": null,
+         "reviewCount": null, "followerCount": null, "source": "web_search_profile_link",
+         "lastVerifiedAt": "2026-09-08T15:31:00+00:00"}
+      ]
+    },
+    {
+      "name": "Shine Squad Nashville",
+      "serviceTypes": ["Window Cleaning"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "phone": "(615) 555-0181", "providerId": "prov-fixture-11",
+      "relationship": "quoted", "source": "returned_quote",
+      "quotedCount": 4, "lastQuotedAt": "2026-09-04T13:15:00+00:00",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=5002", "rating": 3.4,
+         "reviewCount": 41, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T15:30:00+00:00", "placeId": "ChIJfixture5002"},
+        {"platform": "yelp", "profileUrl": "https://www.yelp.com/biz/shine-squad-nashville", "rating": null,
+         "reviewCount": null, "followerCount": null, "source": "web_search_profile_link",
+         "lastVerifiedAt": "2026-09-08T15:31:00+00:00"}
+      ]
+    },
+    {
+      "name": "Glasshouse Social Cleaning",
+      "serviceTypes": ["Window Cleaning"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "website": "https://glasshousesocial.example",
+      "relationship": "prospect", "source": "sheet:providers",
+      "presences": [
+        {"platform": "instagram", "profileUrl": "https://www.instagram.com/glasshousesocial/", "rating": null,
+         "reviewCount": null, "followerCount": 5400, "source": "ops_entry",
+         "lastVerifiedAt": "2026-09-02T09:00:00+00:00"},
+        {"platform": "facebook", "profileUrl": "https://www.facebook.com/glasshousesocial", "rating": null,
+         "reviewCount": null, "followerCount": 2100, "source": "ops_entry",
+         "lastVerifiedAt": "2026-09-02T09:00:00+00:00"}
+      ]
+    },
+    {
+      "name": "Cumberland Glass Care",
+      "serviceTypes": ["Window Cleaning"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "contactName": "Morgan", "phone": "(615) 555-0183", "email": "hello@cumberlandglass.example",
+      "relationship": "partner"
+    },
+
+    {
+      "name": "Deckwise Nashville",
+      "serviceTypes": ["Decking"], "zips": ["37203"], "zipPrefixes": ["372"],
+      "relationship": "prospect", "source": "google_places",
+      "presences": [
+        {"platform": "google", "profileUrl": "https://maps.google.com/?cid=3001", "rating": 4.9,
+         "reviewCount": 61, "followerCount": null, "source": "google_places_api",
+         "lastVerifiedAt": "2026-09-08T14:12:00+00:00", "placeId": "ChIJfixture3001"}
+      ]
+    }
+  ]
+}

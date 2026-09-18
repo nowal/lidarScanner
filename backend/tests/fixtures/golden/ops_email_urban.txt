@@ -1,0 +1,61 @@
+Subject: New quote request: Painting — kitchen in 37203 (Dana) — qr_sample_urban
+
+Quote request qr_sample_urban · submitted 2026-09-09T14:30:00+00:00
+
+HOMEOWNER
+  Name: Dana
+  Email: dana@example.com
+  Phone: (615) 555-0100
+  Zip: 37203
+  Address: withheld until the homeowner selects a quote (release policy)
+
+PROJECT
+  Service: Painting
+  Scope of work: one room (kitchen)
+  Room: kitchen
+  Scope: walls + trim; ceiling
+  Materials: low-VOC eggshell
+  Synopsis: Dana wants the kitchen repainted in a warm off-white with the trim in semi-gloss, ideally before the holidays. Asked whether the ceiling should be done at the same time.
+
+MEASUREMENTS
+  Floor area: ~214 sq ft
+  Windows: 2
+    - kitchen (~214 sq ft)
+  wallCount: 4
+  windowCount: 2
+
+3D MODEL
+  https://storage.example.com/home-assets/flow-models/sample.usdz?token=sample
+  (Signed link, valid ~30 days; no credentials needed.)
+
+SUGGESTED PROVIDERS
+  Ranked by review and social presence (partners tagged; scores explained per row):
+    1. Cumberland Coatings | prospect from google_places | (615) 555-0140 | https://cumberlandcoatings.example | score 0.95
+       Google: 4.8 stars, 412 reviews (verified 2026-09-08) https://maps.google.com/?cid=1001
+    2. Belmont Brush Co. | prospect from google_places | (615) 555-0141 | https://belmontbrush.example | score 0.85
+       Google: 4.5 stars, 95 reviews (verified 2026-09-08) https://maps.google.com/?cid=1002
+       Yelp: 4.0 stars, 22 reviews (verified 2026-09-01) https://www.yelp.com/biz/belmont-brush-co-nashville
+       Facebook: 1200 followers (verified 2026-09-01) https://www.facebook.com/belmontbrushco
+       Instagram: 800 followers (verified 2026-09-01) https://www.instagram.com/belmontbrushco/
+       multi-platform +0.15
+    3. Harpeth Finishes | prospect from google_places | (615) 555-0143 | score 0.84
+       Google: 4.6 stars, 150 reviews (verified 2026-09-08) https://maps.google.com/?cid=1004
+    4. [PAST QUOTER x3] Music City Paint Pros | quoted 3x through TakeShape | (615) 555-0145 | score 0.64
+       Google: 3.8 stars, 3 reviews (verified 2026-09-08) https://maps.google.com/?cid=1005
+       quoted boost +0.19
+    5. Twelve South Painting | prospect from google_places | score 0.47
+       Google: 5.0 stars, 3 reviews (verified 2026-09-08) https://maps.google.com/?cid=1003
+    6. Riverbend Interiors | TakeShape partner | contact Jordan | (615) 555-0146 | hello@riverbend.example
+       no review or social data on file
+    7. Nolensville Wall Works | prospect from sheet:providers
+       Yelp: profile link only (verified 2026-09-08) https://www.yelp.com/biz/nolensville-wall-works
+       profile links only, no numbers on file
+    8. Found Online Painting LLC | found online, unvetted | (615) 555-0199 | https://foundonlinepainting.example
+       no review or social data on file
+  Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
+
+ENTER THE CHECKED QUOTE
+  Set LIDARAI_PUBLIC_BASE_URL to include a one-click entry link here;
+  until then, upload via the ops API (OPS_GUIDE.md).
+
+The homeowner has been told their request is going out to local providers and that quotes come back in the app — no exact turnaround promised, and the people doing the checking are not named to them. The app shows no price until this quote is entered.

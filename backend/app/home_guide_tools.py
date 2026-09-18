@@ -7,11 +7,39 @@ from typing import Any
 KNOWN_SERVICE_TYPES = [
     "Painting",
     "Flooring",
+    "Interior Remodeling",
+    "Window & Door Install",
+    "Handyman",
     "Interior Cleaning",
     "Decking",
+    "Roofing & Siding",
     "Window Cleaning",
+    "Gutter Cleaning",
     "Power Washing",
+    "Moving",
+    "Junk Removal",
 ]
+
+# What an interior LiDAR walk can actually measure for a trade. The lead
+# package carries room measurements, so a trade priced off the exterior
+# envelope (roof pitch, siding elevation, gutter runs) gets a conversation
+# and a provider visit, not numbers we do not have. Recorded here so the
+# lead package and the rubric work can both read it from one place.
+SCAN_SUPPORT = {
+    "Painting": "measured",
+    "Flooring": "measured",
+    "Interior Remodeling": "measured",
+    "Window & Door Install": "measured",
+    "Handyman": "measured",
+    "Interior Cleaning": "measured",
+    "Moving": "measured",
+    "Junk Removal": "measured",
+    "Window Cleaning": "partial",
+    "Decking": "partial",
+    "Roofing & Siding": "exterior",
+    "Gutter Cleaning": "exterior",
+    "Power Washing": "exterior",
+}
 
 
 def get_service_catalog(zip_code: str | None = None) -> list[dict[str, Any]]:
@@ -20,54 +48,149 @@ def get_service_catalog(zip_code: str | None = None) -> list[dict[str, Any]]:
     This is intentionally not provider availability. Availability must come from
     the marketplace data after the homeowner chooses to look for providers.
     """
+    availability = None if not zip_code else "unknown_until_provider_lookup"
     return [
         {
-            "serviceType": "Painting",
-            "availableInZipCode": None if not zip_code else "unknown_until_provider_lookup",
-            "scopeExamples": ["walls", "trim", "ceilings", "room refresh"],
-        },
-        {
-            "serviceType": "Flooring",
-            "availableInZipCode": None if not zip_code else "unknown_until_provider_lookup",
-            "scopeExamples": ["replacement", "repair", "refinishing", "material planning"],
-        },
-        {
-            "serviceType": "Interior Cleaning",
-            "availableInZipCode": None if not zip_code else "unknown_until_provider_lookup",
-            "scopeExamples": ["deep clean", "move-in clean", "post-project clean"],
-        },
-        {
-            "serviceType": "Decking",
-            "availableInZipCode": None if not zip_code else "unknown_until_provider_lookup",
-            "scopeExamples": ["deck repair", "refresh", "replacement"],
-        },
-        {
-            "serviceType": "Window Cleaning",
-            "availableInZipCode": None if not zip_code else "unknown_until_provider_lookup",
-            "scopeExamples": ["interior", "exterior", "glass cleaning"],
-        },
-        {
-            "serviceType": "Power Washing",
-            "availableInZipCode": None if not zip_code else "unknown_until_provider_lookup",
-            "scopeExamples": ["siding", "patio", "driveway", "outdoor surfaces"],
-        },
+            "serviceType": service,
+            "availableInZipCode": availability,
+            "scopeExamples": list(examples),
+            "scanSupport": SCAN_SUPPORT.get(service, "partial"),
+        }
+        for service, examples in _SCOPE_EXAMPLES.items()
     ]
 
 
-def detect_service_type(message: str) -> str | None:
-    text = message.lower()
-    service_keywords = [
-        ("Painting", ["paint", "painting", "color", "walls", "trim", "ceiling"]),
-        ("Flooring", ["floor", "flooring", "hardwood", "tile", "carpet", "vinyl"]),
-        ("Interior Cleaning", ["deep clean", "cleaning", "clean", "dust", "move-in"]),
-        ("Decking", ["deck", "decking", "porch", "railing"]),
-        ("Window Cleaning", ["window", "windows", "glass"]),
-        ("Power Washing", ["pressure wash", "power wash", "siding", "driveway", "patio"]),
-    ]
-    for service, keywords in service_keywords:
-        if any(keyword in text for keyword in keywords):
+# Scope examples double as the starting point for TakeShape's per-service
+# rubrics (Quintin, Sep 11): the quirks a homeowner would not assume are
+# exactly what a rubric has to settle, so they belong next to the service.
+_SCOPE_EXAMPLES: dict[str, tuple[str, ...]] = {
+    "Painting": ("walls", "trim", "ceilings", "doors", "room refresh"),
+    "Flooring": ("replacement", "repair", "refinishing", "material planning"),
+    "Interior Remodeling": (
+        "kitchen remodel", "bathroom remodel", "built-ins", "layout changes",
+    ),
+    "Window & Door Install": (
+        "window replacement", "interior doors", "exterior doors", "patio doors",
+    ),
+    "Handyman": ("drywall patching", "fixture swaps", "small repairs", "mounting"),
+    "Interior Cleaning": (
+        "deep clean", "recurring maid service", "move-in clean", "post-project clean",
+    ),
+    "Decking": ("deck repair", "refresh", "replacement"),
+    "Roofing & Siding": ("roof repair", "roof replacement", "siding", "gutter install"),
+    "Window Cleaning": (
+        "interior glass", "exterior glass", "screens", "sills and tracks",
+    ),
+    "Gutter Cleaning": ("clearing", "downspout flush", "guard check"),
+    "Power Washing": ("siding", "patio", "driveway", "walkways"),
+    "Moving": ("local move", "packing", "loading", "furniture only"),
+    "Junk Removal": ("single item", "whole room", "garage clear-out", "haul away"),
+}
+
+
+# Distinctive phrases. The LONGEST match wins, not the first service in the
+# list: with thirteen trades the same word belongs to several of them
+# ("clean my windows" is window cleaning, "gutters need cleaning" is gutter
+# cleaning, and neither is interior cleaning), and ordering a flat list so
+# that every pair comes out right is not possible.
+_STRONG_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "Painting": ("paint", "painting", "repaint", "primer", "accent wall"),
+    "Flooring": (
+        "floor", "flooring", "hardwood", "laminate", "carpet", "vinyl plank",
+        "lvp", "subfloor", "refinish the floor", "tile floor",
+    ),
+    "Interior Remodeling": (
+        "remodel", "renovat", "reno ", "gut ", "tear out", "knock down a wall",
+        "new kitchen", "new bathroom", "built-ins", "addition",
+    ),
+    "Window & Door Install": (
+        "new window", "replace the window", "replace windows", "window replacement",
+        "window install", "door install", "install a door", "replace the door",
+        "new door", "patio door", "storm door", "sliding door",
+    ),
+    "Handyman": (
+        "handyman", "odd job", "small repair", "drywall patch", "patch the drywall",
+        "hang a", "mount the", "punch list",
+    ),
+    "Interior Cleaning": (
+        "deep clean", "maid", "housekeep", "house cleaning", "clean the house",
+        "move-in clean", "move out clean", "post-construction clean",
+    ),
+    "Decking": ("deck", "decking", "railing", "porch board"),
+    "Roofing & Siding": (
+        "roof", "roofing", "shingle", "siding", "soffit", "fascia",
+        "new gutters", "gutter install", "gutter repair",
+    ),
+    "Window Cleaning": (
+        "window clean", "clean the window", "clean my window", "wash the window",
+        "washing the window", "glass clean", "clean the glass", "window washing",
+        "window", "windows",
+    ),
+    "Gutter Cleaning": (
+        "gutter clean", "clean the gutter", "clear the gutter", "gutters cleaned",
+        "downspout", "gutter",
+    ),
+    "Power Washing": (
+        "pressure wash", "power wash", "soft wash", "driveway", "walkway",
+    ),
+    "Moving": (
+        "moving company", "movers", "move out", "move in", "relocat", "packing",
+        "pack up", "moving quote",
+    ),
+    "Junk Removal": (
+        "junk", "haul away", "hauling", "dumpster", "declutter", "clear out",
+        "get rid of",
+    ),
+}
+
+# Generic words that only decide the trade when nothing distinctive matched.
+# "the walls" is painting unless something better is on the table; "broken"
+# is a handyman job unless a real trade was named.
+_WEAK_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "Painting": ("color", "colour", "walls", "trim", "ceiling"),
+    "Handyman": ("fix", "repair", "broken", "leaking", "sticking"),
+    "Interior Cleaning": ("cleaning", "clean", "dust", "tidy"),
+}
+
+
+def detect_service_type(message: str, *, strong_only: bool = False) -> str | None:
+    """``strong_only`` skips the weak words. A guess from a whole homeowner
+    message needs it: "blue is the color direction" about a sofa is not a
+    paint job (Sep 15, #78)."""
+    text = (message or "").lower()
+    if not text:
+        return None
+    best_service: str | None = None
+    best_length = 0
+    for service in KNOWN_SERVICE_TYPES:
+        for keyword in _STRONG_KEYWORDS.get(service, ()):
+            if keyword in text and len(keyword) > best_length:
+                best_service, best_length = service, len(keyword)
+    if best_service is not None or strong_only:
+        return best_service
+    for service in KNOWN_SERVICE_TYPES:
+        if any(keyword in text for keyword in _WEAK_KEYWORDS.get(service, ())):
             return service
     return None
+
+
+def normalize_service_type(value: str | None) -> str | None:
+    """Map free text onto the known service catalog.
+
+    The model captures the homeowner's own words ("kitchen repaint", "a
+    refresh"), which read fine in a conversation and are useless for
+    matching: provider lookup keys off the catalog, so an unnormalized
+    value silently matches no partner at all. Returns None when nothing in
+    the catalog fits, so the caller can keep the raw phrase rather than
+    guess a trade.
+    """
+    if not value:
+        return None
+    text = value.strip()
+    for known in KNOWN_SERVICE_TYPES:
+        if known.lower() == text.lower():
+            return known
+    return detect_service_type(text)
 
 
 def quote_intent_detected(message: str) -> bool:

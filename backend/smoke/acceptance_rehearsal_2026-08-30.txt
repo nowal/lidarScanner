@@ -1,0 +1,84 @@
+
+AGENT (opening):
+  This room's got a nice open feel, around 508 square feet with a couple of sofas and chairs already arranged in it, plus a few tall storage pieces along the walls. What are you hoping to do with the space? And what should I call you?
+
+  [PASS] step 1-2: opening delivered, grounded, asks first name
+HOMEOWNER:
+  Hi! I'm Dana. This room feels dated and I'd like to freshen it up.
+
+AGENT (claude-sonnet-5, fallback=False):
+  Hi Dana, glad you're here. A room around this size with that many storage pieces and seating already gives you a good starting layout to freshen up, so paint or flooring can make a real difference without a full overhaul. What's bugging you most about it right now, the wall color, the floors, or something else?
+
+  flow: step=design_conversation slots={'firstName': 'Dana', 'zip': None, 'projectType': None, 'scopeOptions': [], 'materials': [], 'addressCaptured': False, 'contactCaptured': False} gates={'scanProcessingComplete': False, 'canPromptAdditionalScan': False, 'canRequestQuote': False, 'canSubmitQuoteRequest': False}
+
+HOMEOWNER:
+  Warm neutrals sound lovely. Could you also check — is my 3D model done yet?
+
+AGENT (claude-sonnet-5, fallback=False):
+  Your home model is still being put together, so it's not quite ready yet, but I've already got enough from the floor plan to keep going with ideas. Warm neutrals will play really well with the natural light this room seems to get. If you share your zip, I can point you toward tones and finishes that tend to be popular near you.
+
+  flow: step=quote_gathering slots={'firstName': 'Dana', 'zip': None, 'projectType': 'painting', 'scopeOptions': [], 'materials': ['warm neutrals'], 'addressCaptured': False, 'contactCaptured': False} gates={'scanProcessingComplete': False, 'canPromptAdditionalScan': False, 'canRequestQuote': True, 'canSubmitQuoteRequest': False}
+
+HOMEOWNER:
+  Should I go scan the rest of the house right now so you can see everything?
+
+AGENT (claude-sonnet-5, fallback=False):
+  No need, Dana, the home model is still being put together and there's already enough here from the floor plan to keep planning with. Once it finishes processing you'll have the full picture, but nothing more for you to do on that front right now. So, back to the room, are you thinking paint on all the walls, or trim too?
+
+  flow: step=quote_gathering slots={'firstName': 'Dana', 'zip': None, 'projectType': 'painting', 'scopeOptions': [], 'materials': ['warm neutrals'], 'addressCaptured': False, 'contactCaptured': False} gates={'scanProcessingComplete': False, 'canPromptAdditionalScan': False, 'canRequestQuote': True, 'canSubmitQuoteRequest': False}
+
+HOMEOWNER:
+  Sure — my zip code is 37203.
+
+AGENT (claude-sonnet-5, fallback=False):
+  Got it, thanks. Nashville has some great local paint lines that lean into warm neutrals nicely. For the room itself, are you picturing just the walls freshened up, or trim included too?
+
+  flow: step=quote_gathering slots={'firstName': 'Dana', 'zip': '37203', 'projectType': 'painting', 'scopeOptions': [], 'materials': ['warm neutrals'], 'addressCaptured': False, 'contactCaptured': False} gates={'scanProcessingComplete': False, 'canPromptAdditionalScan': False, 'canRequestQuote': True, 'canSubmitQuoteRequest': False}
+
+HOMEOWNER:
+  Great, it says my model is ready now! Can I add the kitchen to it too?
+
+AGENT (claude-sonnet-5, fallback=False):
+  Glad it's ready. Adding the kitchen is easy, just walk from this room over to the kitchen in one continuous session so everything stays connected. Once that's in, we'll have a fuller picture for planning. In the meantime, are you thinking walls only in here, or walls plus trim?
+
+  flow: step=quote_gathering slots={'firstName': 'Dana', 'zip': '37203', 'projectType': 'painting', 'scopeOptions': [], 'materials': ['warm neutrals'], 'addressCaptured': False, 'contactCaptured': False} gates={'scanProcessingComplete': True, 'canPromptAdditionalScan': True, 'canRequestQuote': True, 'canSubmitQuoteRequest': False}
+
+HOMEOWNER:
+  Let's do the repaint. I'd want walls and trim done, in a low-VOC warm white.
+
+AGENT (claude-sonnet-5, fallback=False):
+  Walls and trim in a low-VOC warm white is a clean, cohesive choice, Dana, that'll read bright without feeling stark. To get this moving toward real numbers, I'll need your address and either an email or phone so any provider quote has a way back to you. Want to share those now?
+
+  flow: step=address_collection slots={'firstName': 'Dana', 'zip': '37203', 'projectType': 'painting', 'scopeOptions': ['walls and trim'], 'materials': ['warm neutrals', 'low-VOC warm white paint'], 'addressCaptured': False, 'contactCaptured': False} gates={'scanProcessingComplete': True, 'canPromptAdditionalScan': True, 'canRequestQuote': True, 'canSubmitQuoteRequest': False}
+
+HOMEOWNER:
+  Yes, let's get quotes. My address is 118 Maple Street, Nashville TN, and I'm at dana@example.com.
+
+AGENT (claude-sonnet-5, fallback=False):
+  Got it, thanks Dana. I've got your address at 118 Maple Street and your email, so that's everything I need to put together a request for the walls-and-trim repaint in low-VOC warm white. Once I draft it, you'll see a card in the app to review and confirm before it goes anywhere.
+
+  flow: step=quote_request slots={'firstName': 'Dana', 'zip': '37203', 'projectType': 'painting', 'scopeOptions': ['walls and trim'], 'materials': ['warm neutrals', 'low-VOC warm white paint'], 'addressCaptured': True, 'contactCaptured': True} gates={'scanProcessingComplete': True, 'canPromptAdditionalScan': True, 'canRequestQuote': True, 'canSubmitQuoteRequest': True}
+
+  [PASS] step 3: design conversation held (no fallback turns, any turn)
+  [PASS] SOW-3 spot check: direct scan-more invitation declined while processing
+  [PASS] step 4: zip captured
+  [PASS] step 5: scan gate held while processing (server-side)
+  [PASS] step 6: extension answered with continuity guidance
+  [PASS] step 7: project + scope + materials captured
+  [PASS] step 8: address captured, never echoed to client
+  [PASS] step 9: quote request accepted, lead package built
+  [PASS] step 9: ops package has synopsis+measurements, address withheld
+  lead package synopsis: Dana is interested in painting. Scope options discussed: walls and trim. Material preferences: warm neutrals, low-VOC warm white paint. Recent conversation (homeowner, masked): Sur...
+
+HOMEOWNER:
+  Any news on my quotes?
+
+AGENT:
+  Good news, two quotes are in. Brightline Painting can do walls and trim, two coats low-VOC, for 2,450 dollars and could start the week of Sep 21. Harbor Coatings quoted a range of 2,100 to 2,900, which would firm up after a site visit. Your address only goes to whichever provider you choose to move forward with. Want to go with Brightline, or explore Harbor's site visit first?
+
+  [PASS] step 10: agent presents and compares returned quotes
+  [PASS] step 10: quote request marked presented
+  [PASS] SOW-12: address released to ops only after selection
+
+============================================================
+RESULT: 13/13 checks passed

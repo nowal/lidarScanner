@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 from pathlib import Path
@@ -33,12 +34,27 @@ from .home_ai import (
     generate_home_ai_response,
     record_home_ai_event,
 )
+from .flow_api import router as flow_router, homeowner_id_from_header
+from .flow_runtime import run_flow_turn
+
+try:  # The browser demo layer is optional: a delivery build may omit it.
+    from .flow_demo import router as demo_router
+except ImportError:  # pragma: no cover
+    demo_router = None
 from .store import store
 
 configure_logging(settings.storage_dir)
 logger = logging.getLogger("lidarai.api")
 
+from .armor import MaxBodyMiddleware, RateLimitMiddleware
+from .metrics import RequestMetricsMiddleware
+
 app = FastAPI(title="LidarAI Processor", version="1.0.0")
+app.add_middleware(RequestMetricsMiddleware)
+# Outermost of the three: a refused request costs no work downstream, and
+# an oversized body is refused before anything reads it.
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(MaxBodyMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",")],
@@ -48,17 +64,135 @@ app.add_middleware(
 )
 
 
-def require_token(authorization: Optional[str] = Header(default=None)) -> None:
+def require_token(
+    authorization: Optional[str] = Header(default=None),
+    x_service_token: Optional[str] = Header(default=None),
+) -> None:
     if not settings.auth_token:
         return
+    # X-Service-Token is an alternate carrier for browser contexts where the
+    # Authorization header is occupied by HTTP Basic (the shared demo).
+    if hmac.compare_digest(x_service_token or "", settings.auth_token):
+        return
     expected = f"Bearer {settings.auth_token}"
-    if authorization != expected:
+    if not hmac.compare_digest(authorization or "", expected):
         raise HTTPException(status_code=401, detail="Invalid auth token")
 
 
-@app.get("/health", response_model=HealthResponse)
+app.include_router(flow_router)
+if demo_router is not None:
+    app.include_router(demo_router)
+
+
+def config_problems() -> list[str]:
+    """Misconfigurations that would otherwise degrade silently: a service
+    that answers with canned fallback copy, serves unauthenticated, or loses
+    every journal row still reports a healthy HTTP 200."""
+    problems: list[str] = []
+    if not settings.auth_token:
+        problems.append("LIDARAI_AUTH_TOKEN unset — homeowner endpoints are UNAUTHENTICATED")
+    if settings.ai_provider == "anthropic" and not settings.anthropic_api_key:
+        problems.append(
+            "LIDARAI_AI_PROVIDER=anthropic but LIDARAI_ANTHROPIC_API_KEY unset — "
+            "every turn will use the canned local fallback"
+        )
+    if settings.ai_provider == "openai" and not settings.openai_api_key:
+        problems.append(
+            "LIDARAI_AI_PROVIDER=openai but LIDARAI_OPENAI_API_KEY unset — "
+            "every turn will use the canned local fallback"
+        )
+    if not (settings.flow_token_secret or settings.auth_token):
+        problems.append(
+            "no LIDARAI_FLOW_TOKEN_SECRET (or auth token) — flow tokens use a "
+            "per-process secret and will not survive restarts"
+        )
+    if not (settings.supabase_url and settings.supabase_service_role_key):
+        problems.append(
+            "LIDARAI_SUPABASE_URL/SERVICE_ROLE_KEY unset — flow state, journal, "
+            "and quote requests are ephemeral (SOW §4 logging degraded)"
+        )
+    if not settings.ops_token:
+        problems.append("LIDARAI_OPS_TOKEN unset — the ops API is disabled (503)")
+    if not settings.supabase_jwt_secret:
+        problems.append(
+            "LIDARAI_SUPABASE_JWT_SECRET unset — X-Homeowner-Token is ignored: every "
+            "homeowner is anonymous, signed-in submits need contact details captured "
+            "in chat, and their quote requests are readable with the service token alone"
+        )
+    return problems
+
+
+_startup_problems = config_problems()
+for _problem in _startup_problems:
+    logger.warning("CONFIG: %s", _problem)
+if settings.strict_config and _startup_problems:
+    raise RuntimeError(
+        "LIDARAI_STRICT_CONFIG is set and configuration is incomplete: "
+        + "; ".join(_startup_problems)
+    )
+
+
+@app.get("/health", response_model=HealthResponse, response_model_exclude_none=True)
 async def health() -> HealthResponse:
-    return HealthResponse(status="ok", time=now_utc())
+    from .provider_health import provider_health
+
+    problems = config_problems()
+    provider = provider_health.snapshot()
+    return HealthResponse(
+        status="degraded" if (problems or provider["status"] == "degraded") else "ok",
+        time=now_utc(),
+        configWarnings=problems or None,
+        provider=provider,
+    )
+
+
+_ops_reply_task = None
+_ops_email_task = None
+
+
+@app.on_event("startup")
+async def _start_ops_reply_poller() -> None:
+    """Reply-by-email quote entry: poll the ops mailbox when configured
+    (LIDARAI_OPS_REPLY_ENABLED plus IMAP credentials)."""
+    global _ops_reply_task
+    from .flow import ops_reply
+
+    if ops_reply.reply_loop_configured():
+        import asyncio
+
+        _ops_reply_task = asyncio.create_task(ops_reply.poll_forever())
+    else:
+        logger.info("Ops reply-by-email poller not configured; skipping")
+
+
+@app.on_event("startup")
+async def _rehydrate_provider_table() -> None:
+    """The provider table (partners, previous quoters, discovered
+    businesses) lives in Supabase; pull it onto the local disk so a fresh
+    instance does not fall back to the sample seed until the first lead."""
+    from .flow import partners
+
+    try:
+        result = await partners.rehydrate()
+        logger.info("Provider table at startup: %s", result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Provider table rehydrate at startup failed: %s", exc)
+
+
+@app.on_event("startup")
+async def _start_ops_email_worker() -> None:
+    """Owns lead-email delivery for the life of the process. Sending from a
+    task spawned inside a request loses the lead when that request's context
+    goes away — which is exactly what happened through the demo proxy."""
+    global _ops_email_task
+    if not settings.ops_email:
+        logger.info("No ops email configured; lead-email worker not started")
+        return
+    import asyncio
+
+    from .flow.ops_email import run_ops_email_worker
+
+    _ops_email_task = asyncio.create_task(run_ops_email_worker())
 
 
 @app.post(
@@ -66,8 +200,16 @@ async def health() -> HealthResponse:
     response_model=HomeAIChatResponse,
     dependencies=[Depends(require_token)],
 )
-async def home_ai_chat(request_body: HomeAIChatRequest) -> HomeAIChatResponse:
-    return await generate_home_ai_response(request_body)
+async def home_ai_chat(
+    request_body: HomeAIChatRequest,
+    x_homeowner_token: Optional[str] = Header(default=None),
+) -> HomeAIChatResponse:
+    # The flow runtime wraps the original generator: SOW §2 step gating,
+    # scan-state reconciliation, journaling, and the additive `flow` /
+    # `priceGuidance` response fields. Legacy requests work unchanged.
+    return await run_flow_turn(
+        request_body, homeowner_id=homeowner_id_from_header(x_homeowner_token)
+    )
 
 
 @app.post(

@@ -1,0 +1,9 @@
+# Coverage for the backend test suite. Run from this directory:
+#   python -m coverage run -m pytest tests/
+#   python -m coverage report        (add -m for missed lines)
+[run]
+source = app
+branch = True
+
+[report]
+skip_empty = True

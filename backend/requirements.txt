@@ -6,4 +6,5 @@ sse-starlette==2.3.6
 pytest==8.4.1
 pytest-asyncio==1.1.0
 httpx==0.28.1
+anthropic==1.0.0
 Pillow==12.2.0
