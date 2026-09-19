@@ -91,7 +91,7 @@ services:
       # Which flag opens the SOW §3 "no more scanning until processing
       # completes" gate: processor_job | device_bake (docs/SCAN_SCOPE.md).
       - key: LIDARAI_SCAN_COMPLETE_SIGNAL
-        value: processor_job
+        value: device_bake
       # Provider discovery (Google Places, a TakeShape-owned key). Off until
       # TakeShape enables it; the provider table and ranking run either way.
       - key: LIDARAI_PROVIDER_DISCOVERY_ENABLED
