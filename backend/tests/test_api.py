@@ -351,11 +351,13 @@ async def test_health_check_startup():
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get("/health")
         assert response.status_code == 200
-        assert response.json()["status"] == "ok"
+        # "degraded" appears when config is incomplete (as in this hermetic
+        # test env, which blanks credentials); both are healthy HTTP-wise.
+        assert response.json()["status"] in {"ok", "degraded"}
 
 
 @pytest.mark.asyncio
-async def test_home_ai_chat_returns_quote_draft_without_sending(monkeypatch):
+async def test_home_ai_chat_withholds_the_card_on_a_cold_first_turn(monkeypatch):
     monkeypatch.setattr("app.home_ai.settings.openai_api_key", "")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -396,11 +398,15 @@ async def test_home_ai_chat_returns_quote_draft_without_sending(monkeypatch):
     assert body["state"]["conversionReadiness"] == "high"
     assert body["state"]["ctaAllowed"] is True
     assert body["state"]["suggestedServiceType"] == "Painting"
-    assert body["quoteDraft"]["serviceType"] == "Painting"
+    # Asking about cost on the first turn is a reason to OFFER a request, not
+    # to put a card on screen: the clients render the card on the draft's mere
+    # presence, so a draft here is a confirm-and-send tile appearing before
+    # anyone has given a zip or agreed to anything (Sep 12 feedback).
+    assert body["quoteDraft"] is None
+    # The CTA is unaffected — that is the conversational invitation, not a card.
     assert body["cta"]["type"] == "quote_request"
     assert body["cta"]["serviceType"] == "Painting"
     assert body["cta"]["label"] == "Request a painting quote for this space"
-    assert body["quoteDraft"]["estimatedRangeLow"] > 0
     assert body["visualFocus"] is None
     assert "nothing goes to a provider" in body["message"]["content"]
 
@@ -495,8 +501,8 @@ def test_home_guide_prompt_variant_assignment_is_stable():
     other = assign_home_guide_prompt_variant("user-456")
 
     assert first == second
-    assert first in {"control", "more_direct", "more_design_led"}
-    assert other in {"control", "more_direct", "more_design_led"}
+    assert first in {"control", "more_design_led"}
+    assert other in {"control", "more_design_led"}
 
 
 @pytest.mark.asyncio

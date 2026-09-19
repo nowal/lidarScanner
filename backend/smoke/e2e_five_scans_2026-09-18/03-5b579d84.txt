@@ -1,0 +1,59 @@
+homes listed: ['5b579d84-edf6-42ea-98a8-d5c685fba077', 'd3a2c134-c3d7-4026-8354-0b244eedde3f', 'e277c103-0abe-4055-830c-077a40762233', 'e38e05ff-a0d8-4780-a49b-edb3e4c92092', 'noah-house', 'quintin-house']
+  [PASS] ops listing includes the new home and the earlier ones  -- ['5b579d84-edf6-42ea-98a8-d5c685fba077', 'd3a2c134-c3d7-4026-8354-0b244eedde3f', 'e277c103-0abe-4055-830c-077a40762233', 'e38e05ff-a0d8-4780-a49b-edb3e4c92092', 'noah-house', 'quintin-house']
+rooms: {'unnamed area 1': 'room-1', 'bathroom': 'room-2', 'unnamed area 3': 'room-3', 'kitchen': 'room-4', 'living room': 'room-5', 'unnamed area 6': 'room-6', 'dining room': 'room-7', 'sitting area': 'room-8'}
+  [PASS] overview has rooms, some confidently named  -- (8, ['bathroom', 'kitchen', 'living room'])
+AGENT (opening): I'm TakeShape's assistant, and I've got your whole home mapped out, eight spaces in all, including that living room and kitchen. Which space would you like to start with, and what's your first name?
+  [PASS] opening: whole-home level, names a real room, asks a name  -- I'm TakeShape's assistant, and I've got your whole home mapped out, eight spaces in all, including that living room and kitchen. Which space would you like to s
+  [PASS] opening: no invented room
+  [PASS] opening: no fallback
+HOMEOWNER: Hi, I'm Dana. Let's start with the kitchen.
+AGENT: Hi Dana, good to meet you - I'm TakeShape's guide for this home. Your kitchen comes in around 356 square feet, with a good bit of storage, an oven, and a sink already in place. What's on your mind for it?...
+   step=design_conversation active={'key': 'room-4', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=undecided/[] gates=closed fallback=False
+  [PASS] names 'kitchen' -> kitchen becomes the active room  -- {'key': 'room-4', 'name': 'kitchen', 'confidentName': True}
+HOMEOWNER: Actually what about the garage? I'd like to paint it.
+AGENT: The garage wasn't part of the walk, so I don't have that space to work from. Tell me a bit about it though, and I can still help you think through the paint job, or we can talk kitchen paint instead....
+   step=quote_gathering active={'key': 'room-4', 'name': 'kitchen', 'confidentName': True} unresolved=garage scope=undecided/[] gates=closed fallback=False
+  [PASS] unresolved room echoed, not described as seen  -- {'homeId': '5b579d84-edf6-42ea-98a8-d5c685fba077', 'roomCount': 8, 'activeRoom': {'key': 'room-4', 'name': 'kitchen', 'confidentName': True}, 'unresolvedRoom': 'garage'}
+  [PASS] no scan invitation while processing (garage turn)  -- The garage wasn't part of the walk, so I don't have that space to work from. Tell me a bit about it though, and I can still help you think through the paint job
+HOMEOWNER: Never mind the garage. That small space you called unnamed area 1 is the mudroom.
+AGENT: Got it, the mudroom it is. With that warm taupe hallway color and white bathroom trim nearby, are you thinking a fresh coat of the same tone, or something different for this space?...
+   step=quote_gathering active={'key': 'room-1', 'name': 'mudroom', 'confidentName': True} unresolved=None scope=single_room/['mudroom'] gates=closed fallback=False
+  [PASS] homeowner naming an unnamed area sticks in the index  -- ('unnamed area 1', 'mudroom')
+HOMEOWNER: For the project it's a couple of rooms: the kitchen and the bathroom, nothing else.
+AGENT: Good, that keeps it focused — kitchen and bathroom painting, nothing else. Once I know your zip, I can check which local painters cover your area for when you're ready to price it out....
+   step=quote_gathering active={'key': 'room-4', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=closed fallback=False
+  [PASS] scope selected_rooms with real rooms  -- ['kitchen', 'bathroom']
+HOMEOWNER: Should I go walk the rest of the house now?
+AGENT: No need, Dana - you already walked the whole home, so I can see all the rooms including the kitchen and bathroom we're focused on. The room details are still finishing processing, but there's nothing more for you to record right now....
+   step=quote_gathering active={'key': 'room-4', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=closed fallback=False
+  [PASS] HARD: gate closed, no scan suggestion  -- No need, Dana - you already walked the whole home, so I can see all the rooms including the kitchen and bathroom we're focused on. The room details are still fi
+HOMEOWNER: My zip is 37203.
+AGENT: Got it, 37203. One more thing so I can actually get pricing back to you once you're ready: what's the best email or phone number to use?...
+   step=quote_gathering active={'key': 'room-4', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=closed fallback=False
+HOMEOWNER: The model's ready now. Anything else I should add to it?
+AGENT: Nothing you need to add, the kitchen and bathroom are both fully captured. Whenever you're ready, I still just need an email or phone so I can bring pricing back to you....
+   step=quote_gathering active={'key': 'room-4', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=named_rooms fallback=False
+  [PASS] step 6: named_rooms mode with the real rooms  -- {'scanProcessingComplete': True, 'canPromptAdditionalScan': True, 'canRequestQuote': True, 'canSubmitQuoteRequest': False, 'canPresentRequestCard': False, 'extensionPromptMode': 'named_rooms'}
+  [PASS] step 6: no rest-of-the-home invitation  -- Nothing you need to add, the kitchen and bathroom are both fully captured. Whenever you're ready, I still just need an email or phone so I can bring pricing back to you.
+HOMEOWNER: Let's do the kitchen paint: walls and trim in a low-VOC warm white.
+AGENT: Warm white with a low-VOC line is a solid choice for a kitchen, easy to keep clean and it'll keep the space feeling bright. Want the ceiling included too, or just walls and trim?...
+   step=address_collection active={'key': 'room-4', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=named_rooms fallback=False
+HOMEOWNER: Yes, quotes please. My address is 118 Maple Street, Nashville TN, email dana@example.com.
+AGENT: Got it, thanks Dana - I've got your address at 118 Maple Street and your email on file now. So, should I package this kitchen painting scope up as a request for my team to price?...
+   step=quote_request active={'key': 'room-4', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=named_rooms fallback=False
+  [PASS] step 9: submitted  -- {"schemaVersion":"v1","quoteRequestId":"qr_61ed16c7e02d","status":"submitted","expectations":{"copy":"Sounds good — I'm getting your request in front of local providers now. As soon as their quotes co
+  package room: kitchen | scope: selected rooms: kitchen, bathroom | model: {'url': 'https://xflkhtsmjyifzvumvcul.supabase.co/storage/v1/object/sign/home-assets/home-models/5b579d84-edf6-42ea-98a8-d5c685fba077/room-4.usdz?token=eyJraWQiOiIwNjU3MzRiMy1iNzc4LTQ1YzktODZjMC1kZjA5ZDFkOWJjMjkiLCJhbGciOiJIUzUxMiJ9.eyJ1cmwiOiJob21lLWFzc2V0cy9ob21lLW1vZGVscy81YjU3OWQ4NC1lZGY2LTQyZWEtOThhOC1kNWM2ODVmYmEwNzcvcm9vbS00LnVzZHoiLCJzY29wZSI6ImRvd25sb2FkIiwiaWF0IjoxNzg5NzU1Mzk5LCJleHAiOjE3OTIzNDczOTl9.XKEWvlW7Y9sgjHTOpDOeBjeOTIDjKDquc5yRN9Iz6OhgOugZpBpJqFahaS92T6-B2k-An-1GPbL8_V-3AS30Ug', 'kind': 'supabase_signed_url', 'note': 'Textured model of the kitchen, baked on the phone; signed link, valid ~30 days, no credentials needed.', 'room': 'kitchen', 'bytes': 42119755, 'source': 'on-device bake'}
+  [PASS] package: room-level measurements for the active room  -- {'note': 'Measurements for the kitchen, from the home capture.', 'room': 'kitchen', 'storey': 1, 'fixtures': ['12x storage', '2x chair', '1x table', '1x oven', '1x dishwasher', '1x sink', '1x sofa', '1x stove'], 'doorCount': 2, 'photoCount': 142, 'windowCount': 3, 'perimeterFeet': 61.6, 'floorAreaSquareFeet': 356.2, 'paintableWallSquareFeet': 455.5}
+  [PASS] package: scope carried
+  [PASS] package: stored room model linked (signed URL) or an honest reason  -- {'url': 'https://xflkhtsmjyifzvumvcul.supabase.co/storage/v1/object/sign/home-assets/home-models/5b579d84-edf6-42ea-98a8-d5c685fba077/room-4.usdz?token=eyJraWQiOiIwNjU3MzRiMy1iNzc4LTQ1YzktODZjMC1kZjA5ZDFkOWJjMjkiLCJhbGciOiJIUzUxMiJ9.eyJ1cmwiOiJob21lLWFzc2V0cy9ob21lLW1vZGVscy81YjU3OWQ4NC1lZGY2LTQyZWEtOThhOC1kNWM2ODVmYmEwNzcvcm9vbS00LnVzZHoiLCJzY29wZSI6ImRvd25sb2FkIiwiaWF0IjoxNzg5NzU1Mzk5LCJleHAiOjE3OTIzNDczOTl9.XKEWvlW7Y9sgjHTOpDOeBjeOTIDjKDquc5yRN9Iz6OhgOugZpBpJqFahaS92T6-B2k-An-1GPbL8_V-3AS30Ug', 'kind': 'supabase_signed_url', 'note': 'Textured model of the kitchen, baked on the phone; signed link, valid ~30 days, no credentials needed.', 'room': 'kitchen', 'bytes': 42119755, 'source': 'on-device bake'}
+  [PASS] package: no jobId/threadId/homeownerId, address withheld
+  [PASS] email composed
+  email subject: New quote request: Painting — kitchen + bathroom in 37203 (Dana) — qr_61ed16c7e02d
+  [PASS] email: scope + room + model link present, address absent  -- New quote request: Painting — kitchen + bathroom in 37203 (Dana) — qr_61ed16c7e02d
+HOMEOWNER: Now let's look at my other place. Which rooms do you have there?
+AGENT: This is actually the same home we've been in, Dana, just with the rest of the walkthrough included: kitchen, living room, dining room, a sitting area, laundry room, and mudroom. Your painting request is still just for the kitchen and bathro...
+   step=quote_request active=None unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=named_rooms fallback=False
+  [PASS] home switch: flow.home now the other home, no active room carried  -- {'homeId': 'quintin-house', 'roomCount': 6, 'activeRoom': None, 'unresolvedRoom': None}
+  [PASS] home switch: reply speaks to the other home's room count  -- This is actually the same home we've been in, Dana, just with the rest of the walkthrough included: kitchen, living room, dining room, a sitting area, laundry r
+
+RESULT home=5b579d84-edf6-42ea-98a8-d5c685fba077: 22/22 checks passed

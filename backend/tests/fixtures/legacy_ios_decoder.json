@@ -1,0 +1,65 @@
+{
+  "_comment": "The shipped iOS decoder's exact expectations, transcribed from takeshape-mobile/LidarAI/HomeAIChatView.swift (HomeAIChatResponse and friends, lines 13-261 at vendored commit 8f2eb5a). Swift's Codable hard-fails the WHOLE response on a missing non-optional key, a null where a value is expected, or an enum value outside the closed set — so this file is the additivity contract: the server may add fields, but everything here must decode forever.",
+  "response": {
+    "required": {
+      "schemaVersion": "string",
+      "threadId": "string",
+      "message": "object",
+      "state": "object",
+      "suggestedReplies": "array<string>",
+      "model": "string",
+      "provider": "string",
+      "usedFallback": "boolean"
+    },
+    "optional": {
+      "quoteDraft": "object",
+      "visualFocus": "object"
+    }
+  },
+  "message": {
+    "required": {
+      "id": "string",
+      "role": "string",
+      "content": "string",
+      "createdAt": "string",
+      "attachments": "array"
+    }
+  },
+  "state": {
+    "required": {
+      "intent": "enum:intent",
+      "quoteStatus": "string",
+      "requiresExplicitApproval": "boolean",
+      "confidence": "string"
+    },
+    "optional": {
+      "suggestedServiceType": "string"
+    }
+  },
+  "quoteDraft": {
+    "required": {
+      "title": "string",
+      "homeownerSummary": "string",
+      "providerRequest": "string",
+      "scopeNotes": "array<string>",
+      "measurementAssumptions": "array<string>",
+      "missingDetails": "array<string>"
+    },
+    "optional": {
+      "serviceType": "string",
+      "estimatedRangeLow": "number",
+      "estimatedRangeHigh": "number",
+      "estimateUnit": "string"
+    }
+  },
+  "visualFocus": {
+    "required": {
+      "keyframeId": "string",
+      "reason": "string",
+      "confidence": "string"
+    }
+  },
+  "enums": {
+    "intent": ["exploring", "design_advice", "pricing", "quote_readiness", "provider_request"]
+  }
+}

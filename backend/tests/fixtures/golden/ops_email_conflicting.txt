@@ -1,0 +1,48 @@
+Subject: New quote request: Window Cleaning — living room + primary bedroom in 37203 (Alex) — qr_sample_conflict
+
+Quote request qr_sample_conflict · submitted 2026-09-09T14:30:00+00:00
+
+HOMEOWNER
+  Name: Alex
+  Email: alex@example.com
+  Phone: (615) 555-0101
+  Zip: 37203
+  Address: withheld until the homeowner selects a quote (release policy)
+
+PROJECT
+  Service: Window Cleaning
+  Scope of work: selected rooms: living room, primary bedroom
+  Room: living room
+  Scope: interior + exterior; screens
+  Synopsis: Alex wants every window in a 1920s bungalow cleaned inside and out before listing photos next month, screens included. Mentioned two second-floor windows that are hard to reach.
+
+MEASUREMENTS
+  Windows: 14
+  windowCount: 14
+
+3D MODEL
+  https://storage.example.com/home-assets/flow-models/sample.usdz?token=sample
+  (Signed link, valid ~30 days; no credentials needed.)
+
+SUGGESTED PROVIDERS
+  Ranked by review and social presence (partners tagged; scores explained per row):
+    1. Crystal Pane Window Co. | prospect from google_places | (615) 555-0180 | https://crystalpane.example | score 0.90
+       Google: 4.9 stars, 388 reviews (verified 2026-09-08) https://maps.google.com/?cid=5001
+       Nextdoor: profile link only (verified 2026-09-08) https://nextdoor.com/pages/crystal-pane-window-co
+    2. [PAST QUOTER x4] Shine Squad Nashville | quoted 4x through TakeShape | (615) 555-0181 | score 0.77
+       Google: 3.4 stars, 41 reviews (verified 2026-09-08) https://maps.google.com/?cid=5002
+       Yelp: profile link only (verified 2026-09-08) https://www.yelp.com/biz/shine-squad-nashville
+       quoted boost +0.22
+    3. Glasshouse Social Cleaning | prospect from sheet:providers | https://glasshousesocial.example | score 0.75
+       Facebook: 2100 followers (verified 2026-09-02) https://www.facebook.com/glasshousesocial
+       Instagram: 5400 followers (verified 2026-09-02) https://www.instagram.com/glasshousesocial/
+       multi-platform +0.05
+    4. Cumberland Glass Care | TakeShape partner | contact Morgan | (615) 555-0183 | hello@cumberlandglass.example
+       no review or social data on file
+  Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
+
+ENTER THE CHECKED QUOTE
+  Set LIDARAI_PUBLIC_BASE_URL to include a one-click entry link here;
+  until then, upload via the ops API (OPS_GUIDE.md).
+
+The homeowner has been told their request is going out to local providers and that quotes come back in the app — no exact turnaround promised, and the people doing the checking are not named to them. The app shows no price until this quote is entered.

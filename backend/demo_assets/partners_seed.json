@@ -1,0 +1,28 @@
+[
+  {
+    "name": "SAMPLE ROW — Partner Painting Co.",
+    "serviceTypes": ["Painting"],
+    "zips": ["37203", "37212"],
+    "zipPrefixes": ["372"],
+    "contactName": "Sample Contact",
+    "phone": "(000) 000-0000",
+    "email": "partners@example.com",
+    "website": "https://example.com",
+    "ratingLabel": "sample data — replace with the TakeShape partner list",
+    "notes": "Placeholder so the ops-email format is testable before TakeShape's Supabase partner table exists.",
+    "sample": true
+  },
+  {
+    "name": "SAMPLE ROW — Partner Flooring LLC",
+    "serviceTypes": ["Flooring"],
+    "zips": ["37203"],
+    "zipPrefixes": ["372"],
+    "contactName": "Sample Contact",
+    "phone": "(000) 000-0000",
+    "email": "partners@example.com",
+    "website": "https://example.com",
+    "ratingLabel": "sample data — replace with the TakeShape partner list",
+    "notes": "Placeholder row.",
+    "sample": true
+  }
+]

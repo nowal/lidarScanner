@@ -113,6 +113,13 @@ class EventMessage(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     time: datetime
+    # Additive: truthful config posture, so a misconfigured deploy (missing
+    # model key, auth token, persistence) reads "degraded" instead of "ok".
+    configWarnings: list[str] | None = None
+    # Live provider posture: config can be complete and the provider still
+    # be failing (exhausted billing, rotated key, outage), in which case
+    # every turn is silently answered by the local fallback writer.
+    provider: dict | None = None
 
 
 class ScanPayloadEnvelope(BaseModel):

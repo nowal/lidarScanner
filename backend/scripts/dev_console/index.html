@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Guide scan walkthrough</title>
+<style>
+  :root { --bg:#F2F4F6; --card:#fff; --ink:#17212B; --muted:#5A6772; --line:#E4E9ED; --green:#2E7D53; --green-soft:#EFF7F1; --amber:#8A6D1F; --amber-soft:#FBF4E2; --red:#AE432A; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 "Segoe UI",system-ui,sans-serif; }
+  header { display:flex; gap:12px; align-items:center; padding:10px 16px; background:var(--card); border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header strong { font-size:15px; }
+  header input { padding:6px 8px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  header .status { color:var(--muted); font-size:12.5px; margin-left:auto; }
+  main { display:grid; grid-template-columns: minmax(250px,320px) minmax(360px,1fr) minmax(300px,400px); gap:12px; padding:12px 16px; height:calc(100vh - 56px); }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; height:auto; } .col { max-height:70vh; } }
+  .col { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; overflow:auto; min-height:0; display:flex; flex-direction:column; }
+  h2 { font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--green); margin:0 0 8px; }
+  h3 { font-size:12px; color:var(--muted); margin:12px 0 4px; text-transform:uppercase; letter-spacing:.06em; }
+  button { font:inherit; padding:6px 10px; border:1px solid var(--line); border-radius:6px; background:#fff; cursor:pointer; }
+  button.primary { background:var(--green); color:#fff; border-color:var(--green); }
+  button.quiet { font-size:12px; padding:4px 8px; color:var(--muted); }
+  button:disabled { opacity:.5; cursor:default; }
+  .scan { display:grid; grid-template-columns:72px 1fr; gap:10px; padding:8px; border:1px solid var(--line); border-radius:10px; margin-bottom:8px; cursor:pointer; align-items:center; }
+  .scan.active { border-color:var(--green); background:var(--green-soft); }
+  .scan img, .scan .ph { width:72px; height:54px; object-fit:cover; border-radius:6px; background:#E4E9ED; display:block; }
+  .scan .ph { display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:11px; }
+  .scan b { display:block; font-size:13px; }
+  .scan small { color:var(--muted); display:block; font-size:12px; }
+  .room { display:grid; grid-template-columns: 1fr auto; gap:6px; padding:6px 8px; border-radius:6px; cursor:pointer; font-size:13px; border-bottom:1px solid var(--line); }
+  .room:hover { background:#F7F9FA; }
+  .room.active { background:var(--green-soft); }
+  .room .q { color:var(--amber); }
+  .room small { display:block; color:var(--muted); font-size:11.5px; }
+  .tag { display:inline-block; font-size:10.5px; padding:1px 6px; border-radius:4px; background:#E4E9ED; color:var(--muted); margin-left:4px; vertical-align:middle; }
+  .tag.ok { background:var(--green-soft); color:var(--green); }
+  .facts { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px; margin-bottom:8px; }
+  .fact { background:#F7F9FA; border-radius:8px; padding:8px; }
+  .fact b { display:block; font-size:18px; font-variant-numeric:tabular-nums; }
+  .fact span { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .controls { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:8px; }
+  .controls label { font-size:12.5px; color:var(--muted); display:flex; gap:4px; align-items:center; }
+  select { font:inherit; padding:4px 6px; border:1px solid var(--line); border-radius:6px; }
+  #transcript { flex:1; overflow:auto; padding:6px; border:1px solid var(--line); border-radius:8px; background:#FAFBFC; min-height:240px; }
+  .msg { margin:0 0 10px; padding:8px 12px; border-radius:10px; max-width:88%; white-space:pre-wrap; }
+  .msg.h { background:#DDEBE3; margin-left:auto; }
+  .msg.a { background:#fff; border:1px solid var(--line); }
+  .msg.sys { background:var(--amber-soft); color:var(--amber); font-size:12.5px; max-width:100%; }
+  .msg .meta { display:block; font-size:11px; color:var(--muted); margin-top:4px; }
+  .compose { display:flex; gap:6px; margin-top:8px; }
+  .compose textarea { flex:1; font:inherit; padding:8px; border:1px solid var(--line); border-radius:8px; resize:vertical; min-height:56px; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+  .chips button { font-size:12px; padding:4px 9px; border-radius:14px; }
+  pre { margin:0; font:12px/1.4 Consolas,monospace; white-space:pre-wrap; word-break:break-word; background:#F7F9FA; border-radius:8px; padding:8px; }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 10px; font-size:12.5px; }
+  .kv div:nth-child(odd) { color:var(--muted); }
+  .badge { display:inline-block; padding:1px 7px; border-radius:4px; font-size:11px; font-weight:700; margin:2px; }
+  .badge.on { background:var(--green); color:#fff; } .badge.off { background:#E4E9ED; color:var(--muted); }
+  .ops { display:grid; gap:6px; margin-top:6px; }
+  .ops input { font:inherit; padding:5px 7px; border:1px solid var(--line); border-radius:6px; width:100%; }
+  details summary { cursor:pointer; color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Home Guide · scan walkthrough</strong>
+  <input id="base" value="http://127.0.0.1:8010" size="22" title="backend base URL">
+  <input id="ops" placeholder="ops token" size="16" type="password">
+  <button id="connect">Connect</button>
+  <span class="status" id="status">not connected</span>
+</header>
+<main>
+  <section class="col">
+    <h2>Scans received</h2>
+    <div id="homes"></div>
+  </section>
+
+  <section class="col">
+    <h2>Conversation <span id="thread" style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0;font-size:12px"></span></h2>
+    <div class="controls">
+      <button id="opening" class="primary">Start: opening turn</button>
+      <button id="newThread">New thread</button>
+      <label>processing
+        <select id="pstate"><option>idle</option><option>processing</option><option selected>complete</option><option>failed</option></select>
+      </label>
+      <label><input type="checkbox" id="bake" checked> bake ready</label>
+      <label>mode
+        <select id="smode"><option>new_scan</option><option>update_existing</option></select>
+      </label>
+    </div>
+    <div id="transcript"></div>
+    <div class="chips" id="chips"></div>
+    <div class="compose">
+      <textarea id="input" placeholder="Type as the homeowner… (Enter to send, Shift+Enter for a newline)"></textarea>
+      <button id="send" class="primary">Send</button>
+    </div>
+    <div class="controls" style="margin-top:8px">
+      <button id="submitQuote">Submit quote request</button>
+      <button id="opsView">Ops package</button>
+      <button id="uploadQuote">Enter a quote as ops</button>
+      <button id="askResults">"Any news on my quotes?"</button>
+    </div>
+    <div class="ops" id="quoteForm" hidden>
+      <input id="qProvider" placeholder="provider name" value="Brightline Painting">
+      <input id="qPrice" placeholder="price USD" value="2450">
+      <button id="qSend">Send to ops API</button>
+    </div>
+  </section>
+
+  <section class="col">
+    <h2>This home</h2>
+    <div class="facts" id="facts"></div>
+    <div id="rooms"></div>
+    <h3>Flow state (last reply)</h3>
+    <div id="flow" class="kv"></div>
+    <div id="gates" style="margin-top:6px"></div>
+    <h3>Active room</h3>
+    <div id="home" class="kv"></div>
+    <details style="margin-top:8px"><summary>Raw response</summary><pre id="raw"></pre></details>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const S = {
+  base: localStorage.getItem('hg.base') || 'http://127.0.0.1:8010',
+  ops: localStorage.getItem('hg.ops') || '',
+  homes: [], home: null, overview: null, singleContext: null,
+  threadId: null, token: null, messages: [], quoteRequestId: null, lastFlow: null,
+};
+$('base').value = S.base; $('ops').value = S.ops;
+
+const CHIPS = [
+  "Hi, I'm Dana. This room feels dated and I'd like to freshen it up.",
+  "Let's talk about the kitchen.",
+  "Just this room for now — it's the whole project.",
+  "A couple of rooms: this one and the kitchen, nothing else.",
+  "Honestly the whole house needs a refresh, every room.",
+  "Should I go scan the rest of the house right now?",
+  "My zip is 37203.",
+  "Let's do the repaint: walls and trim in a low-VOC warm white.",
+  "Yes, quotes please. My address is 118 Maple Street, Nashville TN, email dana@example.com.",
+];
+
+function opsHeaders() { return S.ops ? { 'Authorization': 'Bearer ' + S.ops } : {}; }
+function api(path) { return S.base.replace(/\/$/, '') + '/api/v1' + path; }
+function status(t, bad) { $('status').textContent = t; $('status').style.color = bad ? 'var(--red)' : 'var(--muted)'; }
+function sys(t) { addMsg('sys', t); }
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function addMsg(kind, text, meta) {
+  const d = document.createElement('div'); d.className = 'msg ' + kind; d.textContent = text;
+  if (meta) { const m = document.createElement('span'); m.className = 'meta'; m.textContent = meta; d.appendChild(m); }
+  $('transcript').appendChild(d); $('transcript').scrollTop = 1e9;
+}
+function shortId(id) { return id.length > 14 ? id.slice(0, 8) + '…' : id; }
+
+async function connect() {
+  S.base = $('base').value.trim(); S.ops = $('ops').value.trim();
+  localStorage.setItem('hg.base', S.base); localStorage.setItem('hg.ops', S.ops);
+  try {
+    const health = await (await fetch(S.base.replace(/\/$/, '') + '/health')).json();
+    status(`backend ${health.status}` + (health.configWarnings ? ` · ${health.configWarnings.length} config warning(s)` : ''), health.status !== 'ok');
+  } catch (e) { status('backend unreachable: ' + e, true); return; }
+  try {
+    const r = await fetch(api('/ops/homes'), { headers: opsHeaders() });
+    if (!r.ok) { status(`ops token rejected (${r.status}); homes need it`, true); S.homes = []; }
+    else S.homes = (await r.json()).homes || [];
+  } catch (e) { S.homes = []; }
+  try { S.singleContext = await (await fetch('fixtures/captured-room-context.json')).json(); } catch (e) { S.singleContext = null; }
+  renderHomes();
+  if (!S.home && S.homes.length) selectHome(S.homes[0].homeId);
+}
+
+function renderHomes() {
+  const box = $('homes'); box.innerHTML = '';
+  for (const h of S.homes) {
+    const d = document.createElement('div'); d.className = 'scan' + (S.home === h.homeId ? ' active' : '');
+    const named = h.rooms.filter(r => r.confidentName !== false).map(r => r.name).slice(0, 4).join(', ');
+    d.innerHTML = `<img src="thumbs/${esc(h.homeId)}.jpg" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'no preview'}))">`
+      + `<div><b>${esc(h.homeId.includes('-') ? shortId(h.homeId) : h.homeId)}</b><small>${h.roomCount} areas · ${h.storeyCount} floor${h.storeyCount === 1 ? '' : 's'} · ${h.totalAreaSqFt ?? '?'} sq ft</small><small>${esc(named)}${h.roomCount > 4 ? ', …' : ''}</small></div>`;
+    d.title = h.homeId; d.onclick = () => selectHome(h.homeId); box.appendChild(d);
+  }
+  if (S.singleContext) {
+    const d = document.createElement('div'); d.className = 'scan' + (S.home === 'single' ? ' active' : '');
+    d.innerHTML = `<div class="ph">1 room</div><div><b>Single-room capture</b><small>the app's test fixture, no home index</small><small>exercises the step-5/6 path</small></div>`;
+    d.onclick = () => selectHome('single'); box.appendChild(d);
+  }
+  if (!S.homes.length && !S.singleContext) box.textContent = 'No scans listed. Connect with an ops token.';
+}
+
+async function selectHome(id) {
+  S.home = id; S.overview = null;
+  if (id !== 'single') {
+    try { S.overview = await (await fetch(api('/ops/homes/' + encodeURIComponent(id)), { headers: opsHeaders() })).json(); }
+    catch (e) { S.overview = S.homes.find(h => h.homeId === id); }
+  }
+  renderHomes(); renderHome(); newThread();
+}
+
+function renderHome() {
+  const facts = $('facts'), rooms = $('rooms');
+  facts.innerHTML = ''; rooms.innerHTML = '';
+  if (S.home === 'single') { rooms.textContent = 'One room from the app fixture; the agent sees its RoomPlan geometry and keyframes.'; return; }
+  const o = S.overview; if (!o) { rooms.textContent = 'Pick a scan.'; return; }
+  const models = o.models || {};
+  const tiles = [[o.roomCount, 'areas'], [o.storeys ?? o.storeyCount ?? 1, 'floors'], [o.totalAreaSqFt ?? '?', 'sq ft'],
+                 [o.photoCount ?? '?', 'photos'], [`${models.stored ?? 0}/${models.rooms ?? 0}`, 'models stored'], [o.namedConfidently ?? 0, 'named']];
+  facts.innerHTML = tiles.map(([v, l]) => `<div class="fact"><b>${esc(v)}</b><span>${l}</span></div>`).join('');
+  const active = S.lastFlow?.home?.activeRoom?.key;
+  const list = [...(o.rooms || [])].sort((a, b) => (a.storey - b.storey) || ((b.areaSqFt || 0) - (a.areaSqFt || 0)));
+  for (const r of list) {
+    const d = document.createElement('div'); d.className = 'room' + (r.key === active ? ' active' : '');
+    const fixtures = (r.fixtures || []).slice(0, 4).join(', ');
+    d.innerHTML = `<div>${r.confidentName === false ? '<span class="q">? </span>' : ''}${esc(r.name)}`
+      + `${r.hasModel ? '<span class="tag ok">model</span>' : '<span class="tag">no model</span>'}`
+      + `<small>${esc(fixtures || r.nameBasis || '')}</small></div>`
+      + `<div style="text-align:right;color:var(--muted);font-size:12px">${Math.round(r.areaSqFt || 0)} sqft<small>floor ${r.storey ?? '?'} · ${r.photoCount ?? 0} photos</small></div>`;
+    d.title = `${r.key} — ${r.nameBasis || ''}`;
+    d.onclick = () => { $('input').value = `Let's talk about the ${r.name}.`; $('input').focus(); };
+    rooms.appendChild(d);
+  }
+}
+
+function buildContext() {
+  if (S.home === 'single') return JSON.parse(JSON.stringify(S.singleContext));
+  const o = S.overview || {};
+  return {
+    contextVersion: 'home_ai_context_v1', scanId: S.home, roomCount: o.roomCount || 0, rooms: [],
+    totals: { floorAreaSquareMeters: Math.round((o.totalAreaSqFt || 0) / 10.7639), roomCount: o.roomCount || 0 },
+    floorplanSummary: `${o.roomCount || 0} captured spaces, about ${o.totalAreaSqFt || 0} sq ft.`,
+    meshSummary: { photorealStatus: $('pstate').value === 'complete' ? 'ready' : 'processing', keyframeCount: o.photoCount || 0 },
+    selectedKeyframes: [], notes: [],
+  };
+}
+function scanContext() {
+  return { scanId: S.home === 'single' ? undefined : S.home, processingState: $('pstate').value,
+           localModelReady: $('bake').checked, scanMode: $('smode').value };
+}
+function newThread() {
+  S.threadId = `walk-${(S.home || 'none').slice(0, 8)}-${Date.now().toString(36)}`;
+  S.token = null; S.messages = []; S.quoteRequestId = null; S.lastFlow = null;
+  $('transcript').innerHTML = ''; $('thread').textContent = '· ' + S.threadId;
+  $('flow').innerHTML = ''; $('gates').innerHTML = ''; $('home').innerHTML = ''; $('raw').textContent = '';
+  renderChips();
+  sys(`New conversation on ${S.home === 'single' ? 'the single-room fixture' : (S.home || '(no scan selected)')}. Press "Start: opening turn" for the agent's first message, or just type.`);
+}
+function renderChips() {
+  const box = $('chips'); box.innerHTML = '';
+  for (const c of CHIPS) { const b = document.createElement('button'); b.textContent = c.length > 46 ? c.slice(0, 44) + '…' : c; b.title = c; b.onclick = () => send(c); box.appendChild(b); }
+}
+
+async function opening() {
+  if (!S.home) return sys('Pick a scan first.');
+  $('opening').disabled = true;
+  try {
+    const body = { threadId: S.threadId, homeContext: buildContext() };
+    if (S.home !== 'single') body.homeId = S.home;
+    const r = await fetch(api('/ai/home-chat/opening'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) return sys(`opening failed ${r.status}: ${JSON.stringify(data).slice(0, 300)}`);
+    handleReply(data);
+  } finally { $('opening').disabled = false; }
+}
+async function send(text) {
+  if (!S.home) return sys('Pick a scan first.');
+  text = (text ?? $('input').value).trim(); if (!text) return;
+  $('input').value = ''; addMsg('h', text);
+  const body = { threadId: S.threadId, message: text, messages: S.messages, homeContext: buildContext(),
+                 scanContext: scanContext(), flowToken: S.token || undefined };
+  if (S.home !== 'single') body.homeId = S.home;
+  $('send').disabled = true;
+  try {
+    const r = await fetch(api('/ai/home-chat'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await r.json();
+    if (!r.ok) return sys(`turn failed ${r.status}: ${JSON.stringify(data).slice(0, 300)}`);
+    S.messages.push({ id: data.message.id, role: 'homeowner', content: text, createdAt: data.message.createdAt });
+    handleReply(data);
+  } catch (e) { sys('request failed: ' + e); }
+  finally { $('send').disabled = false; }
+}
+function handleReply(data) {
+  S.token = data.flow?.token || S.token; S.messages.push(data.message); S.lastFlow = data.flow;
+  const f = data.flow || {};
+  addMsg('a', data.message.content, `${data.model || ''}${data.usedFallback ? ' · FALLBACK' : ''} · step ${f.step} ${f.stepName || ''}${f.wordingId ? ' · wording ' + f.wordingId : ''}`);
+  renderFlow(data); renderHome();
+}
+function renderFlow(data) {
+  const f = data.flow || {}; const s = f.slots || {}; const g = f.gates || {};
+  const kv = [['step', `${f.step} ${f.stepName || ''}`], ['completed', (f.completedSteps || []).join(', ')],
+    ['firstName', s.firstName], ['zip', s.zip], ['projectType', s.projectType],
+    ['scopeIntent', s.scopeIntent], ['scopeRooms', (s.scopeRooms || []).join(', ')],
+    ['scopeOptions', (s.scopeOptions || []).join('; ')], ['materials', (s.materials || []).join(', ')],
+    ['addressCaptured', s.addressCaptured], ['contactCaptured', s.contactCaptured],
+    ['quoteRequest', f.quoteRequest ? `${f.quoteRequest.id} · ${f.quoteRequest.status} · ${f.quoteRequest.quotesReturnedCount} returned` : '—'],
+    ['quoteDraft', data.quoteDraft ? data.quoteDraft.title : '—']];
+  $('flow').innerHTML = kv.map(([k, v]) => `<div>${k}</div><div>${esc(v ?? '—')}</div>`).join('');
+  $('gates').innerHTML = Object.entries(g).map(([k, v]) => typeof v === 'boolean'
+    ? `<span class="badge ${v ? 'on' : 'off'}">${esc(k)}</span>`
+    : `<span class="badge off">${esc(k)}: ${esc(v)}</span>`).join(' ');
+  const h = f.home;
+  $('home').innerHTML = h ? [['home', shortId(h.homeId)], ['rooms', h.roomCount],
+    ['activeRoom', h.activeRoom ? `${h.activeRoom.name} [${h.activeRoom.key}]${h.activeRoom.confidentName ? '' : ' (name uncertain)'}` : '—'],
+    ['unresolvedRoom', h.unresolvedRoom || '—']].map(([k, v]) => `<div>${k}</div><div>${esc(v)}</div>`).join('') : '<div>home</div><div>— (single-room path)</div>';
+  if (f.quoteRequest) S.quoteRequestId = f.quoteRequest.id;
+  $('raw').textContent = JSON.stringify({ flow: f, state: data.state, quoteDraft: data.quoteDraft, cta: data.cta, usedFallback: data.usedFallback }, null, 1);
+}
+
+async function submitQuote() {
+  const body = { threadId: S.threadId, flowToken: S.token, confirm: true, homeContext: buildContext() };
+  const r = await fetch(api('/ai/quote-requests'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await r.json();
+  if (r.status === 201) { S.quoteRequestId = data.quoteRequestId; S.token = data.flowToken || S.token; sys(`Quote request ${data.quoteRequestId} submitted. ${data.expectations?.copy || ''}`); }
+  else sys(`submit ${r.status}: ${JSON.stringify(data).slice(0, 400)}`);
+}
+async function opsView() {
+  if (!S.quoteRequestId) return sys('No quote request on this conversation yet.');
+  const r = await fetch(api('/ops/quote-requests/' + S.quoteRequestId), { headers: opsHeaders() });
+  const data = await r.json(); $('raw').textContent = JSON.stringify(data, null, 1); $('raw').parentElement.open = true;
+  sys(`Ops package ${S.quoteRequestId}: room ${data.project?.room || '—'} · scope ${data.project?.scope?.label || '?'} · address ${data.address ? 'RELEASED' : 'withheld'} · model ${data.model?.url ? 'linked' : (data.model?.reason || 'n/a')} — full package under "Raw response".`);
+}
+async function sendQuote() {
+  if (!S.quoteRequestId) return sys('No quote request on this conversation yet.');
+  const body = { quotes: [{ providerName: $('qProvider').value, priceUsd: Number($('qPrice').value) }] };
+  const r = await fetch(api(`/ops/quote-requests/${S.quoteRequestId}/quotes`), { method: 'POST', headers: { 'Content-Type': 'application/json', ...opsHeaders() }, body: JSON.stringify(body) });
+  sys(`ops upload → ${r.status} ${r.ok ? 'ok; now ask the agent for news' : (await r.text()).slice(0, 200)}`);
+  $('quoteForm').hidden = true;
+}
+
+$('connect').onclick = connect;
+$('newThread').onclick = newThread;
+$('opening').onclick = opening;
+$('send').onclick = () => send();
+$('input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+$('submitQuote').onclick = submitQuote;
+$('opsView').onclick = opsView;
+$('uploadQuote').onclick = () => { $('quoteForm').hidden = !$('quoteForm').hidden; };
+$('qSend').onclick = sendQuote;
+$('askResults').onclick = () => send('Any news on my quotes?');
+if (S.ops) connect();
+</script>
+</body>
+</html>

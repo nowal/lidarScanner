@@ -1,0 +1,57 @@
+homes listed: ['5b579d84-edf6-42ea-98a8-d5c685fba077', 'd3a2c134-c3d7-4026-8354-0b244eedde3f', 'e277c103-0abe-4055-830c-077a40762233', 'e38e05ff-a0d8-4780-a49b-edb3e4c92092', 'noah-house', 'quintin-house']
+  [PASS] ops listing includes the new home and the earlier ones  -- ['5b579d84-edf6-42ea-98a8-d5c685fba077', 'd3a2c134-c3d7-4026-8354-0b244eedde3f', 'e277c103-0abe-4055-830c-077a40762233', 'e38e05ff-a0d8-4780-a49b-edb3e4c92092', 'noah-house', 'quintin-house']
+rooms: {'sitting area': 'room-1', 'laundry room': 'room-2', 'kitchen': 'room-3', 'dining room': 'room-4', 'unnamed area 5': 'room-5', 'living room': 'room-6'}
+  [PASS] overview has rooms, some confidently named  -- (6, ['laundry room', 'kitchen', 'living room'])
+AGENT (opening): I'm TakeShape's assistant for this home, and from your walkthrough I can see six spaces, around 1,373 square feet total, including a good-sized kitchen and a living room with pale blue-gray walls. Which space would you like to start with, and what's your first name?
+  [PASS] opening: whole-home level, names a real room, asks a name  -- I'm TakeShape's assistant for this home, and from your walkthrough I can see six spaces, around 1,373 square feet total, including a good-sized kitchen and a li
+  [PASS] opening: no invented room
+  [PASS] opening: no fallback
+HOMEOWNER: Hi, I'm Dana. Let's start with the kitchen.
+AGENT: Good to meet you, Dana. Your kitchen is a solid size at around 446 square feet, with white raised-panel cabinets and that gray patterned tile floor giving it a classic feel. What's prompting the interest, a refresh or something bigger like ...
+   step=design_conversation active={'key': 'room-3', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=undecided/[] gates=closed fallback=False
+  [PASS] names 'kitchen' -> kitchen becomes the active room  -- {'key': 'room-3', 'name': 'kitchen', 'confidentName': True}
+HOMEOWNER: Actually what about the garage? I'd like to paint it.
+AGENT: The garage wasn't part of the walk, so I can't see its walls or size, but tell me roughly its dimensions and current condition and I can still help you think through paint, coverage, and prep for it....
+   step=quote_gathering active={'key': 'room-3', 'name': 'kitchen', 'confidentName': True} unresolved=garage scope=undecided/[] gates=closed fallback=False
+  [PASS] unresolved room echoed, not described as seen  -- {'homeId': 'quintin-house', 'roomCount': 6, 'activeRoom': {'key': 'room-3', 'name': 'kitchen', 'confidentName': True}, 'unresolvedRoom': 'garage'}
+  [PASS] no scan invitation while processing (garage turn)  -- The garage wasn't part of the walk, so I can't see its walls or size, but tell me roughly its dimensions and current condition and I can still help you think th
+HOMEOWNER: Never mind the garage. That small space you called unnamed area 5 is the mudroom.
+AGENT: Got it, the mudroom it is. With that greige on the walls and the rustic-farmhouse feel from the console and mirror, a fresh coat could really let those wood tones pop. What zip are you in, so I can keep any cost thinking realistic for your ...
+   step=quote_gathering active={'key': 'room-5', 'name': 'mudroom', 'confidentName': True} unresolved=None scope=undecided/[] gates=closed fallback=False
+  [PASS] homeowner naming an unnamed area sticks in the index  -- ('unnamed area 5', 'mudroom')
+HOMEOWNER: For the project it's a couple of rooms: the kitchen and the bathroom, nothing else.
+AGENT: Good to know, Dana, kitchen and bathroom painting then. The kitchen's white cabinets and tile floor make a fresh wall color feel like a real update. Any color direction in mind, or still open?...
+   step=quote_gathering active={'key': 'room-3', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=closed fallback=False
+  [PASS] scope selected_rooms with real rooms  -- ['kitchen', 'bathroom']
+HOMEOWNER: Should I go walk the rest of the house now?
+AGENT: You've already walked the whole house, so there's nothing more to record there. Since we're focused on the kitchen and bathroom for this project, let's keep our attention there. Any thoughts on wall color for the kitchen yet?...
+   step=quote_gathering active={'key': 'room-3', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=closed fallback=False
+  [PASS] HARD: gate closed, no scan suggestion  -- You've already walked the whole house, so there's nothing more to record there. Since we're focused on the kitchen and bathroom for this project, let's keep our
+HOMEOWNER: My zip is 37203.
+AGENT: Got it, thanks. That's enough for me to keep things realistic for your area. So, kitchen and bathroom painting - any color direction yet, or still deciding on the kitchen walls?...
+   step=quote_gathering active={'key': 'room-3', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=closed fallback=False
+HOMEOWNER: The model's ready now. Anything else I should add to it?
+AGENT: Nothing needed there, Dana, the walk covered everything for the kitchen and bathroom project. If there's ever another space you want folded in, we'd start from the kitchen and walk a connected path to it in the same session. Otherwise, stil...
+   step=quote_gathering active={'key': 'room-3', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=named_rooms fallback=False
+  [PASS] step 6: named_rooms mode with the real rooms  -- {'scanProcessingComplete': True, 'canPromptAdditionalScan': True, 'canRequestQuote': True, 'canSubmitQuoteRequest': False, 'canPresentRequestCard': False, 'extensionPromptMode': 'named_rooms'}
+  [PASS] step 6: no rest-of-the-home invitation  -- Nothing needed there, Dana, the walk covered everything for the kitchen and bathroom project. If there's ever another space you want folded in, we'd start from the kitchen and walk a connected path to
+HOMEOWNER: Let's do the kitchen paint: walls and trim in a low-VOC warm white.
+AGENT: Warm white walls and trim will play nicely against those white cabinets without going stark or matchy. Low-VOC is smart with a kitchen you're clearly living and cooking in daily. Want the same warm white in the bathroom, or a different colo...
+   step=address_collection active={'key': 'room-3', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=named_rooms fallback=False
+HOMEOWNER: Yes, quotes please. My address is 118 Maple Street, Nashville TN, email dana@example.com.
+AGENT: Got it, thanks Dana, that address and email are saved. I'll put together a request covering warm white walls and trim for your kitchen and bathroom, priced for 37203, for you to review before anything goes out....
+   step=quote_request active={'key': 'room-3', 'name': 'kitchen', 'confidentName': True} unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=named_rooms fallback=False
+  [PASS] step 9: submitted  -- {"schemaVersion":"v1","quoteRequestId":"qr_8bd137df88fe","status":"submitted","expectations":{"copy":"Sounds good — I'm getting your request in front of local providers now. As soon as their quotes co
+  package room: kitchen | scope: selected rooms: kitchen, bathroom | model: {'reason': 'the export carries a 68 MB textured model of the kitchen, but it was not stored: 68 MB exceeds LIDARAI_MODEL_UPLOAD_MAX_MB=50', 'status': 'not_available'}
+  [PASS] package: room-level measurements for the active room  -- {'note': 'Measurements for the kitchen, from the home capture.', 'room': 'kitchen', 'storey': 1, 'fixtures': ['17x storage', '3x chair', '2x table', '1x dishwasher', '1x oven', '1x refrigerator', '1x sofa', '1x stove'], 'doorCount': 3, 'photoCount': 192, 'windowCount': 3, 'perimeterFeet': 113.9, 'floorAreaSquareFeet': 445.6, 'paintableWallSquareFeet': 920.7}
+  [PASS] package: scope carried
+  [PASS] package: stored room model linked (signed URL) or an honest reason  -- {'reason': 'the export carries a 68 MB textured model of the kitchen, but it was not stored: 68 MB exceeds LIDARAI_MODEL_UPLOAD_MAX_MB=50', 'status': 'not_available'}
+  [PASS] package: no jobId/threadId/homeownerId, address withheld
+  [FAIL] email composed
+HOMEOWNER: Now let's look at my other place. Which rooms do you have there?
+AGENT: Switching over now. This home has quite a few rooms — kitchen, living room, primary bedroom and bath, laundry room, powder room, four other bedrooms downstairs, a few sitting areas, and more. Anything in particular pulling your attention he...
+   step=quote_request active=None unresolved=None scope=selected_rooms/['kitchen', 'bathroom'] gates=named_rooms fallback=False
+  [PASS] home switch: flow.home now the other home, no active room carried  -- {'homeId': 'noah-house', 'roomCount': 19, 'activeRoom': None, 'unresolvedRoom': None}
+  [PASS] home switch: reply speaks to the other home's room count  -- Switching over now. This home has quite a few rooms — kitchen, living room, primary bedroom and bath, laundry room, powder room, four other bedrooms downstairs,
+
+RESULT home=quintin-house: 20/21 checks passed

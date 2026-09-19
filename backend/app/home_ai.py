@@ -8,11 +8,20 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
+from .anthropic_provider import AnthropicHomeAIError, call_anthropic_chat
 from .config import settings
+from .flow.wire import (
+    FlowScanContext,
+    FlowWire,
+    LocalContextWire,
+    LocalProvidersWire,
+    PriceGuidance,
+)
 from .home_context_builder import (
     HomeContextQuality,
+    _neutralize_injection,
     build_home_guide_model_context,
     context_payload_size_chars,
     evaluate_home_context_quality,
@@ -38,6 +47,7 @@ from .home_guide_tools import (
     quote_intent_detected,
 )
 from .models import SCHEMA_VERSION, now_utc
+from .provider_health import provider_health
 
 logger = logging.getLogger("lidarai.home_ai")
 
@@ -49,9 +59,45 @@ HOME_AI_DEVELOPER_PROMPT = build_home_guide_developer_prompt("control")
 HOME_AI_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["assistantMessage", "intent", "state", "suggestedReplies", "quoteDraft", "visualFocus"],
+    "required": ["assistantMessage", "intent", "state", "suggestedReplies", "quoteDraft", "visualFocus", "flowCapture"],
     "properties": {
         "assistantMessage": {"type": "string"},
+        "flowCapture": {
+            # Values the homeowner explicitly stated THIS turn (flow slots).
+            # Never inferred, never carried over from earlier turns; null /
+            # empty when the homeowner did not state the value.
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "firstName",
+                "zip",
+                "projectType",
+                "scopeOptions",
+                "materials",
+                "address",
+                "contactEmail",
+                "contactPhone",
+                "scopeIntent",
+                "scopeRooms",
+            ],
+            "properties": {
+                # Scope of the project as the homeowner STATED it: one of
+                # single_room | selected_rooms | whole_home (validated
+                # server-side; no enum here — the constrained-decoding
+                # grammar budget is tight); null unless they said so this
+                # turn. Never inferred from the rooms in view.
+                "scopeIntent": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "scopeRooms": {"type": "array", "items": {"type": "string"}, "maxItems": 12},
+                "firstName": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "zip": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "projectType": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "scopeOptions": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                "materials": {"type": "array", "items": {"type": "string"}, "maxItems": 8},
+                "address": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "contactEmail": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "contactPhone": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+            },
+        },
         "intent": {
             "type": "string",
             "enum": ["exploring", "design_advice", "pricing", "quote_readiness", "provider_request"],
@@ -311,6 +357,12 @@ class HomeAIChatRequest(BaseModel):
     attachments: list[HomeAIAttachment] = Field(default_factory=list, max_length=3)
     homeContext: HomeAIContextPacket = Field(default_factory=HomeAIContextPacket)
     workflowState: HomeAIWorkflowState = Field(default_factory=HomeAIWorkflowState)
+    # --- Flow additions (API_CONTRACT_V1 §3.1); optional, legacy clients omit them.
+    scanContext: Optional[FlowScanContext] = None
+    flowToken: Optional[str] = None
+    # Whole-home scans: the ingested home index this conversation is about.
+    # Absent for single-room captures, which behave exactly as before.
+    homeId: Optional[str] = Field(default=None, max_length=120)
 
 
 class HomeAIQuoteCTA(BaseModel):
@@ -336,6 +388,18 @@ class HomeAIChatResponse(BaseModel):
     promptVersion: str = HOME_GUIDE_PROMPT_VERSION
     promptVariant: HomeGuidePromptVariantID = "control"
     contextQuality: HomeContextQuality = Field(default_factory=HomeContextQuality)
+    # --- Flow additions (API_CONTRACT_V1 §3.2); additive, legacy clients ignore them.
+    flow: Optional[FlowWire] = None
+    priceGuidance: Optional[PriceGuidance] = None
+    localContext: Optional[LocalContextWire] = None
+    localProviders: Optional[LocalProvidersWire] = None
+    # Slot values the model captured this turn (model→server only; the flow
+    # runtime consumes and validates these — not decoded by any client).
+    _flow_capture: Optional[dict[str, Any]] = PrivateAttr(default=None)
+    # The model's message BEFORE homeowner-voice polishing — flow enforcement
+    # checks this alongside the polished text, so the sanitizer's rewrites
+    # ("capture" → "record") can't launder a gated phrase past the patterns.
+    _raw_message: str = PrivateAttr(default="")
 
 
 class HomeAIEventRequest(BaseModel):
@@ -373,7 +437,12 @@ class OpenAIHomeAIError(RuntimeError):
         self.client_request_id = client_request_id
 
 
-async def generate_home_ai_response(request: HomeAIChatRequest) -> HomeAIChatResponse:
+async def generate_home_ai_response(
+    request: HomeAIChatRequest,
+    *,
+    flow_directives: str | None = None,
+    max_images_override: int | None = None,
+) -> HomeAIChatResponse:
     thread_id = request.threadId or str(uuid.uuid4())
     prompt_variant = _resolve_prompt_variant(thread_id)
     context_quality = evaluate_home_context_quality(
@@ -381,14 +450,53 @@ async def generate_home_ai_response(request: HomeAIChatRequest) -> HomeAIChatRes
         request.workflowState,
         service_catalog=get_service_catalog(None),
     )
-    if settings.ai_provider == "openai" and settings.openai_api_key:
+    if settings.ai_provider == "anthropic" and settings.anthropic_api_key:
         try:
-            response = await _call_openai(thread_id, request, prompt_variant=prompt_variant)
+            response = await _call_anthropic(
+                thread_id,
+                request,
+                prompt_variant=prompt_variant,
+                flow_directives=flow_directives,
+                max_images_override=max_images_override,
+            )
             response.promptVariant = prompt_variant
             response.contextQuality = context_quality
+            provider_health.record_success()
+            _persist_and_record_turn(request, response)
+            return response
+        except Exception as exc:  # noqa: BLE001
+            kind = provider_health.record_failure(exc)
+            logger.exception(
+                "Anthropic home chat failed (%s); using local fallback",
+                kind,
+                extra={"thread_id": thread_id},
+            )
+            response = _fallback_response(
+                thread_id,
+                request,
+                prompt_variant=prompt_variant,
+                context_quality=context_quality,
+                fallback_reason="The full AI model could not answer this turn, so I am using a lightweight local reply.",
+            )
+            _persist_and_record_turn(request, response)
+            return response
+
+    if settings.ai_provider == "openai" and settings.openai_api_key:
+        try:
+            response = await _call_openai(
+                thread_id,
+                request,
+                prompt_variant=prompt_variant,
+                flow_directives=flow_directives,
+                max_images_override=max_images_override,
+            )
+            response.promptVariant = prompt_variant
+            response.contextQuality = context_quality
+            provider_health.record_success()
             _persist_and_record_turn(request, response)
             return response
         except OpenAIHomeAIError as exc:
+            provider_health.record_failure(exc)
             logger.warning(
                 "OpenAI home chat failed; using local fallback thread_id=%s model=%s status=%s error_type=%s error_code=%s retry_after=%s client_request_id=%s detail=%s",
                 thread_id,
@@ -410,6 +518,7 @@ async def generate_home_ai_response(request: HomeAIChatRequest) -> HomeAIChatRes
             _persist_and_record_turn(request, response)
             return response
         except Exception as exc:  # noqa: BLE001
+            provider_health.record_failure(exc)
             logger.exception("OpenAI home chat failed; using local fallback", extra={"thread_id": thread_id})
             response = _fallback_response(
                 thread_id,
@@ -443,15 +552,69 @@ async def record_home_ai_event(request: HomeAIEventRequest) -> HomeAIEventRespon
     return HomeAIEventResponse(eventId=event.id)
 
 
+async def _call_anthropic(
+    thread_id: str,
+    request: HomeAIChatRequest,
+    *,
+    prompt_variant: HomeGuidePromptVariantID,
+    flow_directives: str | None = None,
+    max_images_override: int | None = None,
+) -> HomeAIChatResponse:
+    """Anthropic path: same prompts and schema as OpenAI, stateless history
+    (always included), images-then-no-images attempt ladder."""
+    if max_images_override is not None:
+        max_images = max(0, int(max_images_override))
+    else:
+        max_images = max(0, int(settings.openai_max_images_per_request or 0))
+    attempts = [max_images] + ([0] if max_images > 0 else [])
+    last_error: AnthropicHomeAIError | None = None
+    for index, image_limit in enumerate(attempts):
+        responses_input = _responses_input(
+            request,
+            image_limit=image_limit,
+            include_history=True,
+            prompt_variant=prompt_variant,
+            flow_directives=flow_directives,
+        )
+        try:
+            parsed, model_used = await call_anthropic_chat(
+                thread_id, responses_input, HOME_AI_RESPONSE_SCHEMA
+            )
+            return _response_from_model_json(
+                thread_id,
+                request,
+                parsed,
+                model=model_used,
+                used_fallback=False,
+                prompt_variant=prompt_variant,
+            )
+        except AnthropicHomeAIError as exc:
+            last_error = exc
+            if index == len(attempts) - 1 or exc.status_code in {401, 403}:
+                break
+            logger.info(
+                "Retrying Anthropic home chat without images thread_id=%s status=%s detail=%s",
+                thread_id,
+                exc.status_code,
+                str(exc),
+            )
+    raise last_error or AnthropicHomeAIError("Anthropic model is not configured")
+
+
 async def _call_openai(
     thread_id: str,
     request: HomeAIChatRequest,
     *,
     prompt_variant: HomeGuidePromptVariantID,
+    flow_directives: str | None = None,
+    max_images_override: int | None = None,
 ) -> HomeAIChatResponse:
     primary_model = settings.openai_model.strip()
     fallback_model = settings.openai_fallback_model.strip()
-    max_images = max(0, int(settings.openai_max_images_per_request or 0))
+    if max_images_override is not None:
+        max_images = max(0, int(max_images_override))
+    else:
+        max_images = max(0, int(settings.openai_max_images_per_request or 0))
     attempts: list[tuple[str, int]] = [(primary_model, max_images)]
     if max_images > 0:
         attempts.append((primary_model, 0))
@@ -467,6 +630,7 @@ async def _call_openai(
                 model=model,
                 image_limit=image_limit,
                 prompt_variant=prompt_variant,
+                flow_directives=flow_directives,
             )
         except OpenAIHomeAIError as exc:
             last_error = exc
@@ -492,6 +656,7 @@ async def _call_openai_once(
     model: str,
     image_limit: int,
     prompt_variant: HomeGuidePromptVariantID,
+    flow_directives: str | None = None,
 ) -> HomeAIChatResponse:
     thread_state = _load_openai_thread_state(thread_id)
     previous_response_id = thread_state.get("previousResponseId") if thread_state.get("model") == model else None
@@ -515,6 +680,7 @@ async def _call_openai_once(
             image_limit=image_limit,
             include_history=previous_response_id is None,
             prompt_variant=prompt_variant,
+            flow_directives=flow_directives,
         ),
         "store": True,
         "reasoning": {"effort": settings.openai_reasoning_effort},
@@ -581,6 +747,7 @@ def _responses_input(
     image_limit: int,
     include_history: bool,
     prompt_variant: HomeGuidePromptVariantID,
+    flow_directives: str | None = None,
 ) -> list[dict[str, Any]]:
     frames_with_images = [frame for frame in request.homeContext.selectedKeyframes if frame.jpegBase64]
     included_image_ids = {frame.id for frame in frames_with_images[: max(0, image_limit)]}
@@ -598,8 +765,18 @@ def _responses_input(
             "text": json.dumps(
                 {
                     "homeContext": context_for_text,
+                    # History is client-supplied and unverified: an attacker
+                    # hitting the API directly puts whatever they like in it,
+                    # which is the same instruction-source-boundary problem the
+                    # context packet already neutralizes. Without this, the
+                    # input guard is bypassed by moving the payload out of
+                    # `message` and into `messages` (review of #63).
                     "conversationHistory": [
-                        {"role": msg.role, "content": msg.content, "createdAt": msg.createdAt}
+                        {
+                            "role": msg.role,
+                            "content": _neutralize_injection(msg.content or ""),
+                            "createdAt": msg.createdAt,
+                        }
                         for msg in request.messages[-8:]
                     ] if include_history else [],
                     "workflowState": request.workflowState.model_dump(mode="json", exclude_none=True),
@@ -608,6 +785,7 @@ def _responses_input(
                         for attachment in request.attachments
                     ],
                     "latestHomeownerMessage": request.message,
+                    **({"flowDirectives": flow_directives} if flow_directives else {}),
                     "promptVersion": HOME_GUIDE_PROMPT_VERSION,
                     "promptVariant": prompt_variant,
                     "contextPayloadSizeChars": context_payload_size_chars(model_context),
@@ -869,7 +1047,7 @@ def _response_from_model_json(
         ),
     )
     cta = _cta_from_state_and_draft(state, quote_draft)
-    return HomeAIChatResponse(
+    response = HomeAIChatResponse(
         threadId=thread_id,
         message=message,
         state=state,
@@ -887,6 +1065,11 @@ def _response_from_model_json(
             service_catalog=get_service_catalog(None),
         ),
     )
+    capture = parsed.get("flowCapture")
+    if isinstance(capture, dict):
+        response._flow_capture = capture
+    response._raw_message = str(parsed.get("assistantMessage") or "")
+    return response
 
 
 def _conversation_state_from_payload(
@@ -988,6 +1171,7 @@ def _fallback_response(
     assistant = _fallback_message(request, intent=intent, quote_draft=quote_draft)
     if fallback_reason:
         assistant = f"{assistant}\n\n{fallback_reason}"
+    raw_assistant = assistant
     assistant = _polish_homeowner_message(
         assistant,
         allow_technical=_asks_about_technology(request.message),
@@ -995,7 +1179,7 @@ def _fallback_response(
     state = _fallback_state(request, intent=intent, service_type=service_type, quote_draft=quote_draft)
     cta = _cta_from_state_and_draft(state, quote_draft)
 
-    return HomeAIChatResponse(
+    response = HomeAIChatResponse(
         threadId=thread_id,
         message=HomeAIChatMessage(role="assistant", content=assistant),
         state=state,
@@ -1014,6 +1198,8 @@ def _fallback_response(
             service_catalog=get_service_catalog(None),
         ),
     )
+    response._raw_message = raw_assistant
+    return response
 
 
 def _classify_intent(message: str) -> Literal["exploring", "design_advice", "pricing", "quote_readiness", "provider_request"]:
@@ -1354,14 +1540,10 @@ def _fallback_message(
     intent = intent or _classify_intent(request.message)
 
     if quote_draft:
-        price = ""
-        if quote_draft.estimatedRangeLow and quote_draft.estimatedRangeHigh:
-            price = (
-                f" A first planning range is about ${quote_draft.estimatedRangeLow:,.0f}-"
-                f"${quote_draft.estimatedRangeHigh:,.0f}, based on {quote_draft.estimateUnit or 'the visible scope'}."
-            )
+        # No self-authored price figures (client decision, Sep 1): real numbers
+        # only come back through the human-reviewed quote process.
         return (
-            f"I can help shape this into a provider-ready request.{price}\n\n"
+            "I can help shape this into a provider-ready request.\n\n"
             f"Based on {room_phrase}{measurement_phrase}, I drafted a concise scope below. "
             "Review it before sending; nothing goes to a provider until you choose one and approve the request."
         )
@@ -1440,7 +1622,9 @@ def _measurement_phrase(context: HomeAIContextPacket) -> str:
 def _make_quote_draft(request: HomeAIChatRequest, service_type: str | None) -> HomeAIQuoteDraft:
     context = request.homeContext
     service_type = service_type or request.workflowState.selectedServiceType
-    low, high, unit = _estimate_range(context, service_type)
+    # estimatedRange*/estimateUnit stay null (fields kept for contract
+    # additivity): the homeowner-facing draft carries no self-authored price
+    # (client decision, Sep 1). `_estimate_range` remains for internal use.
     summary = f"Homeowner is asking about: {request.message.strip()}"
     provider_request = _provider_request_text(context, request.message, service_type)
     assumptions = ["Measurements are rough planning details and should be field-verified."]
@@ -1457,9 +1641,9 @@ def _make_quote_draft(request: HomeAIChatRequest, service_type: str | None) -> H
         scopeNotes=_scope_notes(context, service_type),
         measurementAssumptions=assumptions,
         missingDetails=_missing_details(service_type),
-        estimatedRangeLow=low,
-        estimatedRangeHigh=high,
-        estimateUnit=unit,
+        estimatedRangeLow=None,
+        estimatedRangeHigh=None,
+        estimateUnit=None,
     )
 
 
@@ -1622,7 +1806,11 @@ def _prompt_assignment_path(thread_id: str) -> Path:
 
 
 def _persist_and_record_turn(request: HomeAIChatRequest, response: HomeAIChatResponse) -> None:
-    _persist_turn(request, response)
+    # The raw turn log is UNMASKED (full user text) — §12 keeps it off unless
+    # a specific debugging task turns it on. The masked flow journal is the
+    # durable conversation record.
+    if settings.raw_turn_log_enabled:
+        _persist_turn(request, response)
     try:
         record_home_guide_turn(
             storage_dir=settings.storage_dir,

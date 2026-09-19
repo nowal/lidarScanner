@@ -1,3 +1,6 @@
+# Render blueprint for the lidarai-processor service (scan pipeline + Home
+# Guide agent, one FastAPI app). Secrets are sync:false — set them in the
+# Render dashboard. Full deployment walkthrough: backend/docs/PROD_DEPLOY.md.
 services:
   - type: web
     name: lidarai-processor
@@ -16,6 +19,11 @@ services:
         sync: false
       - key: LIDARAI_CORS_ORIGINS
         value: "*"
+      # Fail fast on missing acceptance-critical config instead of serving a
+      # silently degraded service (/health explains what's missing).
+      - key: LIDARAI_STRICT_CONFIG
+        value: "true"
+      # ------------------------------------------------------ scan pipeline
       - key: LIDARAI_JOB_TIMEOUT_SECONDS
         value: "1200"
       - key: LIDARAI_JOB_RETENTION_DAYS
@@ -30,21 +38,84 @@ services:
         value: fast_onboarding
       - key: LIDARAI_TEXTURE_WORKERS
         value: "2"
+      # ----------------------------------------------------- model provider
+      # Beta configuration of record: Anthropic claude-sonnet-5, effort low
+      # (see backend/app/config.py). Switch to openai by flipping
+      # LIDARAI_AI_PROVIDER and setting the LIDARAI_OPENAI_* block instead.
       - key: LIDARAI_AI_PROVIDER
-        value: openai
+        value: anthropic
+      - key: LIDARAI_ANTHROPIC_API_KEY
+        sync: false
+      - key: LIDARAI_ANTHROPIC_MODEL
+        value: claude-sonnet-5
+      - key: LIDARAI_ANTHROPIC_EFFORT
+        value: low
       - key: LIDARAI_OPENAI_API_KEY
         sync: false
-      - key: LIDARAI_OPENAI_ORGANIZATION
-        value: ""
-      - key: LIDARAI_OPENAI_PROJECT
-        value: ""
       - key: LIDARAI_OPENAI_MODEL
         value: gpt-5.5
-      - key: LIDARAI_OPENAI_FALLBACK_MODEL
-        value: ""
       - key: LIDARAI_OPENAI_REASONING_EFFORT
         value: medium
-      - key: LIDARAI_OPENAI_REQUEST_TIMEOUT_SECONDS
-        value: "45"
       - key: LIDARAI_OPENAI_MAX_IMAGES_PER_REQUEST
         value: "1"
+      # -------------------------------------------------------- flow agent
+      - key: LIDARAI_FLOW_TOKEN_SECRET
+        sync: false
+      # -------------------------------- persistence (SOW §4 logging, §12)
+      # TakeShape's own Supabase project; apply
+      # backend/supabase/migrations/20260826_flow_agent_persistence.sql first.
+      - key: LIDARAI_SUPABASE_URL
+        sync: false
+      - key: LIDARAI_SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: LIDARAI_SUPABASE_JWT_SECRET
+        sync: false
+      # --------------------------------------------- operations (steps 9-10)
+      - key: LIDARAI_OPS_TOKEN
+        sync: false
+      - key: LIDARAI_OPS_WEBHOOK_URL
+        sync: false
+      # Lead email to operations. Resend is the transport that works from a
+      # PaaS host (outbound SMTP is blocked); the From address needs a
+      # verified Resend domain for production.
+      - key: LIDARAI_OPS_EMAIL
+        sync: false
+      - key: LIDARAI_RESEND_API_KEY
+        sync: false
+      - key: LIDARAI_OPS_EMAIL_FROM
+        sync: false
+      # Public origin of this service, no trailing slash: the signed
+      # quote-entry link inside the lead email is built from it.
+      - key: LIDARAI_PUBLIC_BASE_URL
+        sync: false
+      # Which flag opens the SOW §3 "no more scanning until processing
+      # completes" gate: processor_job | device_bake (docs/SCAN_SCOPE.md).
+      - key: LIDARAI_SCAN_COMPLETE_SIGNAL
+        value: processor_job
+      # Provider discovery (Google Places, a TakeShape-owned key). Off until
+      # TakeShape enables it; the provider table and ranking run either way.
+      - key: LIDARAI_PROVIDER_DISCOVERY_ENABLED
+        value: "false"
+      - key: LIDARAI_GOOGLE_PLACES_API_KEY
+        sync: false
+      # ------------------------------------------- agent price guidance
+      # SOW §6 deferred agent price ranges. Reversed by Chance on Sep 12
+      # 2026: the agent gives a wide, disclaimed ballpark from service + zip
+      # BEFORE a contractor is involved. Set explicitly here rather than
+      # flipped in code, so the decision is visible in the blueprint and a
+      # rollback is a dashboard change.
+      #
+      # The model never authors a figure: the band is server-computed,
+      # coarsely rounded, always disclaimed, and enforcement rejects any
+      # dollar amount outside the card it was handed.
+      - key: LIDARAI_AGENT_PRICE_GUIDANCE_ENABLED
+        value: "true"
+      # Grounds the band in web-searched local rates for the homeowner's zip
+      # (one Anthropic web_search per service+zip, cached 30 days; the static
+      # national table is the silent fallback). This SPENDS on the Anthropic
+      # key — set to "false" to keep guidance on the static table only.
+      - key: LIDARAI_PRICE_RESEARCH_ENABLED
+        value: "true"
+      # The remaining research/demo flags are deliberately absent: they
+      # default OFF and the delivery build leaves them unset (see
+      # backend/docs/CONFIG.md).

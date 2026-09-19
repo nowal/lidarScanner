@@ -1,0 +1,38 @@
+Subject: New quote request: Power Washing — whole home in 37033 (Sam) — qr_sample_rural
+
+Quote request qr_sample_rural · submitted 2026-09-09T14:30:00+00:00
+
+HOMEOWNER
+  Name: Sam
+  Email: sam@example.com
+  Phone: (931) 555-0100
+  Zip: 37033
+  Address: withheld until the homeowner selects a quote (release policy)
+
+PROJECT
+  Service: Power Washing
+  Scope of work: whole home
+  Scope: siding; front porch; driveway
+  Synopsis: Sam has a two-storey farmhouse with vinyl siding that has not been washed in years, plus a concrete driveway and a covered porch. Flexible on timing; wants one visit for all three.
+
+MEASUREMENTS
+  No measurements attached.
+
+3D MODEL
+  https://storage.example.com/home-assets/flow-models/sample.usdz?token=sample
+  (Signed link, valid ~30 days; no credentials needed.)
+
+SUGGESTED PROVIDERS
+  Ranked by review and social presence (partners tagged; scores explained per row):
+    1. Duck River Pressure Washing | prospect from google_places | (931) 555-0170 | score 0.62
+       Google: 4.9 stars, 7 reviews (verified 2026-09-08) https://maps.google.com/?cid=4001
+       small local set (<3 candidates)
+    2. Hickman County Exteriors | prospect from sheet:providers
+       no review or social data on file; small local set (<3 candidates)
+  Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
+
+ENTER THE CHECKED QUOTE
+  Set LIDARAI_PUBLIC_BASE_URL to include a one-click entry link here;
+  until then, upload via the ops API (OPS_GUIDE.md).
+
+The homeowner has been told their request is going out to local providers and that quotes come back in the app — no exact turnaround promised, and the people doing the checking are not named to them. The app shows no price until this quote is entered.
