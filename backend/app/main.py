@@ -113,9 +113,12 @@ def config_problems() -> list[str]:
         )
     if not settings.ops_token:
         problems.append("LIDARAI_OPS_TOKEN unset — the ops API is disabled (503)")
-    if not settings.supabase_jwt_secret:
+    if not settings.supabase_jwt_secret and not (
+        settings.supabase_url and settings.supabase_service_role_key
+    ):
         problems.append(
-            "LIDARAI_SUPABASE_JWT_SECRET unset — X-Homeowner-Token is ignored: every "
+            "Supabase Auth connection and legacy LIDARAI_SUPABASE_JWT_SECRET unset — "
+            "X-Homeowner-Token cannot be verified: every "
             "homeowner is anonymous, signed-in submits need contact details captured "
             "in chat, and their quote requests are readable with the service token alone"
         )
@@ -208,7 +211,7 @@ async def home_ai_chat(
     # scan-state reconciliation, journaling, and the additive `flow` /
     # `priceGuidance` response fields. Legacy requests work unchanged.
     return await run_flow_turn(
-        request_body, homeowner_id=homeowner_id_from_header(x_homeowner_token)
+        request_body, homeowner_id=await homeowner_id_from_header(x_homeowner_token)
     )
 
 

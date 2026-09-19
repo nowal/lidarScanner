@@ -51,7 +51,8 @@ class Settings(BaseSettings):
     # textured bake. TakeShape has not decided which the beta uses, so it is
     # configuration; under either, no scan prompt happens before the flag.
     scan_complete_signal: str = "processor_job"
-    # Homeowner identity: Supabase JWT verification (X-Homeowner-Token).
+    # Optional legacy verification when Supabase Auth is not configured.
+    # Deployed projects verify X-Homeowner-Token through /auth/v1/user.
     supabase_jwt_secret: str = ""
     # Supabase persistence (service role) — Week 2; unset = local JSONL only.
     supabase_url: str = ""

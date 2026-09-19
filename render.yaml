@@ -68,8 +68,6 @@ services:
         sync: false
       - key: LIDARAI_SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: LIDARAI_SUPABASE_JWT_SECRET
-        sync: false
       # --------------------------------------------- operations (steps 9-10)
       - key: LIDARAI_OPS_TOKEN
         sync: false

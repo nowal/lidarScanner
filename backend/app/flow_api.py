@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from .config import settings
 from .flow import FlowEngine
-from .flow.identity import verify_homeowner_token
+from .flow.identity import resolve_homeowner_token
 from .flow_quotes import (
     EXPECTATIONS,
     VALID_STATUSES,
@@ -86,8 +86,13 @@ def require_ops_token(authorization: Optional[str] = Header(default=None)) -> No
         raise HTTPException(status_code=401, detail="Invalid ops token")
 
 
-def homeowner_id_from_header(x_homeowner_token: Optional[str]) -> str | None:
-    return verify_homeowner_token(x_homeowner_token, settings.supabase_jwt_secret)
+async def homeowner_id_from_header(x_homeowner_token: Optional[str]) -> str | None:
+    return await resolve_homeowner_token(
+        x_homeowner_token,
+        supabase_url=settings.supabase_url,
+        api_key=settings.supabase_service_role_key,
+        jwt_secret=settings.supabase_jwt_secret,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -103,7 +108,7 @@ async def home_ai_opening(
     x_homeowner_token: Optional[str] = Header(default=None),
 ) -> HomeAIChatResponse:
     return await run_opening_turn(
-        request_body, homeowner_id=homeowner_id_from_header(x_homeowner_token)
+        request_body, homeowner_id=await homeowner_id_from_header(x_homeowner_token)
     )
 
 
@@ -129,7 +134,7 @@ async def submit_quote_request(
             detail="Quote requests require explicit confirmation (confirm: true)",
         )
     state = await resolve_flow_state(body.threadId, body.flowToken)
-    await _attach_identity(state, homeowner_id_from_header(x_homeowner_token))
+    await _attach_identity(state, await homeowner_id_from_header(x_homeowner_token))
 
     # Submission needs the real values (the token carries captured-flags
     # only; resolve_flow_state merges values back from the durable store).
@@ -256,7 +261,7 @@ async def _require_homeowner_access(record, x_homeowner_token: Optional[str]) ->
     service-token-gated."""
     if not record.homeownerId:
         return
-    sub = homeowner_id_from_header(x_homeowner_token)
+    sub = await homeowner_id_from_header(x_homeowner_token)
     if not sub:
         raise HTTPException(
             status_code=403,
