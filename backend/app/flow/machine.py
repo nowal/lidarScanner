@@ -337,8 +337,7 @@ class FlowEngine:
         # No address check: it is opportunistic, not required (see evaluate_gates).
         if require_values:
             contact_ok = bool(
-                state.homeowner_id
-                or state.homeowner_auth_sub
+                (not state.homeowner_is_guest and (state.homeowner_id or state.homeowner_auth_sub))
                 or slots.contact_email
                 or slots.contact_phone
             )

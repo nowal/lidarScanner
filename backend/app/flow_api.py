@@ -151,8 +151,7 @@ async def submit_quote_request(
     # A lead package needs someone ops can reach: a verified homeowner
     # identity or contact details captured in conversation.
     if not (
-        state.homeowner_id
-        or state.homeowner_auth_sub
+        (not state.homeowner_is_guest and (state.homeowner_id or state.homeowner_auth_sub))
         or state.slots.contact_email
         or state.slots.contact_phone
     ):

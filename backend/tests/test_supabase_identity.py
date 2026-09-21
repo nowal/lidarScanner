@@ -89,3 +89,63 @@ def test_supabase_connection_makes_legacy_jwt_secret_optional(monkeypatch):
     monkeypatch.setattr(settings, "supabase_url", "https://project.supabase.co")
     monkeypatch.setattr(settings, "supabase_service_role_key", "server-api-key")
     assert not any("JWT_SECRET" in problem for problem in config_problems())
+
+
+@pytest.mark.asyncio
+async def test_guest_status_is_verified_by_auth(monkeypatch):
+    user_id = "d552f674-9a33-4a7c-96e9-a797489f834f"
+    mock_auth(monkeypatch, lambda _: httpx.Response(200, json={"id": user_id, "is_anonymous": True}))
+    result = await identity.resolve_homeowner_token(
+        "guest-token", supabase_url="https://project.supabase.co", api_key="server-api-key",
+    )
+    assert result == user_id
+    assert result.is_anonymous is True
+
+
+@pytest.mark.asyncio
+async def test_guest_owns_flow_without_skipping_contact_and_upgrade_keeps_owner(monkeypatch):
+    from app import flow_runtime
+    from app.flow import FlowEngine, FlowState, FlowTokenCodec
+
+    auth_id = "d552f674-9a33-4a7c-96e9-a797489f834f"
+    homeowner_id = "593b96ce-187c-4d6c-8065-567151084ccd"
+    async def profile(_):
+        return {"id": homeowner_id, "full_name": "", "email": None, "phone": None}
+    monkeypatch.setattr(flow_runtime.supabase_store, "resolve_homeowner", profile)
+    state = FlowState(thread_id="guest-history")
+    await flow_runtime._attach_identity(state, identity.VerifiedHomeownerID(auth_id, is_anonymous=True))
+    assert state.homeowner_id == homeowner_id
+    assert state.homeowner_auth_sub == auth_id
+    assert not state.has_identity
+    assert "contact" in FlowEngine().missing_submission_slots(state, require_values=True)
+    codec = FlowTokenCodec("test-secret")
+    redacted = codec.decode(codec.encode(state))
+    assert redacted.homeowner_linked and redacted.homeowner_is_guest
+    assert not redacted.has_identity
+    assert "contact" in FlowEngine().missing_submission_slots(redacted)
+
+    state.slots.contact_email = "guest@example.invalid"
+    assert "contact" not in FlowEngine().missing_submission_slots(state, require_values=True)
+    flow_runtime.supabase_store._homeowner_cache[auth_id] = (0, {"email": None})
+    await flow_runtime._attach_identity(state, identity.VerifiedHomeownerID(auth_id))
+    assert auth_id not in flow_runtime.supabase_store._homeowner_cache
+    assert state.homeowner_id == homeowner_id
+    assert state.homeowner_auth_sub == auth_id
+    assert state.has_identity
+    assert state.slots.contact_email == "guest@example.invalid"
+
+
+@pytest.mark.asyncio
+async def test_signing_into_another_account_cannot_reassign_guest_history():
+    from fastapi import HTTPException
+    from app import flow_runtime
+    from app.flow import FlowState
+
+    state = FlowState(thread_id="guest-history", homeowner_auth_sub="original-guest",
+                      homeowner_id="original-homeowner", homeowner_is_guest=True)
+    with pytest.raises(HTTPException) as failure:
+        await flow_runtime._attach_identity(state, identity.VerifiedHomeownerID("another-account"))
+    assert failure.value.status_code == 403
+    assert state.homeowner_auth_sub == "original-guest"
+    assert state.homeowner_id == "original-homeowner"
+    assert state.homeowner_is_guest

@@ -158,6 +158,7 @@ class FlowState(BaseModel):
     homeowner_auth_sub: str | None = None
     # True in a client token whose identity ids were stripped by the codec.
     homeowner_linked: bool = False
+    homeowner_is_guest: bool = False
 
     step: FlowStep = FlowStep.RECOGNITION
     completed_steps: list[int] = Field(default_factory=list)
@@ -247,9 +248,11 @@ class FlowState(BaseModel):
 
     @property
     def has_identity(self) -> bool:
-        """Any verified way back to the person: a resolved homeowners row, a
-        verified auth sub, or a token attesting one was linked."""
-        return bool(self.homeowner_id or self.homeowner_auth_sub or self.homeowner_linked)
+        """An account identity that can stand in for captured contact details.
+
+        Guests own records but still need to provide email/phone for quotes.
+        """
+        return not self.homeowner_is_guest and bool(self.homeowner_id or self.homeowner_auth_sub or self.homeowner_linked)
 
     def mark_complete(self, step: FlowStep) -> None:
         if int(step) not in self.completed_steps:

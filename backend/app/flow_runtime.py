@@ -28,6 +28,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from .config import settings
@@ -512,7 +513,13 @@ async def _attach_identity(state: FlowState, auth_sub: str | None) -> None:
     (signed-in homeowners are never asked for an email in chat)."""
     if not auth_sub:
         return
-    state.homeowner_auth_sub = auth_sub
+    if state.homeowner_auth_sub and state.homeowner_auth_sub != str(auth_sub):
+        raise HTTPException(status_code=403, detail="This conversation belongs to another guest or account.")
+    is_guest = getattr(auth_sub, "is_anonymous", False)
+    if state.homeowner_is_guest and not is_guest:
+        supabase_store.invalidate_homeowner(auth_sub)
+    state.homeowner_auth_sub = str(auth_sub)
+    state.homeowner_is_guest = is_guest
     row = await supabase_store.resolve_homeowner(auth_sub)
     if row:
         state.homeowner_id = row.get("id")

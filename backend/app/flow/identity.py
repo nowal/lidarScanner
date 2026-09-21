@@ -30,6 +30,15 @@ import httpx
 logger = logging.getLogger("lidarai.flow.identity")
 
 
+class VerifiedHomeownerID(str):
+    """Auth user UUID plus the guest status verified by Supabase Auth."""
+
+    def __new__(cls, value: str, *, is_anonymous: bool = False):
+        identity = super().__new__(cls, value)
+        identity.is_anonymous = is_anonymous
+        return identity
+
+
 async def resolve_homeowner_token(
     token: str | None, *, supabase_url: str, api_key: str, jwt_secret: str = ""
 ) -> str | None:
@@ -48,7 +57,7 @@ async def resolve_homeowner_token(
             user = response.json()
         if not isinstance(user, dict) or not isinstance(user.get("id"), str):
             return None
-        return str(UUID(user["id"]))
+        return VerifiedHomeownerID(str(UUID(user["id"])), is_anonymous=user.get("is_anonymous") is True)
     except (httpx.HTTPError, ValueError, TypeError) as exc:
         # Never fall back to unverified claims or log the credential itself.
         logger.warning("Supabase homeowner verification failed (%s)", type(exc).__name__)
@@ -84,7 +93,7 @@ def verify_homeowner_token(token: str | None, jwt_secret: str) -> str | None:
             logger.info("Rejected homeowner token: expired")
             return None
         sub = payload.get("sub")
-        return str(sub) if sub else None
+        return VerifiedHomeownerID(str(sub), is_anonymous=payload.get("is_anonymous") is True) if sub else None
     except Exception as exc:  # noqa: BLE001 — any malformed token is just anonymous
         logger.warning("Could not verify homeowner token: %s", exc)
         return None

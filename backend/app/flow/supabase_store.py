@@ -58,6 +58,11 @@ _homeowner_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
 _HOMEOWNER_CACHE_TTL_SECONDS = 300.0
 
 
+def invalidate_homeowner(auth_user_id: str) -> None:
+    """Fetch newly confirmed contact details on the first turn after signup."""
+    _homeowner_cache.pop(auth_user_id, None)
+
+
 async def resolve_homeowner(auth_user_id: str) -> dict[str, Any] | None:
     """Map a verified Supabase auth user id (the JWT ``sub``) to its
     ``homeowners`` row.
