@@ -113,6 +113,18 @@ def config_problems() -> list[str]:
         )
     if not settings.ops_token:
         problems.append("LIDARAI_OPS_TOKEN unset — the ops API is disabled (503)")
+    if settings.ops_email and not (
+        settings.resend_api_key
+        or (settings.smtp_host and settings.smtp_username and settings.smtp_password)
+    ):
+        # The worker composes every lead and writes it to the outbox, then
+        # nobody receives it. Observed on TakeShape's first deployment
+        # (Quintin waited 30 minutes for an email that was on disk, Sep 23).
+        problems.append(
+            "LIDARAI_OPS_EMAIL is set but no mail transport is configured "
+            "(LIDARAI_RESEND_API_KEY or LIDARAI_SMTP_*) — lead emails are "
+            "captured to the outbox on disk and never sent"
+        )
     if not settings.supabase_jwt_secret and not (
         settings.supabase_url and settings.supabase_service_role_key
     ):

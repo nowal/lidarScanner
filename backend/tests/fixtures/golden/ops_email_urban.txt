@@ -19,7 +19,7 @@ PROJECT
 
 MEASUREMENTS
   Floor area: ~214 sq ft
-  Windows: 2
+  Window openings (scan): 2
     - kitchen (~214 sq ft)
   wallCount: 4
   windowCount: 2

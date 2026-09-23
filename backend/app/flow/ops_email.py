@@ -80,7 +80,10 @@ def _fmt_measurements(measurements: dict[str, Any]) -> list[str]:
     if area:
         label = "Room area" if measurements.get("room") else "Floor area"
         lines.append(f"{label}: ~{float(area):,.0f} sq ft")
-    for key, label in (("windowCount", "Windows"), ("doorCount", "Doors")):
+    # RoomPlan counts window surfaces, so a bank of three sashes is one.
+    # Labelled as openings so a painter does not price trim for two windows
+    # when there are eight (Quintin, Sep 23).
+    for key, label in (("windowCount", "Window openings (scan)"), ("doorCount", "Doors")):
         if measurements.get(key):
             lines.append(f"{label}: {measurements[key]}")
     if measurements.get("fixtures"):
