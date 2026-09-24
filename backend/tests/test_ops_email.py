@@ -110,6 +110,8 @@ async def test_outbox_capture_without_smtp(tmp_path, monkeypatch):
     record = _record()
     result = await send_ops_email(record)
     assert result == "outbox"
+    assert record.opsEmailDeliveredAt is None
+    assert record.opsEmailCapturedAt is not None
     captured = json.loads((tmp_path / "ops_outbox" / "qr_testloop01.json").read_text(encoding="utf-8"))
     assert captured["to"] == "ops-test@example.com"
     # exp/sig ride in the path — query-string "=" gets mangled by email
@@ -296,3 +298,42 @@ def test_queueing_is_a_no_op_when_email_is_off(monkeypatch):
 
     monkeypatch.setattr(settings, "ops_email", "")
     assert module.queue_ops_email(_record()) is False
+
+
+@pytest.mark.asyncio
+async def test_captured_email_requeues_when_transport_becomes_available(tmp_path, monkeypatch):
+    import asyncio
+    from app.flow import ops_email
+    from app.flow_quotes import quote_store
+    record = _record()
+    record.opsEmailQueuedAt = '2026-09-24T12:00:00Z'
+    record.opsEmailCapturedAt = '2026-09-24T12:00:01Z'
+    async def records(*a): return [record]
+    monkeypatch.setattr(quote_store, 'list', records)
+    monkeypatch.setattr(ops_email, '_queue', asyncio.Queue())
+    assert await ops_email.requeue_undelivered() == 0
+    monkeypatch.setattr(settings, 'resend_api_key', 'test-no-network')
+    assert await ops_email.requeue_undelivered() == 1
+    assert (await ops_email._queue.get()).id == record.id
+    record.opsEmailDeliveredAt = '2026-09-24T12:01:00Z'
+    assert await ops_email.requeue_undelivered() == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_disk_only_delivery_stamp_is_recovered(tmp_path, monkeypatch):
+    import asyncio
+    from app.flow import ops_email
+    from app.flow_quotes import quote_store
+    record = _record()
+    record.opsEmailQueuedAt = '2026-09-23T12:00:00Z'
+    record.opsEmailDeliveredAt = '2026-09-23T12:00:01Z'
+    outbox = tmp_path / 'ops_outbox'
+    outbox.mkdir(exist_ok=True)
+    (outbox / f'{record.id}.json').write_text('{}')
+    async def records(*a): return [record]
+    monkeypatch.setattr(quote_store, 'list', records)
+    monkeypatch.setattr(ops_email, '_queue', asyncio.Queue())
+    monkeypatch.setattr(settings, 'resend_api_key', 'test-no-network')
+    assert await ops_email.requeue_undelivered() == 1
+    assert record.opsEmailDeliveredAt is None
+    assert record.opsEmailCapturedAt == '2026-09-23T12:00:01Z'

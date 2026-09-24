@@ -487,9 +487,10 @@ class HomeIndex:
     """Named rooms for one scanned home, and the queries the agent needs."""
 
     def __init__(self, rooms: list[Room], bundle_id: str = "", storey_count: int = 1,
-                 home_model: dict | None = None):
+                 home_model: dict | None = None, upload: dict | None = None):
         # The whole-home bake (top-level ``model.usdz``), same shape as Room.model.
         self.home_model: dict = dict(home_model or {})
+        self.upload: dict = dict(upload or {})
         self.rooms = rooms
         self.bundle_id = bundle_id
         self.storey_count = storey_count
@@ -648,6 +649,7 @@ class HomeIndex:
             "storeys": self.storey_count,
             "rooms": [r.to_json() for r in self.rooms],
             "homeModel": dict(self.home_model),
+            "upload": dict(self.upload),
         }
 
     @classmethod
@@ -657,6 +659,7 @@ class HomeIndex:
             bundle_id=data.get("bundleId", ""),
             storey_count=int(data.get("storeys", 1) or 1),
             home_model=dict(data.get("homeModel") or {}),
+            upload=dict(data.get("upload") or {}),
         )
 
     # ------------------------------------------------------------- layout
