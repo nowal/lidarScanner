@@ -848,7 +848,16 @@ async def requeue_undelivered() -> int:
         return 0
     count = 0
     for record in records:
-        if record.opsEmailQueuedAt and not record.opsEmailDeliveredAt:
+        # Older builds stamped a disk-only capture as delivered. A surviving
+        # outbox file is evidence of that capture; recover those receipts too.
+        capture = Path(settings.storage_dir) / "ops_outbox" / f"{record.id}.json"
+        if record.opsEmailDeliveredAt and not record.opsEmailCapturedAt and capture.is_file():
+            record.opsEmailCapturedAt = record.opsEmailDeliveredAt
+            record.opsEmailDeliveredAt = None
+            await quote_store.save(record)
+        transport_ready = bool(settings.resend_api_key or _smtp_configured())
+        if (record.opsEmailQueuedAt and not record.opsEmailDeliveredAt
+                and (transport_ready or not record.opsEmailCapturedAt)):
             _queue.put_nowait(record)
             count += 1
     if count:
@@ -881,6 +890,7 @@ async def _mark_delivered(record: Any) -> None:
     try:
         record.opsEmailDeliveredAt = now_utc().isoformat()
         await quote_store.save(record)
+        (Path(settings.storage_dir) / "ops_outbox" / f"{record.id}.json").unlink(missing_ok=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not stamp lead email delivery on %s: %s", getattr(record, "id", "?"), exc)
 
@@ -895,6 +905,17 @@ async def send_ops_email(record: Any) -> str:
         from . import partners as partner_table
         from .local_research import discover_providers, lookup_provider_leads
         from .partners import coverage_gap, find_partners, find_prospects, rank_for_lead
+
+        if record.homeId:
+            # Requeued outbox mail may predate the final upload, and old signed
+            # links may have expired. Resolve the current room model at send.
+            from ..flow_quotes import build_model_link, quote_store
+            from .state import FlowState
+            latest = await build_model_link(FlowState(
+                thread_id=record.threadId, home_id=record.homeId, active_room_key=record.roomKey))
+            if latest.get("url"):
+                record.modelLink = latest
+                await quote_store.save(record)
 
         # Durable table first: a cold instance must not rank the sample seed.
         await partner_table.rehydrate()
@@ -926,8 +947,13 @@ async def send_ops_email(record: Any) -> str:
         html = build_ops_email_html(record, partners, researched, prospects, ranked)
         result = await send_ops_message(subject, body, html, outbox_key=record.id)
         logger.info("Ops lead email for %s: %s", record.id, result)
-        if result in ("sent", "outbox"):
+        if result == "sent":
             await _mark_delivered(record)
+        elif result == "outbox":
+            from ..flow_quotes import quote_store
+            from ..models import now_utc
+            record.opsEmailCapturedAt = now_utc().isoformat()
+            await quote_store.save(record)
         return result
     except Exception as exc:  # noqa: BLE001
         logger.warning("Ops lead email for %s failed: %s", record.id, exc)

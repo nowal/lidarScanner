@@ -413,6 +413,14 @@ def select_context_frames(
 ) -> list[dict[str, Any]]:
     """Frame selection with the failure modes handled rather than raised."""
     count = max(1, min(count, MAX_IMAGES))
+    # The phone already selected and resized these photos. Do not suppress
+    # them again or choose IDs for images that were intentionally not sent.
+    if manifest.get("aiSelectionVersion") == 1:
+        from .frame_select import frame_records, upright_rotation
+        available = {f["id"]: f for f in frame_records(manifest)}
+        ids = list(dict.fromkeys(manifest.get("aiSelectedFrameIds") or []))[:count]
+        return [{"id": fid, "turns": upright_rotation(available[fid]["cameraTransform"])}
+                for fid in ids if fid in available]
     try:
         frames = select_frames(room, manifest, count)
     except ConventionError as error:

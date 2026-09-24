@@ -46,7 +46,7 @@ def _path(home_id: str) -> Path:
     return base / f"{_safe(home_id)}.json"
 
 
-def save_index(home_id: str, index: HomeIndex) -> Path:
+def save_index(home_id: str, index: HomeIndex, *, durable: bool = True) -> Path:
     """Local file first (fast, and the only copy when Supabase is off), then
     the durable copy. The host's disk is ephemeral: without the durable
     write, every redeploy wiped the home and the demo answered "that home
@@ -55,7 +55,8 @@ def save_index(home_id: str, index: HomeIndex) -> Path:
     path = _path(home_id)
     path.write_text(json.dumps(payload), encoding="utf-8")
     _cache[home_id] = index
-    _durable_write(home_id, payload)
+    if durable:
+        _durable_write(home_id, payload)
     logger.info("Stored home index %s (%d rooms)", home_id, len(index.rooms))
     return path
 
@@ -158,7 +159,8 @@ def ingest_status(home_id: str) -> dict | None:
 
 
 async def ingest_from_storage(
-    home_id: str, bucket: str, object_path: str, *, enrich: bool = True
+    home_id: str, bucket: str, object_path: str, *, enrich: bool = True,
+    upload_revision: str | None = None, owner_id: str | None = None
 ) -> dict:
     """Pull an export the app uploaded to Supabase Storage and ingest it here.
 
@@ -184,15 +186,39 @@ async def ingest_from_storage(
         if not await supabase_store.download_object(bucket, object_path, archive):
             raise RuntimeError(f"could not download {bucket}/{object_path}")
         bundle_dir = await asyncio.to_thread(unpack_export, archive, workdir)
-        index = await asyncio.to_thread(ingest_bundle, bundle_dir, home_id)
+        previous = await load_index_async(home_id)
+        index = await asyncio.to_thread(ingest_bundle, bundle_dir, home_id, require_rooms=True)
+        # Metadata refreshes must keep homeowner names and finished models.
+        # A new revision still waits for a new final-model registration.
+        if previous is not None:
+            for room in index.rooms:
+                old = previous.by_key(room.key)
+                if old is not None:
+                    if not room.model:
+                        room.model = dict(old.model)
+                    if old.named_by_homeowner:
+                        index.rename_room(room.key, old.display_name)
+            if not index.home_model:
+                index.home_model = dict(previous.home_model)
+        if upload_revision:
+            index.upload = {"revision": upload_revision, "ownerId": owner_id,
+                            "contextObject": object_path, "modelsReady": False}
+        elif previous is not None:
+            index.upload = dict(previous.upload)
+        save_index(home_id, index)
+
         status["roomCount"] = len(index.rooms)
         if enrich and settings.anthropic_api_key:
             try:
-                enriched = await enrich_rooms(bundle_dir, home_id)
+                enriched = await enrich_rooms(bundle_dir, home_id, refresh=bool(upload_revision))
                 status["enrichedRooms"] = len(enriched)
             except Exception as exc:  # noqa: BLE001 -- the index is worth keeping without it
                 logger.warning("Appearance pass failed for %s: %s", home_id, exc)
                 status["enrichError"] = str(exc)[:200]
+        if upload_revision:
+            ready = HomeIndex.from_json(index.to_json())
+            ready.upload["contextReady"] = True
+            await save_index_confirmed(home_id, ready)
         status["status"] = "done"
         logger.info("Ingested %s from %s/%s: %d room(s)", home_id, bucket, object_path, len(index.rooms))
     except Exception as exc:  # noqa: BLE001
@@ -210,7 +236,7 @@ def _ingest_workroot() -> str:
     return str(root)
 
 
-def ingest_bundle(bundle_dir: str | Path, home_id: str | None = None) -> HomeIndex:
+def ingest_bundle(bundle_dir: str | Path, home_id: str | None = None, *, require_rooms: bool = False) -> HomeIndex:
     """Resolve an export into a named index and store it under ``home_id``.
 
     ``home_id`` defaults to the scan's own id (``meta.json`` ``id``, which is
@@ -233,6 +259,8 @@ def ingest_bundle(bundle_dir: str | Path, home_id: str | None = None) -> HomeInd
     home_id = (home_id or index.bundle_id or "").strip()
     if not home_id:
         raise ValueError("home_id is required when the bundle has no meta.json id")
+    if require_rooms and not index.rooms:
+        raise ValueError("The scan export has no saved rooms")
     store_room_geometry(bundle_dir, home_id, index)
     store_home_models(bundle_dir, home_id, index)
     save_index(home_id, index)
@@ -473,6 +501,7 @@ async def list_home_ids_async() -> list[str]:
 def forget(home_id: str) -> None:
     """Drop an index (homeowner deletion path, SOW section 12). The durable
     copy goes too, or deletion would only last until the next rehydrate."""
+    known_index = load_index(home_id)
     _cache.pop(home_id, None)
     path = _path(home_id)
     if path.exists():
@@ -490,6 +519,10 @@ def forget(home_id: str) -> None:
         return
 
     async def _delete_all() -> None:
+        payload = known_index.to_json() if known_index else await supabase_store.get_home_index(home_id)
+        owner = (payload or {}).get("upload", {}).get("ownerId")
+        if owner:
+            await supabase_store.delete_scan_uploads(home_id, owner)
         await supabase_store.delete_home_index(home_id)
         # The baked models describe the home in pixels; they go too.
         await supabase_store.delete_home_models(home_id)
@@ -576,3 +609,16 @@ def _cli() -> None:  # pragma: no cover -- operator convenience
 
 if __name__ == "__main__":  # pragma: no cover
     _cli()
+
+
+async def save_index_confirmed(home_id: str, index: HomeIndex) -> None:
+    """Do not acknowledge a staged upload before the durable index is saved."""
+    from . import supabase_store
+
+    # Older synchronous ingestion helpers may have scheduled snapshots.
+    # Finish them before publishing this revision's final snapshot.
+    if _pending:
+        await asyncio.gather(*list(_pending), return_exceptions=True)
+    if supabase_store.enabled() and not await supabase_store.put_home_index(home_id, index.to_json()):
+        raise RuntimeError("Could not save the home index to durable storage; retry this upload")
+    save_index(home_id, index, durable=False)

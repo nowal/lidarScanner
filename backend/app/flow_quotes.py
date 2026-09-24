@@ -183,6 +183,7 @@ class QuoteRequestRecord(BaseModel):
     # instead of vanishing with the in-memory queue (Sep 15 audit).
     opsEmailQueuedAt: Optional[str] = None
     opsEmailDeliveredAt: Optional[str] = None
+    opsEmailCapturedAt: Optional[str] = None
 
     # ---------------------------------------------------------------- views
     def homeowner_view(self) -> dict[str, Any]:
@@ -427,7 +428,7 @@ async def _home_model_link(state: FlowState) -> dict[str, Any]:
     different problems with different owners."""
     from .flow import home_registry
 
-    index = home_registry.load_index(state.home_id)
+    index = await home_registry.load_index_async(state.home_id)
     if index is None:
         return {"status": "not_available",
                 "reason": "the walked-home index for this conversation is not loaded on this host"}
@@ -440,7 +441,8 @@ async def _home_model_link(state: FlowState) -> dict[str, Any]:
         candidates.append(("whole home", index.home_model))
     for name, record in candidates:
         if record.get("object"):
-            signed = await supabase_store.sign_home_model(record["object"])
+            signed = (await supabase_store._signed_storage_url(record["bucket"], record["object"])
+                      if record.get("bucket") else await supabase_store.sign_home_model(record["object"]))
             if signed:
                 return {
                     "kind": "supabase_signed_url",

@@ -172,6 +172,14 @@ async def submit_quote_request(
                 },
             )
 
+    if state.home_id:
+        from .flow.home_registry import load_index_async
+        index = await load_index_async(state.home_id)
+        if index and index.upload and not index.upload.get("modelsReady"):
+            return JSONResponse(status_code=409, content={
+                "schemaVersion": SCHEMA_VERSION, "error": "scan_upload_pending",
+                "missingSlots": ["final_model_upload"],
+            })
     measurements = _measurements_from_context(body.homeContext)
     record = await create_quote_request(
         state,
@@ -830,3 +838,142 @@ async def ops_entry_submit(request_id: str, body: OpsEntrySubmission) -> JSONRes
     await quote_store.save(record)
     logger.info("Ops entry page added quote to %s", request_id)
     return JSONResponse({"schemaVersion": SCHEMA_VERSION, "status": record.status, "quoteId": quote.id})
+
+
+# Staged on-device uploads. Legacy /ingest remains available to old builds;
+# these routes require a verified Supabase guest/account and its upload row.
+class ScanContextUpload(HomeIngestRequest):
+    revision: str = Field(pattern=r"^[a-f0-9-]{36}$")
+
+
+class ScanModelUpload(BaseModel):
+    key: str = Field(pattern=r"^(home|room-[0-9]+)$")
+    bucket: str = "metashape-exports"
+    objectPath: str = Field(min_length=1, max_length=500)
+    bytes: int = Field(gt=0, le=1_048_576_000)
+
+
+class ScanModelsUpload(BaseModel):
+    revision: str = Field(pattern=r"^[a-f0-9-]{36}$")
+    models: list[ScanModelUpload] = Field(min_length=1, max_length=250)
+
+
+async def _scan_upload_owner(home_id: str, token: str | None) -> str:
+    from .flow import home_registry, supabase_store
+
+    if not re.fullmatch(r"[a-f0-9-]{36}", home_id):
+        raise HTTPException(status_code=422, detail="Invalid scan id")
+    sub = await homeowner_id_from_header(token)
+    if not sub:
+        raise HTTPException(status_code=401, detail="A verified homeowner session is required")
+    homeowner = await supabase_store.resolve_homeowner(sub)
+    if not homeowner or not homeowner.get("id"):
+        raise HTTPException(status_code=403, detail="No homeowner profile for this session")
+    owner = str(homeowner["id"]).lower()
+    index = await home_registry.load_index_async(home_id)
+    if index and index.upload.get("ownerId"):
+        if index.upload["ownerId"] != owner:
+            raise HTTPException(status_code=403, detail="This scan belongs to another homeowner")
+    else:
+        # Even an index from before staged uploads must not be claimable by
+        # choosing its UUID as a new folder in one's own Storage namespace.
+        try:
+            owners = await supabase_store.scan_upload_owners(home_id)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Could not verify scan ownership") from exc
+        if owners != {owner}:
+            raise HTTPException(status_code=403, detail="This scan has no matching upload ownership record")
+    return owner
+
+
+def _check_scan_object(home_id: str, owner: str, bucket: str, path: str, extension: str) -> None:
+    # Exact canonical paths only. No encoded separators, traversal, foreign
+    # bucket, or alternate homeowner folder passed to the service credential.
+    parts = path.split("/")
+    if (bucket != "metashape-exports" or len(parts) != 3
+            or parts[:2] != [owner, home_id]
+            or not re.fullmatch(r"[A-Za-z0-9_-]+" + re.escape(extension), parts[-1])):
+        raise HTTPException(status_code=403, detail="The object must be this homeowner's scan upload")
+
+
+@router.post("/ai/homes/{home_id}/uploads/context", dependencies=[Depends(require_token)], status_code=202)
+async def upload_scan_context(home_id: str, body: ScanContextUpload, background: BackgroundTasks,
+                              x_homeowner_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    from .flow import home_registry
+
+    owner = await _scan_upload_owner(home_id, x_homeowner_token)
+    _check_scan_object(home_id, owner, body.bucket, body.objectPath, ".zip")
+    current = home_registry.ingest_status(home_id)
+    if current and current.get("status") in ("queued", "running"):
+        if current.get("objectPath") != body.objectPath:
+            raise HTTPException(status_code=409, detail="Another upload is being indexed; retry shortly")
+        return JSONResponse(status_code=202, content={"status": current["status"]})
+    index = await home_registry.load_index_async(home_id)
+    if (index and index.upload.get("revision") == body.revision
+            and index.upload.get("contextObject") == body.objectPath
+            and index.upload.get("contextReady")):
+        return JSONResponse(status_code=202, content={"status": "done"})
+    home_registry._ingest_status[home_id] = {"status": "queued", "objectPath": body.objectPath}
+    background.add_task(home_registry.ingest_from_storage, home_id, body.bucket, body.objectPath,
+                        enrich=body.enrich, upload_revision=body.revision, owner_id=owner)
+    return JSONResponse(status_code=202, content={"status": "queued"})
+
+
+@router.get("/ai/homes/{home_id}/uploads/context", dependencies=[Depends(require_token)])
+async def scan_context_status(home_id: str, objectPath: str,
+                              x_homeowner_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    from .flow import home_registry
+
+    owner = await _scan_upload_owner(home_id, x_homeowner_token)
+    _check_scan_object(home_id, owner, "metashape-exports", objectPath, ".zip")
+    index = await home_registry.load_index_async(home_id)
+    if index and index.upload.get("contextObject") == objectPath and index.upload.get("contextReady"):
+        return JSONResponse({"status": "done", "roomCount": len(index.rooms)})
+    status = home_registry.ingest_status(home_id) or {}
+    if status.get("objectPath") == objectPath:
+        return JSONResponse({k: status[k] for k in ("status", "error", "roomCount") if k in status})
+    return JSONResponse({"status": "unknown"})  # e.g. host restarted: POST the same object again
+
+
+@router.post("/ai/homes/{home_id}/uploads/models", dependencies=[Depends(require_token)])
+async def upload_scan_models(home_id: str, body: ScanModelsUpload,
+                             x_homeowner_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    from .flow import home_registry, supabase_store
+    from .home_index import HomeIndex
+
+    owner = await _scan_upload_owner(home_id, x_homeowner_token)
+    index = await home_registry.load_index_async(home_id)
+    if not index or not index.upload.get("contextReady") or index.upload.get("revision") != body.revision:
+        raise HTTPException(status_code=409, detail="Wait for this scan revision's context upload to finish")
+    expected = {r.key for r in index.rooms} | {"home"}
+    keys = [m.key for m in body.models]
+    if len(keys) != len(set(keys)) or set(keys) != expected:
+        raise HTTPException(status_code=422, detail="Upload the final home model and every area's model")
+    for model in body.models:
+        _check_scan_object(home_id, owner, model.bucket, model.objectPath, ".usdz")
+        try:
+            actual_size = await supabase_store.stored_object_size(model.bucket, model.objectPath)
+        except Exception as exc:
+            raise HTTPException(status_code=422, detail=f"Model {model.key} is not available in Storage") from exc
+        if actual_size != model.bytes:
+            raise HTTPException(status_code=422, detail=f"Model {model.key} upload is incomplete")
+    # Re-read after network awaits: a newer scan revision may have started.
+    current = home_registry.load_index(home_id)
+    ingest = home_registry.ingest_status(home_id) or {}
+    if (ingest.get("status") in ("queued", "running")
+            or not current or current.upload.get("revision") != body.revision):
+        raise HTTPException(status_code=409, detail="This scan has a newer upload revision")
+    updated = HomeIndex.from_json(current.to_json())
+    for model in body.models:
+        record = {"bucket": model.bucket, "object": model.objectPath, "bytes": model.bytes,
+                  "uploadedAt": home_registry.now_iso(), "file": f"{model.key}.usdz"}
+        if model.key == "home":
+            updated.home_model = record
+        else:
+            updated.by_key(model.key).model = record
+    updated.upload["modelsReady"] = True
+    try:
+        await home_registry.save_index_confirmed(home_id, updated)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return JSONResponse({"status": "done", "modelCount": len(body.models)})

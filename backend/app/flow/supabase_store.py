@@ -636,3 +636,62 @@ class _NoCloseClient:
 
     async def __aexit__(self, *exc: Any) -> None:
         return None
+
+
+async def scan_upload_owners(home_id: str) -> set[str]:
+    """Use the database's upload records when upgrading a legacy home index."""
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        response = await client.get(
+            f"{settings.supabase_url.rstrip('/')}/rest/v1/home_assets",
+            headers={"apikey": settings.supabase_service_role_key,
+                     "Authorization": f"Bearer {settings.supabase_service_role_key}"},
+            params={"select": "homeowner_id", "storage_path": f"like.*/{home_id}/*"},
+        )
+        response.raise_for_status()
+        return {str(row["homeowner_id"]).lower() for row in response.json()}
+
+
+async def stored_object_size(bucket: str, object_path: str) -> int:
+    """Verify a direct phone upload without downloading a potentially huge USDZ."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.head(
+            f"{settings.supabase_url.rstrip('/')}/storage/v1/object/authenticated/{bucket}/{object_path}",
+            headers={"apikey": settings.supabase_service_role_key,
+                     "Authorization": f"Bearer {settings.supabase_service_role_key}"},
+        )
+        response.raise_for_status()
+        return int(response.headers.get("content-length", "0"))
+
+
+async def delete_scan_uploads(home_id: str, owner_id: str) -> bool:
+    """The staged source files live in the homeowner's private export folder."""
+    from uuid import UUID
+    try:
+        prefix = f"{UUID(owner_id)}/{UUID(home_id)}/"
+    except ValueError:
+        return False
+    headers = {"apikey": settings.supabase_service_role_key,
+               "Authorization": f"Bearer {settings.supabase_service_role_key}"}
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            while True:
+                listed = await client.post(
+                    f"{settings.supabase_url.rstrip('/')}/storage/v1/object/list/metashape-exports",
+                    headers=headers, json={"prefix": prefix, "limit": 1000})
+                listed.raise_for_status()
+                paths = [prefix + item['name'] for item in listed.json()
+                         if item.get('id') and '/' not in item.get('name', '')]
+                if not paths:
+                    break
+                removed = await client.request(
+                    'DELETE', f"{settings.supabase_url.rstrip('/')}/storage/v1/object/metashape-exports",
+                    headers=headers, json={"prefixes": paths})
+                removed.raise_for_status()
+            rows = await client.delete(
+                f"{settings.supabase_url.rstrip('/')}/rest/v1/home_assets", headers=headers,
+                params={"homeowner_id": f"eq.{owner_id}", "storage_path": f"like.{prefix}*"})
+            rows.raise_for_status()
+        return True
+    except Exception as exc:
+        logger.warning("Could not delete staged scan uploads for %s: %s", home_id, exc)
+        return False
