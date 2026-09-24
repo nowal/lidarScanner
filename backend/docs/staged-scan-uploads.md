@@ -10,6 +10,8 @@ The saved scan UUID remains the Home Guide home ID. New routes require both the 
 
 Context contains `meta.json`, per-area `room.json`, `floor.json`, `rebuild/manifest.json`, and up to four JPEGs with a 768-pixel maximum long edge. `aiSelectionVersion: 1` and `aiSelectedFrameIds` preserve the phone's choices. The backend corrects native image orientation from camera gravity. Empty cloud exports fail visibly.
 
+Cold home-index reads use a fresh `cacheNonce` so a restarted worker cannot retain a cached pre-model snapshot. Live verification observed a CDN HIT after a successful model registration; an origin read confirmed the saved model references. Supabase documents this [cache bypass](https://supabase.com/docs/guides/storage/cdn/smart-cdn#bypassing-cache) for mutable objects.
+
 Quote submission waits for `upload.modelsReady`. Email links prefer the room under discussion, then the whole home. New records specify their Storage bucket; legacy `home-models/...` links still work. Requeued emails refresh model links before sending. Forgetting a staged home removes its source uploads and database asset rows along with the derived index.
 
 ## Email setup
