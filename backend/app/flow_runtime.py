@@ -1126,6 +1126,20 @@ def _build_directives(
     lines: list[str] = [
         "FLOW DIRECTIVES (server-enforced; follow exactly — violations are "
         "stripped before the homeowner sees them):",
+        # RoomPlan reports window SURFACES. A bay of three side-by-side
+        # sashes is one surface, so "2 windows" in the scan can be 8 windows
+        # to a painter pricing trim (Quintin, Sep 23). The number is still
+        # useful -- it is a floor and it says where the glass is -- but it
+        # must never be stated as the count of windows.
+        "- WINDOW COUNTS FROM THE SCAN ARE OPENINGS, NOT WINDOWS. The scan "
+        "counts window sections in the wall; a bank of several panes side by "
+        "side is ONE section. Say 'window sections' or 'window openings' for "
+        "that number, never 'windows'. When the job depends on how many "
+        "individual windows there are -- painting trim, cleaning, "
+        "replacement, blinds -- ask the homeowner how many windows are in "
+        "those sections, and use THEIR number in anything you write up. If "
+        "they have not said, the request must say 'N window sections; "
+        "individual count not confirmed', not a number of windows.",
     ]
     if home_index is not None:
         lines.extend(_home_directives(state, home_index))
@@ -1609,10 +1623,11 @@ def _build_directives(
                 "- WHAT IS ON FILE about each provider who quoted (relationship, "
                 "rating, reviews, website), for when they ask whether a company "
                 "is any good: 'partner' is a company I work with, 'quoted' has "
-                "done work through me before, 'prospect' was found and checked "
-                "by my team. Say what is on file plainly and offer the website or "
-                "Google profile; where nothing is on file, say they came through "
-                "my team's vetting and offer to get references. Never say you "
+                "done work through me before, 'prospect' is one I found and "
+                "vetted before bringing them to you. Say what is on file plainly "
+                "and offer the website or Google profile; where nothing is on "
+                "file, say you vetted them before bringing them and offer to get "
+                "references. Never say you "
                 "have no access to their reviews. Providers JSON: "
                 + json.dumps(quotes_on_file, ensure_ascii=True)
             )
@@ -1673,8 +1688,10 @@ def _build_directives(
                 "- Everything a quote request needs is captured, but the "
                 "homeowner has NOT agreed to one yet. Ask them — plainly and "
                 "once — whether you should put what you've discussed together "
-                "as a request for my team to price, and then wait "
-                "for their answer. Do NOT present, describe, or promise a "
+                "so YOU can get real pricing from local companies for them, "
+                "and then wait for their answer. Say it as something you do "
+                "for them ('I'll get pricing from local companies'), never as "
+                "a hand-off to a team. Do NOT present, describe, or promise a "
                 "request card this turn: nothing goes anywhere until they say "
                 "yes."
             )

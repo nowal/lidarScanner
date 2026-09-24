@@ -220,7 +220,7 @@ def compute_price_guidance(
             if high <= low:
                 high = low * 2
             basis = (
-                f"{window_count} windows counted in the walk, {service_type.lower()}"
+                f"{window_count} window openings counted in the walk, {service_type.lower()}"
                 " -- typical per-window rates, inside and out"
             )
             return PriceGuidance(lowUsd=low, highUsd=high, basis=basis, disclaimer=DISCLAIMER)

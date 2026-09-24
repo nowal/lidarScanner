@@ -19,7 +19,7 @@ PROJECT
 
 MEASUREMENTS
   Floor area: ~214 sq ft
-  Windows: 2
+  Window openings (scan): 2
     - kitchen (~214 sq ft)
   wallCount: 4
   windowCount: 2
@@ -55,7 +55,7 @@ SUGGESTED PROVIDERS
   Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
 
 ENTER THE CHECKED QUOTE
-  https://ops.example.com/api/v1/ops/entry/qr_sample_urban/1790906992/486a38ed339b4198fa0a0053636b03452f62c74f18415faeac1b0722b46c0a2c
+  https://ops.example.com/api/v1/ops/entry/qr_sample_urban/1791398200/cfa5d712b2b1fe50240500b6cc1ea42a8709aa21344b560b5e0108c91ed6a2a2
   (link is signed for this request and expires in 14 days; the quote
   you enter is presented to the homeowner in the app automatically)
 

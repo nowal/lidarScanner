@@ -17,7 +17,7 @@ PROJECT
   Synopsis: Alex wants every window in a 1920s bungalow cleaned inside and out before listing photos next month, screens included. Mentioned two second-floor windows that are hard to reach.
 
 MEASUREMENTS
-  Windows: 14
+  Window openings (scan): 14
   windowCount: 14
 
 3D MODEL

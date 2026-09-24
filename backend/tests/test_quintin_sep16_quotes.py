@@ -32,7 +32,7 @@ class _Researched:
 def test_window_cleaning_is_priced_per_window_never_per_square_foot():
     g = compute_price_guidance("Window Cleaning", 2300.0, researched=_Researched(), window_count=15)
     assert 100 <= g.lowUsd <= 150 and 300 <= g.highUsd <= 400, (g.lowUsd, g.highUsd)
-    assert "15 windows" in g.basis and "per-window" in g.basis
+    assert "15 window openings" in g.basis and "per-window" in g.basis
     # No count yet: the typical band, still never thousands.
     g = compute_price_guidance("Window Cleaning", 2300.0, researched=_Researched())
     assert g.highUsd <= 600 and "nothing measured" in g.basis
