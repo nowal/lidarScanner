@@ -98,19 +98,24 @@ def load_index(home_id: str | None) -> HomeIndex | None:
     return index
 
 
-async def load_index_async(home_id: str | None) -> HomeIndex | None:
+async def load_index_async(home_id: str | None, *, refresh: bool = False) -> HomeIndex | None:
     """Same, but falls back to the durable copy — this is what makes a home
     survive a redeploy."""
     if not home_id:
         return None
     local = load_index(home_id)
-    if local is not None:
+    if local is not None and not refresh:
         return local
     from . import supabase_store
 
     payload = await supabase_store.get_home_index(home_id)
+    # An ingestion or model registration may have published a newer index
+    # while this read was in flight. Never overwrite it with that older read.
+    current = load_index(home_id)
+    if current is not None and current is not local:
+        return current
     if not payload:
-        return None
+        return local
     try:
         index = HomeIndex.from_json(payload)
     except Exception as exc:  # noqa: BLE001
@@ -178,7 +183,8 @@ async def ingest_from_storage(
 
     from . import supabase_store
 
-    status = {"status": "running", "bucket": bucket, "objectPath": object_path}
+    status = {"status": "running", "stage": "reading_scan", "bucket": bucket,
+              "objectPath": object_path, "revision": upload_revision}
     _ingest_status[home_id] = status
     workdir = Path(tempfile.mkdtemp(prefix=f"ingest-{home_id}-", dir=_ingest_workroot()))
     try:
@@ -209,17 +215,20 @@ async def ingest_from_storage(
 
         status["roomCount"] = len(index.rooms)
         if enrich and settings.anthropic_api_key:
+            status.update(stage="analyzing_photos", completedRooms=0, totalRooms=len(index.rooms))
             try:
-                enriched = await enrich_rooms(bundle_dir, home_id, refresh=bool(upload_revision))
+                enriched = await enrich_rooms(bundle_dir, home_id, refresh=bool(upload_revision), progress=status)
                 status["enrichedRooms"] = len(enriched)
             except Exception as exc:  # noqa: BLE001 -- the index is worth keeping without it
                 logger.warning("Appearance pass failed for %s: %s", home_id, exc)
                 status["enrichError"] = str(exc)[:200]
         if upload_revision:
+            status["stage"] = "saving_context"
             ready = HomeIndex.from_json(index.to_json())
             ready.upload["contextReady"] = True
             await save_index_confirmed(home_id, ready)
         status["status"] = "done"
+        status["stage"] = "ready"
         logger.info("Ingested %s from %s/%s: %d room(s)", home_id, bucket, object_path, len(index.rooms))
     except Exception as exc:  # noqa: BLE001
         status["status"] = "failed"
@@ -403,6 +412,7 @@ async def enrich_rooms(
     room_keys: list[str] | None = None,
     *,
     refresh: bool = False,
+    progress: dict | None = None,
 ) -> dict[str, dict]:
     """The appearance pass for several rooms (all of them when ``room_keys``
     is None), one model call each, sequentially. Returns ``{room_key:
@@ -413,6 +423,8 @@ async def enrich_rooms(
     out: dict[str, dict] = {}
     for key in keys:
         out[key] = await enrich_room(bundle_dir, home_id, key, refresh=refresh)
+        if progress is not None:
+            progress["completedRooms"] = len(out)
     # The documents are cached on this machine's disk, which the export is on
     # and the server is not. Copying them onto the index is what actually
     # delivers them: the index is the object that gets uploaded, and the one

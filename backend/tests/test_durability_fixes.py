@@ -256,3 +256,24 @@ async def test_cold_load_does_not_keep_a_cached_pre_model_index(monkeypatch, tmp
     second = await home_registry.load_index_async(home_id)
     assert second.upload["modelsReady"] is True
     home_registry._cache.pop(home_id, None)
+
+
+@pytest.mark.asyncio
+async def test_late_storage_read_cannot_replace_newly_completed_ingestion(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, 'storage_dir', str(tmp_path))
+    home_id = 'late-index-read'
+    started, finish = asyncio.Event(), asyncio.Event()
+    stale = HomeIndex([], bundle_id=home_id, upload={'contextReady': False})
+    async def get(home):
+        started.set()
+        await finish.wait()
+        return stale.to_json()
+    monkeypatch.setattr(supabase_store, 'get_home_index', get)
+    reading = asyncio.create_task(home_registry.load_index_async(home_id))
+    await started.wait()
+    ready = HomeIndex([], bundle_id=home_id, upload={'contextReady': True})
+    home_registry.save_index(home_id, ready, durable=False)
+    finish.set()
+    assert await reading is ready
+    assert home_registry.load_index(home_id).upload['contextReady'] is True
+    home_registry._cache.pop(home_id, None)
