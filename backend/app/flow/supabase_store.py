@@ -345,6 +345,10 @@ async def get_home_index(home_id: str) -> dict | None:
             resp = await client.get(
                 f"{settings.supabase_url.rstrip('/')}/storage/v1/object/"
                 f"{_HOME_BUCKET}/{_home_object(home_id)}",
+                # A cold worker must not pin the pre-model snapshot in memory.
+                # Smart CDN can serve an overwritten index for up to 60 seconds;
+                # cacheNonce forces this small, mutable document to the origin.
+                params={"cacheNonce": str(time.time_ns())},
                 headers={
                     "apikey": settings.supabase_service_role_key,
                     "Authorization": f"Bearer {settings.supabase_service_role_key}",

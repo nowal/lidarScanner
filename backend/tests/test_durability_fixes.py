@@ -224,3 +224,35 @@ async def test_a_durable_write_failure_is_reported_not_swallowed_silently(monkey
     with caplog.at_level("WARNING"):
         assert await ss.put_home_index("h", {}) is False
     assert any("home-index upload failed" in r.getMessage() for r in caplog.records),         "a failed durable write must be visible in the logs, not swallowed"
+
+
+@pytest.mark.asyncio
+async def test_cold_load_does_not_keep_a_cached_pre_model_index(monkeypatch, tmp_path):
+    """Production served a CDN HIT after registration despite no-cache headers."""
+    import httpx
+
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "supabase_url", "https://example.supabase.co")
+    monkeypatch.setattr(settings, "supabase_service_role_key", "service-key")
+    origin = {"bundleId": "cdn-home", "rooms": [], "upload": {"modelsReady": False}}
+    edge = {}
+
+    def cdn(request):
+        key = request.url.params.get("cacheNonce", "unchanged-url")
+        if key not in edge:
+            edge[key] = json.loads(json.dumps(origin))
+        return httpx.Response(200, json=edge[key])
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(cdn), **kw))
+    home_id = "cdn-home"
+    home_registry._cache.pop(home_id, None)
+    first = await home_registry.load_index_async(home_id)
+    assert first.upload["modelsReady"] is False
+    origin["upload"]["modelsReady"] = True
+    # A redeployed worker has neither its previous cache nor its local file.
+    home_registry._cache.pop(home_id, None)
+    home_registry._path(home_id).unlink()
+    second = await home_registry.load_index_async(home_id)
+    assert second.upload["modelsReady"] is True
+    home_registry._cache.pop(home_id, None)
