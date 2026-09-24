@@ -913,7 +913,8 @@ async def upload_scan_context(home_id: str, body: ScanContextUpload, background:
             and index.upload.get("contextObject") == body.objectPath
             and index.upload.get("contextReady")):
         return JSONResponse(status_code=202, content={"status": "done"})
-    home_registry._ingest_status[home_id] = {"status": "queued", "objectPath": body.objectPath}
+    home_registry._ingest_status[home_id] = {"status": "queued", "stage": "reading_scan",
+                                            "objectPath": body.objectPath, "revision": body.revision}
     background.add_task(home_registry.ingest_from_storage, home_id, body.bucket, body.objectPath,
                         enrich=body.enrich, upload_revision=body.revision, owner_id=owner)
     return JSONResponse(status_code=202, content={"status": "queued"})
@@ -927,11 +928,21 @@ async def scan_context_status(home_id: str, objectPath: str,
     owner = await _scan_upload_owner(home_id, x_homeowner_token)
     _check_scan_object(home_id, owner, "metashape-exports", objectPath, ".zip")
     index = await home_registry.load_index_async(home_id)
-    if index and index.upload.get("contextObject") == objectPath and index.upload.get("contextReady"):
-        return JSONResponse({"status": "done", "roomCount": len(index.rooms)})
     status = home_registry.ingest_status(home_id) or {}
+    if (status.get("status") == "done" and status.get("objectPath") == objectPath
+            and not (index and index.upload.get("contextObject") == objectPath
+                     and index.upload.get("contextReady"))):
+        index = await home_registry.load_index_async(home_id, refresh=True)
+    if index and index.upload.get("contextObject") == objectPath and index.upload.get("contextReady"):
+        return JSONResponse({"status": "done", "stage": "ready", "roomCount": len(index.rooms),
+                             "revision": index.upload.get("revision")})
     if status.get("objectPath") == objectPath:
-        return JSONResponse({k: status[k] for k in ("status", "error", "roomCount") if k in status})
+        if status.get("status") == "done":
+            # A finished task alone cannot confirm that model registration
+            # will see this revision as ready. Keep polling the durable index.
+            return JSONResponse({"status": "running", "stage": "saving_context"})
+        return JSONResponse({k: status[k] for k in
+            ("status", "stage", "error", "roomCount", "completedRooms", "totalRooms", "revision") if k in status})
     return JSONResponse({"status": "unknown"})  # e.g. host restarted: POST the same object again
 
 
@@ -944,7 +955,15 @@ async def upload_scan_models(home_id: str, body: ScanModelsUpload,
     owner = await _scan_upload_owner(home_id, x_homeowner_token)
     index = await home_registry.load_index_async(home_id)
     if not index or not index.upload.get("contextReady") or index.upload.get("revision") != body.revision:
-        raise HTTPException(status_code=409, detail="Wait for this scan revision's context upload to finish")
+        index = await home_registry.load_index_async(home_id, refresh=True)
+    if index and index.upload.get("ownerId") not in (None, owner):
+        raise HTTPException(status_code=403, detail="This scan belongs to another homeowner")
+    if index and index.upload.get("revision") not in (None, body.revision):
+        raise HTTPException(status_code=409, detail={"code": "revision_mismatch", "retryable": False,
+            "message": "This scan has a newer upload revision. Open the latest scan before retrying."})
+    if not index or not index.upload.get("contextReady") or index.upload.get("revision") != body.revision:
+        raise HTTPException(status_code=409, detail={"code": "context_not_ready", "retryable": True,
+            "message": "The files are uploaded. Home Guide is still preparing this scan's photos and metadata."})
     expected = {r.key for r in index.rooms} | {"home"}
     keys = [m.key for m in body.models]
     if len(keys) != len(set(keys)) or set(keys) != expected:
@@ -960,9 +979,14 @@ async def upload_scan_models(home_id: str, body: ScanModelsUpload,
     # Re-read after network awaits: a newer scan revision may have started.
     current = home_registry.load_index(home_id)
     ingest = home_registry.ingest_status(home_id) or {}
-    if (ingest.get("status") in ("queued", "running")
-            or not current or current.upload.get("revision") != body.revision):
-        raise HTTPException(status_code=409, detail="This scan has a newer upload revision")
+    if (not current or current.upload.get("revision") != body.revision
+            or (ingest.get("status") in ("queued", "running")
+                and ingest.get("revision") not in (None, body.revision))):
+        raise HTTPException(status_code=409, detail={"code": "revision_mismatch", "retryable": False,
+            "message": "This scan has a newer upload revision. Open the latest scan before retrying."})
+    if ingest.get("status") in ("queued", "running"):
+        raise HTTPException(status_code=409, detail={"code": "context_ingesting", "retryable": True,
+            "message": "The files are uploaded. Home Guide is finishing this scan's metadata."})
     updated = HomeIndex.from_json(current.to_json())
     for model in body.models:
         record = {"bucket": model.bucket, "object": model.objectPath, "bytes": model.bytes,

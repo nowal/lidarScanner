@@ -127,7 +127,7 @@ async def test_status_works_after_server_restart_and_blocks_other_guests(staged)
     seed()
     home_registry._cache.clear()
     response = await flow_api.scan_context_status(HOME, OBJECT, 'valid')
-    assert json.loads(response.body) == {'status': 'done', 'roomCount': 1}
+    assert json.loads(response.body) == {'status': 'done', 'stage': 'ready', 'roomCount': 1, 'revision': REV}
     with pytest.raises(HTTPException):
         await flow_api.scan_context_status(HOME, OBJECT, 'bad')
 
@@ -192,3 +192,66 @@ async def test_forgetting_a_staged_home_removes_its_direct_uploads(staged, monke
     await asyncio.gather(*list(home_registry._pending))
     assert calls == [(HOME, OWNER)]
     assert home_registry.load_index(HOME) is None
+
+
+@pytest.mark.asyncio
+async def test_model_registration_refreshes_stale_context_readiness(staged, monkeypatch):
+    index = seed()
+    durable = index.to_json()
+    index.upload['contextReady'] = False
+    async def get(home): return durable
+    monkeypatch.setattr(supabase_store, 'get_home_index', get)
+    response = await flow_api.upload_scan_models(HOME, models(), 'valid')
+    assert json.loads(response.body)['status'] == 'done'
+    assert home_registry.load_index(HOME).upload['modelsReady'] is True
+
+
+@pytest.mark.asyncio
+async def test_done_task_cannot_report_ready_against_an_unready_index(staged, monkeypatch):
+    index = seed()
+    index.upload['contextReady'] = False
+    home_registry._ingest_status[HOME] = {'status': 'done', 'objectPath': OBJECT, 'roomCount': 1}
+    async def get(home): return index.to_json()
+    monkeypatch.setattr(supabase_store, 'get_home_index', get)
+    response = await flow_api.scan_context_status(HOME, OBJECT, 'valid')
+    assert json.loads(response.body) == {'status': 'running', 'stage': 'saving_context'}
+    with pytest.raises(HTTPException) as error:
+        await flow_api.upload_scan_models(HOME, models(), 'valid')
+    assert error.value.detail['code'] == 'context_not_ready'
+    assert error.value.detail['retryable'] is True
+
+
+@pytest.mark.asyncio
+async def test_revision_conflicts_are_not_treated_as_temporary_waits(staged):
+    seed()
+    with pytest.raises(HTTPException) as error:
+        await flow_api.upload_scan_models(HOME, models(OTHER_REV), 'valid')
+    assert error.value.detail['code'] == 'revision_mismatch'
+    assert error.value.detail['retryable'] is False
+
+
+@pytest.mark.asyncio
+async def test_photo_analysis_progress_does_not_require_models(staged, monkeypatch):
+    archive = staged / 'photos.zip'
+    with zipfile.ZipFile(archive, 'w') as z:
+        z.writestr('meta.json', json.dumps({'id': HOME}))
+        for n in [1, 2]:
+            z.writestr(f'rooms/room-{n}/room.json', '{}')
+            z.writestr(f'rooms/room-{n}/rebuild/manifest.json', '{"frames": []}')
+    async def download(bucket, path, target): shutil.copyfile(archive, target); return True
+    seen = []
+    async def analyze(bundle, home, room, **kw):
+        response = await flow_api.scan_context_status(HOME, OBJECT, 'valid')
+        seen.append(json.loads(response.body))
+        return {'surfaces': {'floor': 'wood'}}
+    monkeypatch.setattr(settings, 'anthropic_api_key', 'test-only')
+    monkeypatch.setattr(supabase_store, 'download_object', download)
+    monkeypatch.setattr(home_registry, 'enrich_room', analyze)
+    status = await home_registry.ingest_from_storage(HOME, 'metashape-exports', OBJECT,
+        enrich=True, upload_revision=REV, owner_id=OWNER)
+    assert status['status'] == 'done'
+    assert [s['completedRooms'] for s in seen] == [0, 1]
+    assert all(s['stage'] == 'analyzing_photos' and s['totalRooms'] == 2 for s in seen)
+    index = home_registry.load_index(HOME)
+    assert index.upload['contextReady'] is True and index.upload['modelsReady'] is False
+    assert not index.home_model and all(not room.model for room in index.rooms)
