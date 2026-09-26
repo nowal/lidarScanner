@@ -436,6 +436,15 @@ async def enrich_rooms(
         if room is not None and document:
             room.appearance = dict(document)
             stored += 1
+            # The photos say this is the outside of the house. The fixture
+            # heuristics ran before the photos were read and may have called
+            # a patio with two chairs a "living room"; the homeowner's own
+            # name still wins (Quintin, Sep 24).
+            if document.get("setting") == "exterior" and not room.named_by_homeowner:
+                room.role = "exterior"
+                room.display_name = "exterior"
+                room.name_basis = "the photos show the outside of the house"
+                room.confident = True
     if stored:
         save_index(home_id, index)
         logger.info("Appearance rides on the index for %s: %d rooms", home_id, stored)

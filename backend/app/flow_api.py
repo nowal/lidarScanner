@@ -254,9 +254,27 @@ def _measurements_from_context(context: HomeAIContextPacket | None) -> dict[str,
         for key in ("wallCount", "doorCount", "windowCount"):
             if isinstance(room.get(key), int):
                 entry[key] = room[key]
+        for window in room.get("windows") or []:
+            if not isinstance(window, dict):
+                continue
+            width, height = window.get("widthMeters"), window.get("heightMeters")
+            if isinstance(width, (int, float)) and isinstance(height, (int, float)) and width > 0 and height > 0:
+                entry.setdefault("windowOpenings", []).append(
+                    {"widthFeet": round(float(width) * 3.28084, 1), "heightFeet": round(float(height) * 3.28084, 1)}
+                )
         rooms.append(entry)
     if rooms:
         measurements["rooms"] = rooms
+        # A single-scan lead used to list its rooms by area only, so the
+        # window-replacement request reached ops with no count and no sizes
+        # (Quintin, Sep 24). The scan is the job here: roll the rooms up.
+        for key in ("windowCount", "doorCount"):
+            total = sum(int(r.get(key) or 0) for r in rooms)
+            if total:
+                measurements[key] = total
+        openings = [o for r in rooms for o in r.get("windowOpenings") or []]
+        if openings:
+            measurements["windowOpenings"] = openings[:12]
     return measurements
 
 

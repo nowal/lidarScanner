@@ -170,6 +170,10 @@ class Settings(BaseSettings):
     # Note this does NOT turn on spending: web-grounded rates are
     # `price_research_enabled`, which stays off and is opted into per deploy.
     agent_price_guidance_enabled: bool = True
+    # The appearance pass also reports the windows it can see -- individual
+    # sashes and their type -- because RoomPlan only counts openings.
+    # Prototype (Nathan, Sep 24): on by default, one flag to turn off.
+    window_vision_enabled: bool = True
     # Ground the range in web-searched rates rather than the static national
     # table: near the homeowner's zip when we have one, nationally when we
     # don't. ON by default as of Sep 16 2026 — a static table is a guess about
@@ -207,7 +211,10 @@ class Settings(BaseSettings):
     # the worst case is a multiple of the provider timeout). On breach the
     # homeowner gets deterministic safe copy instead of a hung spinner.
     turn_deadline_enabled: bool = True
-    turn_deadline_seconds: float = 100.0
+    # Under the app's 90s request timeout, so a slow turn ends with a
+    # graceful server reply rather than the phone giving up first and
+    # dropping the message (Quintin, Sep 24: "The request timed out").
+    turn_deadline_seconds: float = 75.0
     # Sliding-window rate limit on the endpoints that cost a model call.
     rate_limit_enabled: bool = True
     rate_limit_per_identity_per_minute: int = 20

@@ -72,6 +72,24 @@ def _polygon_world(surface: dict) -> list[tuple[float, float]]:
     return [(w[0], w[2]) for w in (_transform_point(transform, c) for c in corners)]
 
 
+def _window_openings(windows: list[dict]) -> list[tuple[float, float]]:
+    """(width_m, height_m) per RoomPlan window surface; ``dimensions`` is
+    [width, height, thickness]. Surfaces with no usable size are skipped
+    rather than recorded as zero."""
+    out: list[tuple[float, float]] = []
+    for surface in windows or []:
+        dims = surface.get("dimensions") or []
+        if len(dims) < 2:
+            continue
+        try:
+            w, h = float(dims[0]), float(dims[1])
+        except (TypeError, ValueError):
+            continue
+        if w > 0 and h > 0:
+            out.append((w, h))
+    return out
+
+
 def _polygon_area_sqft(points: list[tuple[float, float]]) -> float:
     if len(points) < 3:
         return 0.0
@@ -151,6 +169,10 @@ class Room:
     polygon: list[tuple[float, float]] = field(default_factory=list)
     objects: Counter = field(default_factory=Counter)
     window_count: int = 0
+    # Each RoomPlan window SURFACE as (width_m, height_m). A count alone told
+    # a painter "2 windows" when a bank of five sashes was one surface; the
+    # sizes at least say what the openings are (Quintin, Sep 23-24).
+    window_openings: list[tuple[float, float]] = field(default_factory=list)
     door_count: int = 0
     wall_count: int = 0
     frame_ids: list[str] = field(default_factory=list)
@@ -219,6 +241,7 @@ class Room:
             "planLabel": self.plan_label, "areaSqFt": self.area_sqft,
             "floorY": self.floor_y, "polygon": [list(p) for p in self.polygon],
             "objects": dict(self.objects), "windows": self.window_count,
+            "windowOpenings": [[round(w, 3), round(h, 3)] for w, h in self.window_openings],
             "doors": self.door_count, "walls": self.wall_count,
             "frameIds": self.frame_ids, "name": self.display_name,
             "nameBasis": self.name_basis, "confident": self.confident,
@@ -239,6 +262,7 @@ class Room:
             polygon=[(p[0], p[1]) for p in data.get("polygon", [])],
             objects=Counter(data.get("objects", {})),
             window_count=int(data.get("windows", 0)),
+            window_openings=[(float(p[0]), float(p[1])) for p in data.get("windowOpenings", []) if len(p) >= 2],
             door_count=int(data.get("doors", 0)),
             wall_count=int(data.get("walls", 0)),
             frame_ids=list(data.get("frameIds", [])),
@@ -724,7 +748,7 @@ class HomeIndex:
         for r in sorted(self.rooms, key=lambda x: (x.storey, -x.area_sqft)):
             fixtures = ", ".join(c for c, _ in r.objects.most_common(4))
             hedge = "" if r.confident else " (name uncertain)"
-            line = f"- {r.display_name}{hedge}: ~{round(r.area_sqft)} sq ft, {r.window_count} window(s)"
+            line = f"- {r.display_name}{hedge}: ~{round(r.area_sqft)} sq ft, {r.window_count} window opening(s)"
             lines.append(line + (f", {fixtures}" if fixtures else ""))
         return "\n".join(lines)
 
@@ -773,6 +797,7 @@ def load_bundle(bundle_dir: str | Path) -> HomeIndex:
             polygon=polygon,
             objects=objects,
             window_count=len(structure.get("windows") or []),
+            window_openings=_window_openings(structure.get("windows") or []),
             door_count=len(structure.get("doors") or []),
             wall_count=len(structure.get("walls") or []),
             model=_model_record(room_dir / "model.usdz", f"rooms/{room_dir.name}/model.usdz"),

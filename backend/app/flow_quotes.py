@@ -492,6 +492,13 @@ def _room_measurements(state: FlowState) -> tuple[dict[str, Any] | None, str | N
         "storey": room.storey,
         "photoCount": len(room.frame_ids),
     }
+    if room.window_openings:
+        # Window replacement is priced per opening and by size. The scan has
+        # both; a count alone sent a provider back to ask (Quintin, Sep 24).
+        measurements["windowOpenings"] = [
+            {"widthFeet": round(w * 3.28084, 1), "heightFeet": round(h * 3.28084, 1)}
+            for w, h in room.window_openings
+        ]
     if room.objects:
         measurements["fixtures"] = [f"{n}x {c}" for c, n in room.objects.most_common(8)]
     # Geometry-only numbers computed at ingest (room_context). A painter
