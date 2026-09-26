@@ -815,13 +815,19 @@ def _appearance_directives(home_id: str | None, room) -> list[str]:
         for key in ("floor", "walls", "ceiling", "splashback")
         if isinstance(surfaces.get(key), str) and surfaces[key].strip()
     ]
-    described = [
-        f"{obj.get('class')} ({obj['appearance']})"
-        for obj in context.get("objects") or []
-        if obj.get("certainty") != "unobserved"
-        and isinstance(obj.get("appearance"), str)
-        and obj["appearance"].strip()
-    ]
+    # Only objects RoomPlan's geometry agrees with are stated as fact (#135).
+    # A `low` object is the vision model's word alone: seen, not confirmed.
+    def _with_appearance(certainty: str) -> list[str]:
+        return [
+            f"{obj.get('class')} ({obj['appearance']})"
+            for obj in context.get("objects") or []
+            if obj.get("certainty") == certainty
+            and isinstance(obj.get("appearance"), str)
+            and obj["appearance"].strip()
+        ]
+
+    described = _with_appearance("high")
+    unconfirmed = _with_appearance("low")
     style = (context.get("style") or "").strip()
     notable = [n for n in (context.get("notable") or []) if isinstance(n, str) and n.strip()]
 
@@ -848,7 +854,48 @@ def _appearance_directives(home_id: str | None, room) -> list[str]:
             "flooring, colours or finishes, say the scan does not show you "
             "that and ask them. Never guess a material."
         )
+    if unconfirmed:
+        lines.append(
+            "- SEEN IN THE PHOTOS BUT NOT CONFIRMED by the layout scan, so NOT "
+            "facts you may state: " + "; ".join(unconfirmed[:6]) + ". If one "
+            "matters to what they are asking, check it with them (\"it looks "
+            "like there's a ... - is that right?\") rather than asserting it."
+        )
 
+    if context.get("setting") == "exterior":
+        # The photos are of the OUTSIDE of the house. Naming it a living room
+        # because a patio sofa was detected is exactly the wrong thing
+        # (Quintin, Sep 24: "that's a nice living room" on an exterior scan).
+        lines.append(
+            "- THIS CAPTURE IS THE EXTERIOR OF THE HOUSE, not a room. Never "
+            "call it a living room or any interior room; outdoor seating is "
+            "patio furniture. Talk about siding, trim, windows, roof, gutters, "
+            "walkways and landscaping as the subject, and steer toward "
+            "exterior trades (power washing, painting, window or door work, "
+            "roofing and gutters)."
+        )
+    windows_seen = context.get("windows") or []
+    if windows_seen:
+        # RoomPlan counts openings; the photos can count sashes. Both are
+        # useful, and neither is confirmed until the homeowner says so.
+        parts = []
+        for w in windows_seen[:6]:
+            bit = f"{w.get('count')} {w.get('type') or 'window'}"
+            if w.get("gridded") is True:
+                bit += ", gridded"
+            elif w.get("gridded") is False:
+                bit += ", no grids"
+            if w.get("where"):
+                bit += f" ({w['where']})"
+            parts.append(bit)
+        total = sum(int(w.get("count") or 0) for w in windows_seen)
+        lines.append(
+            f"- WINDOWS SEEN IN THE PHOTOS: about {total} individual windows -- "
+            + "; ".join(parts)
+            + ". This is read off photographs, so say it as what you can see "
+            "and ask the homeowner to confirm the count before it goes on a "
+            "request. The scan's own number is openings, which is different."
+        )
     coverage = context.get("coverage")
     if coverage in {"partial", "geometry_only"}:
         unobserved = [
@@ -929,9 +976,14 @@ def _home_directives(state: FlowState, index) -> list[str]:
         fixtures = ", ".join(f"{n} {c}" for c, n in room.objects.most_common(6))
         detail = (
             f"- ACTIVE ROOM: the {room.display_name} — about "
-            f"{round(room.area_sqft)} sq ft, {room.window_count} window(s), "
+            f"{round(room.area_sqft)} sq ft, {room.window_count} window opening(s), "
             f"{room.door_count} door(s)"
         )
+        if room.window_openings:
+            sizes = ", ".join(
+                f"{w * 3.28084:.1f} x {h * 3.28084:.1f} ft" for w, h in room.window_openings[:8]
+            )
+            detail += f" (opening sizes, w x h: {sizes})"
         if fixtures:
             detail += f", with {fixtures}"
         lines.append(
@@ -2749,8 +2801,13 @@ async def _run_flow_turn_locked(
         # model turn, so quote presentation must not be consumed by it.
         substituted = True
     else:
-        price_guidance, price_asked = await _maybe_price_guidance(state, request, home_index)
-        local_context, local_providers = await _maybe_local_research(state, request)
+        # Both can spend 45-50s on a web search. Sequentially that is ~95s,
+        # past the app's 90s timeout, and the zip turn triggers both at once
+        # (Quintin, Sep 24: "The request timed out" right after his zip).
+        (price_guidance, price_asked), (local_context, local_providers) = await asyncio.gather(
+            _maybe_price_guidance(state, request, home_index),
+            _maybe_local_research(state, request),
+        )
         pending = await _pending_quotes(state)
         quotes_to_present = pending[1] if pending else None
         quote_record = pending[0] if pending else None

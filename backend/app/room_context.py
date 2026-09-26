@@ -61,6 +61,8 @@ CERTAINTY_LOW = "low"
 CERTAINTY_UNOBSERVED = "unobserved"
 
 SURFACE_KEYS = ("walls", "floor", "splashback", "ceiling")
+WINDOW_TYPES = ("double-hung", "casement", "slider", "picture", "bay", "awning", "unknown")
+MAX_WINDOW_GROUPS = 8
 
 APPEARANCE_SYS = """You are analysing photos from a homeowner's LiDAR room scan for \
 a home-design assistant.
@@ -77,16 +79,26 @@ wording.
 Return JSON only:
 {
   "room": "<room type>",
+  "setting": "interior" | "exterior",
   "objects": [{"class": "<noun>", "appearance": "<material, colour, condition>",
                "geometry_match": "<label from the list, or null>"}],
   "surfaces": {"walls": "", "floor": "", "splashback": "", "ceiling": ""},
+  "windows": [{"count": <individual sashes you can count in one group>,
+               "type": "double-hung" | "casement" | "slider" | "picture" | "bay" | "awning" | "unknown",
+               "gridded": true | false | null,
+               "where": "<which wall or side, briefly>"}],
   "style": "<one phrase>",
   "notable": ["<things a designer would remark on: dated elements, mismatches, \
 distinctive features>"]
 }
-Omit any surface you cannot see. `notable` should be things the homeowner likely \
-has an opinion about. Do not report dimensions, areas, or measurements of any \
-kind -- those come from the geometry, not from you."""
+`setting` is "exterior" when the photos show the outside of a house (siding, \
+roofline, lawn, driveway); then `room` is "exterior" and outdoor seating is patio \
+furniture, not a living room. `windows`: one entry per visible group of windows, \
+counting individual sashes -- a bank of three side-by-side windows is count 3, \
+not 1. Omit `windows` entirely if you cannot see any clearly. Omit any surface you \
+cannot see. `notable` should be things the homeowner likely has an opinion about. \
+Do not report dimensions, areas, or measurements of any kind -- those come from \
+the geometry, not from you."""
 
 
 # --------------------------------------------------------------------------
@@ -258,10 +270,41 @@ def validate_appearance(raw: Any, allowed_labels: list[str]) -> dict[str, Any]:
         if text:
             notable.append(text)
 
+    setting = _clean_text(document.get("setting"), 20).lower()
+    if setting not in ("interior", "exterior"):
+        setting = ""
+
+    windows = []
+    for entry in (document.get("windows") or [])[:MAX_WINDOW_GROUPS]:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            count = int(entry.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0 or count > 40:
+            continue
+        wtype = _clean_text(entry.get("type"), 20).lower()
+        if wtype not in WINDOW_TYPES:
+            wtype = "unknown"
+        gridded = entry.get("gridded")
+        if gridded not in (True, False):
+            gridded = None
+        windows.append(
+            {
+                "count": count,
+                "type": wtype,
+                "gridded": gridded,
+                "where": _clean_text(entry.get("where"), 60) or None,
+            }
+        )
+
     return {
         "room": _clean_text(document.get("room"), 60),
+        "setting": setting,
         "objects": objects,
         "surfaces": surfaces,
+        "windows": windows,
         "style": _clean_text(document.get("style"), 80),
         "notable": notable,
     }
@@ -523,11 +566,15 @@ async def build(
 
     appearance = validate_appearance(parse_json_object(raw), labels)
     objects = merge_certainty(labels, appearance["objects"])
+    from .config import settings as _settings
+
     return {
         "room_key": room_key,
         "room": appearance["room"],
+        "setting": appearance.get("setting") or "",
         "objects": objects,
         "surfaces": appearance["surfaces"],
+        "windows": appearance.get("windows") or [] if _settings.window_vision_enabled else [],
         "style": appearance["style"],
         "notable": appearance["notable"],
         "measurements": measurements_from_geometry(room),

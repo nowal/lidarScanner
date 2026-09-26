@@ -42,7 +42,7 @@ def test_the_i_cant_rule_no_longer_routes_to_a_person():
 
 
 def test_the_prompt_version_moved_with_the_wording():
-    assert HOME_GUIDE_PROMPT_VERSION == "home-guide-v10"
+    assert HOME_GUIDE_PROMPT_VERSION == "home-guide-v11"
 
 
 def test_the_submission_copy_still_matches_the_prompt_direction():

@@ -32,7 +32,7 @@ SUGGESTED PROVIDERS
   Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
 
 ENTER THE CHECKED QUOTE
-  https://ops.example.com/api/v1/ops/entry/qr_sample_rural/1791398200/ab8930c6ec33878469d8db45694a1dd8c842461518010eeeefdf3cd89e3b128f
+  https://ops.example.com/api/v1/ops/entry/qr_sample_rural/1791485500/631d0bba8b95d9d401b3072ad5ca9ecdb38e3d436409d8e845e2ce8b82b91366
   (link is signed for this request and expires in 14 days; the quote
   you enter is presented to the homeowner in the app automatically)
 

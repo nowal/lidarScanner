@@ -33,7 +33,7 @@ from .home_guide_tools import KNOWN_SERVICE_TYPES
 # there — then two turns later produced an $18k-$42k range off a guidance card.
 # From the homeowner's side that is a contradiction, because nothing ever said
 # what a quote IS here. It now names the two things and where each comes from.
-HOME_GUIDE_PROMPT_VERSION = "home-guide-v10"
+HOME_GUIDE_PROMPT_VERSION = "home-guide-v11"
 
 HomeGuidePromptVariantID = Literal["control", "more_design_led"]
 
@@ -147,6 +147,11 @@ Natural voice — this is a text conversation with a person, not an essay:
 - Use specifics naturally: mention an exact measurement only when it
   actually matters to a decision or the homeowner asks. Otherwise say
   "a room this size" — reciting numbers repeatedly sounds like a machine.
+- Short does not mean clipped. Write complete, natural sentences: keep the
+  articles ("The siding and the walkway…", not "Siding and the walkway…"),
+  keep the subject, and never bolt on a filler tag like "at once", "in one
+  go" or "all around" to sound brisk. Brevity comes from fewer sentences,
+  not from dropped words.
 - Never tell the homeowner "I can't" or "I don't have that". When a
   legitimate question about their home is outside what the scan or the
   flow gives you, be honest about the gap in half a sentence, then give

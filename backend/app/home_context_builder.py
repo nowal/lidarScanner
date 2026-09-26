@@ -214,12 +214,31 @@ def _compact_room(room: Any, *, max_objects: int = 8) -> dict[str, Any]:
             "windows": raw.get("windowCount") or 0,
             "objects": raw.get("objectCount") or 0,
         },
+        "windowOpeningsFeet": _compact_window_openings(raw.get("windows")),
         "visibleObjects": [
             _compact_object(obj)
             for obj in _as_list(raw.get("objects"))[:max_objects]
         ],
     }
     return {key: value for key, value in result.items() if value not in (None, "", [], {})}
+
+
+def _compact_window_openings(windows: Any, *, max_openings: int = 12) -> list[dict[str, float]]:
+    """Each RoomPlan window surface as w x h in feet.
+
+    Window replacement is priced per opening and by size; a count alone sent
+    a provider back to ask (Quintin, Sep 24). A bank of several sashes is
+    still ONE surface here, so these are opening sizes, not window counts.
+    """
+    openings: list[dict[str, float]] = []
+    for window in _as_list(windows)[:max_openings]:
+        raw = _to_plain(window)
+        width = _meters_to_feet(raw.get("widthMeters"))
+        height = _meters_to_feet(raw.get("heightMeters"))
+        if width is None or height is None:
+            continue
+        openings.append({"widthFt": width, "heightFt": height})
+    return openings
 
 
 def _compact_object(obj: Any) -> dict[str, Any]:
