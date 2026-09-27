@@ -181,6 +181,7 @@ async def submit_quote_request(
                 "missingSlots": ["final_model_upload"],
             })
     measurements = _measurements_from_context(body.homeContext)
+    _add_capture_measurements(state, measurements)
     record = await create_quote_request(
         state,
         thread_id=body.threadId,
@@ -276,6 +277,29 @@ def _measurements_from_context(context: HomeAIContextPacket | None) -> dict[str,
         if openings:
             measurements["windowOpenings"] = openings[:12]
     return measurements
+
+
+def _add_capture_measurements(state, measurements: dict[str, Any]) -> None:
+    """What a single capture's own photos and mesh say, for the provider.
+
+    A detached garage scanned from outside has no RoomPlan rooms, so the
+    package used to carry nothing but a note (Quintin, Sep 25). The vision
+    pass knows which building it is and the mesh knows how big.
+    """
+    appearance = state.scan_appearance or {}
+    if appearance.get("setting") == "exterior":
+        structure = appearance.get("structure") or "building"
+        measurements["capture"] = f"exterior of a {structure} (from the scan photos)"
+        measurements["note"] = f"The outside of a {structure}, from the home capture."
+    bounds = state.scan_mesh_bounds or {}
+    try:
+        w, l, h = (float(bounds[k]) for k in ("widthMeters", "lengthMeters", "heightMeters"))
+    except (KeyError, TypeError, ValueError):
+        return
+    if min(w, l, h) > 0:
+        measurements["meshExtentFeet"] = {
+            "width": round(w * 3.28084, 1), "length": round(l * 3.28084, 1), "height": round(h * 3.28084, 1),
+        }
 
 
 async def _require_homeowner_access(record, x_homeowner_token: Optional[str]) -> None:

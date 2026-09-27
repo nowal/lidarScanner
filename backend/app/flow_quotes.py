@@ -521,6 +521,21 @@ def _room_measurements(state: FlowState) -> tuple[dict[str, Any] | None, str | N
             f"'{room.display_name}' is inferred from fixtures ({room.name_basis}); "
             "confirm with the homeowner."
         )
+    if room.role == "exterior":
+        # Not a room: a floor area of zero is noise to a provider. What they
+        # need is which building and how big it is (Quintin, Sep 25).
+        from .flow.home_registry import room_context_for
+
+        structure = (room_context_for(state.home_id, room.key) or {}).get("structure") or "building"
+        measurements["note"] = f"The outside of a {structure}, from the home capture."
+        measurements["capture"] = f"exterior of a {structure} (from the scan photos)"
+        measurements.pop("floorAreaSquareFeet", None)
+        measurements.pop("nameCaveat", None)
+        extent = index.mesh_extent_feet()
+        if extent:
+            measurements["meshExtentFeet"] = {
+                "width": round(extent[0], 1), "length": round(extent[1], 1), "height": round(extent[2], 1),
+            }
     return measurements, room.key, room.display_name
 
 

@@ -290,7 +290,19 @@ def _compact_mesh_summary(mesh_summary: Any) -> dict[str, Any]:
         "depthFrameCount",
         "photorealStatus",
     ]
-    return {key: raw.get(key) for key in allowed if raw.get(key) not in (None, "", [], {})}
+    result = {key: raw.get(key) for key in allowed if raw.get(key) not in (None, "", [], {})}
+    # The mesh's overall extent: the only size a capture with no RoomPlan
+    # rooms has (an exterior walk around a garage, Quintin, Sep 25).
+    bounds = raw.get("boundsMeters")
+    if isinstance(bounds, dict):
+        extent = {
+            "widthFt": _meters_to_feet(bounds.get("widthMeters")),
+            "lengthFt": _meters_to_feet(bounds.get("lengthMeters")),
+            "heightFt": _meters_to_feet(bounds.get("heightMeters")),
+        }
+        if all(value is not None for value in extent.values()):
+            result["extentFeet"] = extent
+    return result
 
 
 def _compact_keyframe(frame: Any, included_image_ids: set[str]) -> dict[str, Any]:

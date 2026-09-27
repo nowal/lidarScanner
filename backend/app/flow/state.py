@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from enum import IntEnum, StrEnum
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -175,6 +177,16 @@ class FlowState(BaseModel):
     # A room the homeowner named that the index could not resolve: the agent
     # must say it cannot see that room rather than describe a different one.
     unresolved_room_phrase: str | None = None
+
+    # --- Single captures (no whole-home index) -----------------------------
+    # What the capture's own photos show, from one vision pass on the first
+    # turn that carries images: interior or exterior, which building, the
+    # surfaces. Later turns carry no images, so it lives on the thread
+    # (Quintin, Sep 25: a detached garage opened as "a nice living room").
+    scan_appearance: dict[str, Any] | None = None
+    # The LiDAR mesh's overall extent in metres, from the app. RoomPlan has
+    # nothing to say outdoors; the mesh still has the building's size.
+    scan_mesh_bounds: dict[str, float] | None = None
 
     # --- Scope intent (docs/SCAN_SCOPE.md) ---------------------------------
     # One room, a few named rooms, or the whole home -- from the homeowner's

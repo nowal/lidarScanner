@@ -174,6 +174,11 @@ class Settings(BaseSettings):
     # sashes and their type -- because RoomPlan only counts openings.
     # Prototype (Nathan, Sep 24): on by default, one flag to turn off.
     window_vision_enabled: bool = True
+    # One vision pass over a single capture's own keyframes, on the first
+    # turn that carries them: interior or exterior, and which building. Off,
+    # a detached garage opens as "a nice living room" (Quintin, Sep 25).
+    capture_vision_enabled: bool = True
+    capture_vision_timeout_seconds: float = 25.0
     # Ground the range in web-searched rates rather than the static national
     # table: near the homeowner's zip when we have one, nationally when we
     # don't. ON by default as of Sep 16 2026 — a static table is a guess about

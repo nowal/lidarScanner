@@ -511,10 +511,15 @@ class HomeIndex:
     """Named rooms for one scanned home, and the queries the agent needs."""
 
     def __init__(self, rooms: list[Room], bundle_id: str = "", storey_count: int = 1,
-                 home_model: dict | None = None, upload: dict | None = None):
+                 home_model: dict | None = None, upload: dict | None = None,
+                 mesh_bounds: dict | None = None):
         # The whole-home bake (top-level ``model.usdz``), same shape as Room.model.
         self.home_model: dict = dict(home_model or {})
         self.upload: dict = dict(upload or {})
+        # The LiDAR mesh's overall extent in metres (widthMeters, lengthMeters,
+        # heightMeters) when the export carried it. An exterior capture has no
+        # rooms to measure; this is the size of the building it walked around.
+        self.mesh_bounds: dict = dict(mesh_bounds or {})
         self.rooms = rooms
         self.bundle_id = bundle_id
         self.storey_count = storey_count
@@ -674,7 +679,20 @@ class HomeIndex:
             "rooms": [r.to_json() for r in self.rooms],
             "homeModel": dict(self.home_model),
             "upload": dict(self.upload),
+            "meshBounds": dict(self.mesh_bounds),
         }
+
+    def mesh_extent_feet(self) -> tuple[float, float, float] | None:
+        """(width, length, height) in feet from the mesh bounds, or None."""
+        try:
+            w, l, h = (
+                float(self.mesh_bounds[k]) for k in ("widthMeters", "lengthMeters", "heightMeters")
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        if min(w, l, h) <= 0:
+            return None
+        return w * 3.28084, l * 3.28084, h * 3.28084
 
     @classmethod
     def from_json(cls, data: dict) -> "HomeIndex":
@@ -684,6 +702,7 @@ class HomeIndex:
             storey_count=int(data.get("storeys", 1) or 1),
             home_model=dict(data.get("homeModel") or {}),
             upload=dict(data.get("upload") or {}),
+            mesh_bounds=data.get("meshBounds") or None,
         )
 
     # ------------------------------------------------------------- layout
@@ -748,6 +767,17 @@ class HomeIndex:
         for r in sorted(self.rooms, key=lambda x: (x.storey, -x.area_sqft)):
             fixtures = ", ".join(c for c, _ in r.objects.most_common(4))
             hedge = "" if r.confident else " (name uncertain)"
+            if r.role == "exterior":
+                # Not a room: no floor area to quote. The building's size,
+                # when the mesh carried it, is the number that means something.
+                line = f"- {r.display_name}: the outside of the building"
+                extent = self.mesh_extent_feet()
+                if extent:
+                    line += f", about {extent[0]:.0f} x {extent[1]:.0f} ft footprint, {extent[2]:.0f} ft tall (LiDAR mesh)"
+                if r.window_count:
+                    line += f", {r.window_count} window opening(s)"
+                lines.append(line)
+                continue
             line = f"- {r.display_name}{hedge}: ~{round(r.area_sqft)} sq ft, {r.window_count} window opening(s)"
             lines.append(line + (f", {fixtures}" if fixtures else ""))
         return "\n".join(lines)
@@ -810,6 +840,7 @@ def load_bundle(bundle_dir: str | Path) -> HomeIndex:
         bundle_id=str(meta.get("id", base.name)),
         storey_count=len({r.storey for r in rooms}) or 1,
         home_model=_model_record(base / "model.usdz", "model.usdz"),
+        mesh_bounds=meta.get("meshBoundsMeters") if isinstance(meta.get("meshBoundsMeters"), dict) else None,
     )
 
 

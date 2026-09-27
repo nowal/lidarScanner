@@ -807,7 +807,13 @@ def _appearance_directives(home_id: str | None, room) -> list[str]:
             "scan does not show you that and ask them, rather than guessing. "
             "Never describe a material, colour or condition you were not given."
         ]
+    return _photo_lines(context, "this room")
 
+
+def _photo_lines(context: dict, subject: str) -> list[str]:
+    """Directive lines from one appearance document: surfaces, setting,
+    windows, coverage. `subject` is "this room" for an indexed room and
+    "this capture" for a single scan with no index."""
     lines: list[str] = []
     surfaces = context.get("surfaces") or {}
     seen = [
@@ -832,7 +838,7 @@ def _appearance_directives(home_id: str | None, room) -> list[str]:
     notable = [n for n in (context.get("notable") or []) if isinstance(n, str) and n.strip()]
 
     if seen or described or style or notable:
-        detail = "- WHAT THE SCAN PHOTOS SHOW of this room, and the only "
+        detail = f"- WHAT THE SCAN PHOTOS SHOW of {subject}, and the only "
         detail += "materials, colours or finishes you may state as fact:"
         if seen:
             detail += "\n  Surfaces -- " + "; ".join(seen) + "."
@@ -844,12 +850,12 @@ def _appearance_directives(home_id: str | None, room) -> list[str]:
             detail += "\n  Worth noting -- " + "; ".join(notable[:3]) + "."
         lines.append(
             detail + "\n  Use these when they are relevant, in your own words. "
-            "They come from photographs of THIS room, so you really can say "
+            f"They come from photographs of {subject.upper()}, so you really can say "
             "them. Anything not listed here you did not see."
         )
     else:
         lines.append(
-            "- The appearance pass on this room returned nothing usable, so "
+            f"- The appearance pass on {subject} returned nothing usable, so "
             "you have its shape but not its surfaces. If they ask about "
             "flooring, colours or finishes, say the scan does not show you "
             "that and ask them. Never guess a material."
@@ -863,16 +869,28 @@ def _appearance_directives(home_id: str | None, room) -> list[str]:
         )
 
     if context.get("setting") == "exterior":
-        # The photos are of the OUTSIDE of the house. Naming it a living room
-        # because a patio sofa was detected is exactly the wrong thing
-        # (Quintin, Sep 24: "that's a nice living room" on an exterior scan).
+        # The photos are of the OUTSIDE of a building. Naming it a living
+        # room because a patio sofa was detected is exactly the wrong thing
+        # (Quintin, Sep 24: "that's a nice living room" on an exterior scan;
+        # Sep 25: the same on a detached garage, which is not even the house).
+        structure = (context.get("structure") or "").strip()
+        separate = bool(structure) and structure != "house"
+        what = f"A {structure.upper()}" if separate else "THE HOUSE"
         lines.append(
-            "- THIS CAPTURE IS THE EXTERIOR OF THE HOUSE, not a room. Never "
+            f"- THIS CAPTURE IS THE EXTERIOR OF {what}, not a room. Never "
             "call it a living room or any interior room; outdoor seating is "
             "patio furniture. Talk about siding, trim, windows, roof, gutters, "
-            "walkways and landscaping as the subject, and steer toward "
+            "doors, walkways and landscaping as the subject, and steer toward "
             "exterior trades (power washing, painting, window or door work, "
-            "roofing and gutters)."
+            "roofing and gutters"
+            + (", garage doors" if "garage" in structure else "")
+            + ")."
+            + (
+                f" A {structure} is a SEPARATE building from the house: never "
+                "describe it as part of the house or as one of its rooms, and "
+                "if they have scanned the house too, keep the two apart."
+                if separate else ""
+            )
         )
     windows_seen = context.get("windows") or []
     if windows_seen:
@@ -915,6 +933,98 @@ def _appearance_directives(home_id: str | None, room) -> list[str]:
 
 
 _HOME_MATERIALS_ROOMS = 8
+
+
+def _mesh_extent_feet(bounds: dict | None) -> tuple[float, float, float] | None:
+    try:
+        w, l, h = (float((bounds or {})[k]) for k in ("widthMeters", "lengthMeters", "heightMeters"))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if min(w, l, h) <= 0:
+        return None
+    return w * 3.28084, l * 3.28084, h * 3.28084
+
+
+def _capture_directives(state: FlowState) -> list[str]:
+    """A single capture with no home index: what its own photos and mesh say.
+
+    Quintin, Sep 25: a detached garage scanned from outside opened as "a nice
+    living room", and once corrected the agent could not say how big it was.
+    The photos can say which building it is; the mesh can say its size.
+    """
+    lines: list[str] = []
+    appearance = state.scan_appearance or {}
+    if appearance:
+        lines.extend(_photo_lines(appearance, "this capture"))
+    bounds = state.scan_mesh_bounds or {}
+    extent = _mesh_extent_feet(bounds)
+    exterior = appearance.get("setting") == "exterior"
+    no_rooms = not bounds.get("roomCount")
+    if extent and (exterior or no_rooms):
+        w, l, h = extent
+        line = (
+            f"- OVERALL SIZE FROM THE LIDAR MESH: about {w:.0f} x {l:.0f} ft footprint "
+            f"and {h:.0f} ft tall, approximate to a foot or so. This is measured, so "
+            f"you MAY state it when they ask how big the {'building' if exterior else 'space'} is."
+        )
+        if no_rooms:
+            line += (
+                " RoomPlan found no rooms in this capture, so there is no floor "
+                "area, wall count or window count; do not invent them."
+            )
+        lines.append(line)
+    return lines
+
+
+def _remember_mesh_bounds(state: FlowState, request: HomeAIChatRequest) -> None:
+    """Keep the mesh extent the app sent, so later turns (which carry no
+    packet detail worth trusting over the first) can still quote it."""
+    context = request.homeContext
+    raw = (context.meshSummary or {}).get("boundsMeters") if context else None
+    if not isinstance(raw, dict):
+        return
+    out: dict[str, float] = {}
+    for key in ("widthMeters", "lengthMeters", "heightMeters"):
+        value = raw.get(key)
+        if not isinstance(value, (int, float)) or value <= 0 or value > 200:
+            return
+        out[key] = round(float(value), 2)
+    out["roomCount"] = int(context.roomCount or 0)
+    state.scan_mesh_bounds = out
+
+
+async def _maybe_capture_appearance(state: FlowState, request: HomeAIChatRequest, home_index) -> None:
+    """One vision pass over the capture's own keyframes, the first time a
+    turn carries them and there is no whole-home index to know better.
+
+    Runs once per thread: the app only attaches images on the opening and
+    on request, and the answer is kept on the flow state. Any failure or
+    timeout leaves the turn exactly as it was.
+    """
+    if home_index is not None or state.scan_appearance is not None:
+        return
+    if not (settings.capture_vision_enabled and settings.anthropic_api_key):
+        return
+    context = request.homeContext
+    frames = [f.jpegBase64 for f in (context.selectedKeyframes if context else []) if f.jpegBase64]
+    if not frames:
+        return
+    from . import room_context
+
+    try:
+        document = await asyncio.wait_for(
+            room_context.describe_frames(frames[: max(1, settings.opening_max_images)]),
+            timeout=settings.capture_vision_timeout_seconds,
+        )
+    except Exception as exc:  # noqa: BLE001 -- the turn goes on without it
+        logger.warning("Capture appearance pass skipped for %s: %s", state.thread_id, exc)
+        return
+    if document:
+        state.scan_appearance = document
+        logger.info(
+            "Capture appearance for %s: setting=%s structure=%s",
+            state.thread_id, document.get("setting"), document.get("structure"),
+        )
 
 
 def _home_appearance_directives(home_id: str | None, index) -> list[str]:
@@ -974,11 +1084,24 @@ def _home_directives(state: FlowState, index) -> list[str]:
     room = index.by_key(state.active_room_key) if state.active_room_key else None
     if room is not None:
         fixtures = ", ".join(f"{n} {c}" for c, n in room.objects.most_common(6))
-        detail = (
-            f"- ACTIVE ROOM: the {room.display_name} — about "
-            f"{round(room.area_sqft)} sq ft, {room.window_count} window opening(s), "
-            f"{room.door_count} door(s)"
-        )
+        if room.role == "exterior":
+            # Not a room: "about 0 sq ft" is the wrong fact. The mesh extent
+            # is the size that means something for the outside of a building.
+            detail = f"- ACTIVE CAPTURE: the {room.display_name} — the outside of the building, not a room"
+            extent = index.mesh_extent_feet()
+            if extent:
+                detail += (
+                    f"; about {extent[0]:.0f} x {extent[1]:.0f} ft footprint and "
+                    f"{extent[2]:.0f} ft tall from the LiDAR mesh (measured, approximate)"
+                )
+            if room.window_count:
+                detail += f", {room.window_count} window opening(s)"
+        else:
+            detail = (
+                f"- ACTIVE ROOM: the {room.display_name} — about "
+                f"{round(room.area_sqft)} sq ft, {room.window_count} window opening(s), "
+                f"{room.door_count} door(s)"
+            )
         if room.window_openings:
             sizes = ", ".join(
                 f"{w * 3.28084:.1f} x {h * 3.28084:.1f} ft" for w, h in room.window_openings[:8]
@@ -986,8 +1109,9 @@ def _home_directives(state: FlowState, index) -> list[str]:
             detail += f" (opening sizes, w x h: {sizes})"
         if fixtures:
             detail += f", with {fixtures}"
+        subject = "capture" if room.role == "exterior" else "room"
         lines.append(
-            detail + ". Talk about THIS room unless the homeowner moves to "
+            detail + f". Talk about THIS {subject} unless the homeowner moves to "
             "another. Do not describe rooms they have not raised."
         )
         layout = index.layout_text(room)
@@ -1212,6 +1336,9 @@ def _build_directives(
                 "one home."
             )
 
+    if home_index is None:
+        lines.extend(_capture_directives(state))
+
     if opening and home_index is not None:
         # A whole-home walk has no single room to open on: opening with one
         # would pick a room they never chose.
@@ -1229,19 +1356,34 @@ def _build_directives(
             "list every room."
         )
     elif opening:
+        appearance = state.scan_appearance or {}
+        if appearance.get("setting") == "exterior":
+            structure = appearance.get("structure") or "building"
+            subject = (
+                f"Then open by saying what you can see — the outside of their "
+                f"{structure} — and ONE specific thing you genuinely observe in "
+                "the provided views (the siding, the roofline, a door, the "
+                "drive). Never name an interior room; this is not one. Then "
+                "ask one warm question about what they have in mind for it, "
+            )
+        else:
+            subject = (
+                "Then open by naming the room you can see and ONE "
+                "specific thing you "
+                "genuinely observe in the provided views (a piece of furniture, a "
+                "finish, the light). Name the room type when the evidence is "
+                "clear — a bed means bedroom, a stove means kitchen — and just "
+                "say 'this room' when it genuinely isn't; never guess a room "
+                "type the views don't support. Then ask one warm engagement "
+                "question about their hopes for the space, "
+            )
         lines.append(
             "- This is the OPENING turn. There is no homeowner message yet. "
             "Introduce yourself as TakeShape's AI assistant for their home in "
             "one natural clause — not a disclaimer, not an explanation of how "
-            "you work. Then open by naming the room you can see and ONE "
-            "specific thing you "
-            "genuinely observe in the provided views (a piece of furniture, a "
-            "finish, the light). Name the room type when the evidence is "
-            "clear — a bed means bedroom, a stove means kitchen — and just "
-            "say 'this room' when it genuinely isn't; never guess a room "
-            "type the views don't support. Then ask one warm engagement "
-            "question about their hopes for the space, and ask for their "
-            "first name only. "
+            "you work. "
+            + subject
+            + "and ask for their first name only. "
             f"{FIRST_NAME_WORDING.guidance} Keep it under 80 words."
         )
 
@@ -2748,6 +2890,7 @@ async def _run_flow_turn_locked(
     previous_home = state.home_id
     home_index = _reconcile_home(state, request)
     home_switched = bool(previous_home and state.home_id and previous_home != state.home_id)
+    _remember_mesh_bounds(state, request)
     # Screen the message before anything is spent on it, and before anything
     # is READ from it (issue #57). A blocked turn reaches no model, no research
     # call, no ask budget, and no slot — it is both the safe answer and the
@@ -2804,9 +2947,12 @@ async def _run_flow_turn_locked(
         # Both can spend 45-50s on a web search. Sequentially that is ~95s,
         # past the app's 90s timeout, and the zip turn triggers both at once
         # (Quintin, Sep 24: "The request timed out" right after his zip).
-        (price_guidance, price_asked), (local_context, local_providers) = await asyncio.gather(
+        (price_guidance, price_asked), (local_context, local_providers), _ = await asyncio.gather(
             _maybe_price_guidance(state, request, home_index),
             _maybe_local_research(state, request),
+            # The first app message carries the keyframes; a thread opened
+            # before this pass existed gets its look here.
+            _maybe_capture_appearance(state, request, home_index),
         )
         pending = await _pending_quotes(state)
         quotes_to_present = pending[1] if pending else None
@@ -3171,6 +3317,10 @@ async def _run_opening_turn_locked(
         await load_index_async(request.homeId)
     # The opener for a walked home speaks about the home, not one room.
     home_index = _reconcile_home(state, request)
+    _remember_mesh_bounds(state, request)
+    # A single capture's opener is the turn that names what was scanned, so
+    # its photos are looked at before the directives are written.
+    await _maybe_capture_appearance(state, request, home_index)
     plan = _engine.plan_turn(state, None)
     directives = _build_directives(
         state, plan, opening=True, price_guidance=None, quotes_to_present=None,

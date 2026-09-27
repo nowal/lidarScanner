@@ -186,7 +186,12 @@ async def test_price_and_local_research_run_together_not_in_series(monkeypatch):
     # And the runtime's own call site uses gather, not two awaits in a row.
     import inspect
     source = inspect.getsource(flow_runtime.run_home_ai_turn) if hasattr(flow_runtime, "run_home_ai_turn") else inspect.getsource(flow_runtime)
-    assert "asyncio.gather(\n            _maybe_price_guidance(state, request, home_index),\n            _maybe_local_research(state, request),\n        )" in source
+    import re
+    assert re.search(
+        r"asyncio\.gather\(\n\s+_maybe_price_guidance\(state, request, home_index\),"
+        r"\n\s+_maybe_local_research\(state, request\),",
+        source,
+    ), "the two research calls are no longer gathered together"
 
 
 # ------------------------------------------------------------------ grammar

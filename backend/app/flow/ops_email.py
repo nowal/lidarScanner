@@ -76,6 +76,14 @@ def entry_link(request_id: str) -> str | None:
 # --------------------------------------------------------------------------
 def _fmt_measurements(measurements: dict[str, Any]) -> list[str]:
     lines = []
+    if measurements.get("capture"):
+        lines.append(f"Capture: {measurements['capture']}")
+    extent = measurements.get("meshExtentFeet") or {}
+    if extent:
+        lines.append(
+            f"Overall size (LiDAR mesh, approx.): {extent.get('width')} x {extent.get('length')} ft "
+            f"footprint, {extent.get('height')} ft tall"
+        )
     area = measurements.get("floorAreaSquareFeet")
     if area:
         label = "Room area" if measurements.get("room") else "Floor area"
