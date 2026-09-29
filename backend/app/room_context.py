@@ -61,6 +61,11 @@ CERTAINTY_LOW = "low"
 CERTAINTY_UNOBSERVED = "unobserved"
 
 SURFACE_KEYS = ("walls", "floor", "splashback", "ceiling")
+WINDOW_TYPES = ("double-hung", "casement", "slider", "picture", "bay", "awning", "unknown")
+# What an exterior belongs to. A detached garage is not the house, and the
+# agent opened one as "a nice living room" (Quintin, Sep 25).
+STRUCTURES = ("house", "detached garage", "shed", "barn", "other building")
+MAX_WINDOW_GROUPS = 8
 
 APPEARANCE_SYS = """You are analysing photos from a homeowner's LiDAR room scan for \
 a home-design assistant.
@@ -77,16 +82,29 @@ wording.
 Return JSON only:
 {
   "room": "<room type>",
+  "setting": "interior" | "exterior",
+  "structure": "house" | "detached garage" | "shed" | "barn" | "other building" | null,
   "objects": [{"class": "<noun>", "appearance": "<material, colour, condition>",
                "geometry_match": "<label from the list, or null>"}],
   "surfaces": {"walls": "", "floor": "", "splashback": "", "ceiling": ""},
+  "windows": [{"count": <individual sashes you can count in one group>,
+               "type": "double-hung" | "casement" | "slider" | "picture" | "bay" | "awning" | "unknown",
+               "gridded": true | false | null,
+               "where": "<which wall or side, briefly>"}],
   "style": "<one phrase>",
   "notable": ["<things a designer would remark on: dated elements, mismatches, \
 distinctive features>"]
 }
-Omit any surface you cannot see. `notable` should be things the homeowner likely \
-has an opinion about. Do not report dimensions, areas, or measurements of any \
-kind -- those come from the geometry, not from you."""
+`setting` is "exterior" when the photos show the outside of a house (siding, \
+roofline, lawn, driveway); then `room` is "exterior" and outdoor seating is patio \
+furniture, not a living room. `structure` says which building an exterior belongs \
+to -- a detached garage or a shed is not the house -- and is null for interiors. \
+`windows`: one entry per visible group of windows, \
+counting individual sashes -- a bank of three side-by-side windows is count 3, \
+not 1. Omit `windows` entirely if you cannot see any clearly. Omit any surface you \
+cannot see. `notable` should be things the homeowner likely has an opinion about. \
+Do not report dimensions, areas, or measurements of any kind -- those come from \
+the geometry, not from you."""
 
 
 # --------------------------------------------------------------------------
@@ -258,10 +276,45 @@ def validate_appearance(raw: Any, allowed_labels: list[str]) -> dict[str, Any]:
         if text:
             notable.append(text)
 
+    setting = _clean_text(document.get("setting"), 20).lower()
+    if setting not in ("interior", "exterior"):
+        setting = ""
+    structure = _clean_text(document.get("structure"), 30).lower()
+    if structure not in STRUCTURES:
+        structure = ""
+
+    windows = []
+    for entry in (document.get("windows") or [])[:MAX_WINDOW_GROUPS]:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            count = int(entry.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0 or count > 40:
+            continue
+        wtype = _clean_text(entry.get("type"), 20).lower()
+        if wtype not in WINDOW_TYPES:
+            wtype = "unknown"
+        gridded = entry.get("gridded")
+        if gridded not in (True, False):
+            gridded = None
+        windows.append(
+            {
+                "count": count,
+                "type": wtype,
+                "gridded": gridded,
+                "where": _clean_text(entry.get("where"), 60) or None,
+            }
+        )
+
     return {
         "room": _clean_text(document.get("room"), 60),
+        "setting": setting,
+        "structure": structure,
         "objects": objects,
         "surfaces": surfaces,
+        "windows": windows,
         "style": _clean_text(document.get("style"), 80),
         "notable": notable,
     }
@@ -435,6 +488,13 @@ def select_context_frames(
             return []
         frames = spread_frames(manifest, count)
         logger.info("Room has no detected objects; appearance pass uses %d spread frames", len(frames))
+    if not frames:
+        from .frame_select import object_boxes, spread_frames
+
+        if not object_boxes(room):
+            # Same case without the exception: nothing to score, so nothing
+            # scored. An exterior capture has no RoomPlan objects at all.
+            frames = spread_frames(manifest, count)
     return frames
 
 
@@ -501,10 +561,12 @@ async def build(
     """One room's context document. `caller` is injectable for tests."""
     room_dir = Path(bundle_dir) / "rooms" / room_key
     room = _room_geometry(bundle_dir, room_key)
-    if not room:
-        return _geometry_only({}, room_key, "no CapturedRoom in the bundle")
-
     manifest = _load_json(room_dir / "rebuild" / "manifest.json") or {}
+    if not room and not manifest.get("frames"):
+        return _geometry_only({}, room_key, "no CapturedRoom in the bundle")
+    # No RoomPlan structure but photos: an exterior walk, or a capture the
+    # app exported as a flat package. The photos are still worth a look.
+    room = room or {}
     labels = geometry_labels(room)
     frames = select_context_frames(room, manifest, count)
     if not frames:
@@ -523,11 +585,16 @@ async def build(
 
     appearance = validate_appearance(parse_json_object(raw), labels)
     objects = merge_certainty(labels, appearance["objects"])
+    from .config import settings as _settings
+
     return {
         "room_key": room_key,
         "room": appearance["room"],
+        "setting": appearance.get("setting") or "",
+        "structure": appearance.get("structure") or "",
         "objects": objects,
         "surfaces": appearance["surfaces"],
+        "windows": appearance.get("windows") or [] if _settings.window_vision_enabled else [],
         "style": appearance["style"],
         "notable": appearance["notable"],
         "measurements": measurements_from_geometry(room),
@@ -535,6 +602,87 @@ async def build(
         if any(obj["certainty"] == CERTAINTY_UNOBSERVED for obj in objects)
         else "complete",
         "frames": [frame["id"] for frame in frames],
+    }
+
+
+def _shrink_b64(encoded: str) -> str | None:
+    """A base64 JPEG at most MAX_IMAGE_EDGE on the long side, or None if it
+    is not an image at all."""
+    try:
+        raw = base64.standard_b64decode(encoded)
+    except ValueError:
+        return None
+    try:
+        from PIL import Image
+    except ImportError:  # pragma: no cover
+        return encoded
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            image = image.convert("RGB")
+            if max(image.size) <= MAX_IMAGE_EDGE:
+                return encoded
+            image.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG", quality=82)
+    except OSError:
+        return None
+    return base64.standard_b64encode(buffer.getvalue()).decode()
+
+
+async def describe_frames(
+    jpegs_b64: list[str], *, caller: Any = None, count: int = DEFAULT_COUNT
+) -> dict[str, Any]:
+    """The appearance pass over photos handed over directly, with no bundle.
+
+    A single capture on the phone never reaches ingest; the app's context
+    packet carries a few keyframes on the opening turn, and that is the only
+    look the server gets at what was scanned. Same prompt as the per-room
+    pass, no geometry labels. Returns {} rather than raising: the turn goes
+    on without it.
+    """
+    content: list[dict[str, Any]] = []
+    for encoded in jpegs_b64[: max(1, min(count, MAX_IMAGES))]:
+        shrunk = _shrink_b64(encoded)
+        if shrunk is None:
+            continue
+        content.append(
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/jpeg", "data": shrunk},
+            }
+        )
+    if not content:
+        return {}
+    content.append(
+        {
+            "type": "text",
+            "text": (
+                f"{len(content)} views from one LiDAR capture, in capture order. "
+                "Describe what was captured as a whole, not frame by frame.\n\n"
+                "Geometry pass detected these labels: []"
+            ),
+        }
+    )
+    invoke = caller or _call_model
+    try:
+        raw = await invoke(content)
+    except Exception as error:  # noqa: BLE001 -- the turn must not die on the provider
+        logger.warning("Capture appearance pass failed: %s", error)
+        return {}
+    appearance = validate_appearance(parse_json_object(raw), [])
+    from .config import settings as _settings
+
+    return {
+        "room": appearance["room"],
+        "setting": appearance.get("setting") or "",
+        "structure": appearance.get("structure") or "",
+        "objects": merge_certainty([], appearance["objects"]),
+        "surfaces": appearance["surfaces"],
+        "windows": appearance.get("windows") or [] if _settings.window_vision_enabled else [],
+        "style": appearance["style"],
+        "notable": appearance["notable"],
+        "coverage": "photos_only",
+        "frames": len(content) - 1,
     }
 
 

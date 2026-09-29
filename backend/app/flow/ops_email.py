@@ -76,6 +76,14 @@ def entry_link(request_id: str) -> str | None:
 # --------------------------------------------------------------------------
 def _fmt_measurements(measurements: dict[str, Any]) -> list[str]:
     lines = []
+    if measurements.get("capture"):
+        lines.append(f"Capture: {measurements['capture']}")
+    extent = measurements.get("meshExtentFeet") or {}
+    if extent:
+        lines.append(
+            f"Overall size (LiDAR mesh, approx.): {extent.get('width')} x {extent.get('length')} ft "
+            f"footprint, {extent.get('height')} ft tall"
+        )
     area = measurements.get("floorAreaSquareFeet")
     if area:
         label = "Room area" if measurements.get("room") else "Floor area"
@@ -86,6 +94,11 @@ def _fmt_measurements(measurements: dict[str, Any]) -> list[str]:
     for key, label in (("windowCount", "Window openings (scan)"), ("doorCount", "Doors")):
         if measurements.get(key):
             lines.append(f"{label}: {measurements[key]}")
+    openings = measurements.get("windowOpenings") or []
+    if openings:
+        sizes = ", ".join(f"{o['widthFeet']} x {o['heightFeet']} ft" for o in openings[:12])
+        lines.append(f"  Opening sizes (w x h): {sizes}")
+        lines.append("  (a bank of several sashes reads as one opening; confirm the sash count)")
     if measurements.get("fixtures"):
         lines.append("In the room: " + ", ".join(measurements["fixtures"]))
     rooms = measurements.get("rooms") or []

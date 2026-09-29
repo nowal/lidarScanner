@@ -492,6 +492,13 @@ def _room_measurements(state: FlowState) -> tuple[dict[str, Any] | None, str | N
         "storey": room.storey,
         "photoCount": len(room.frame_ids),
     }
+    if room.window_openings:
+        # Window replacement is priced per opening and by size. The scan has
+        # both; a count alone sent a provider back to ask (Quintin, Sep 24).
+        measurements["windowOpenings"] = [
+            {"widthFeet": round(w * 3.28084, 1), "heightFeet": round(h * 3.28084, 1)}
+            for w, h in room.window_openings
+        ]
     if room.objects:
         measurements["fixtures"] = [f"{n}x {c}" for c, n in room.objects.most_common(8)]
     # Geometry-only numbers computed at ingest (room_context). A painter
@@ -514,6 +521,21 @@ def _room_measurements(state: FlowState) -> tuple[dict[str, Any] | None, str | N
             f"'{room.display_name}' is inferred from fixtures ({room.name_basis}); "
             "confirm with the homeowner."
         )
+    if room.role == "exterior":
+        # Not a room: a floor area of zero is noise to a provider. What they
+        # need is which building and how big it is (Quintin, Sep 25).
+        from .flow.home_registry import room_context_for
+
+        structure = (room_context_for(state.home_id, room.key) or {}).get("structure") or "building"
+        measurements["note"] = f"The outside of a {structure}, from the home capture."
+        measurements["capture"] = f"exterior of a {structure} (from the scan photos)"
+        measurements.pop("floorAreaSquareFeet", None)
+        measurements.pop("nameCaveat", None)
+        extent = index.mesh_extent_feet()
+        if extent:
+            measurements["meshExtentFeet"] = {
+                "width": round(extent[0], 1), "length": round(extent[1], 1), "height": round(extent[2], 1),
+            }
     return measurements, room.key, room.display_name
 
 

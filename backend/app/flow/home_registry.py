@@ -151,7 +151,163 @@ def unpack_export(source: Path, workdir: Path) -> Path:
     for candidate in sorted(root.rglob("rooms")):
         if candidate.is_dir() and any(p.name.startswith("room-") for p in candidate.iterdir()):
             return candidate.parent
+    # The app's export button builds a flat Metashape package, not a scan
+    # folder: images/, metadata/frames.json, geometry/, roomplan_optional/.
+    # Ingesting that used to yield a zero-room home (#143). It has everything
+    # the agent reads, just not in the rooms/ layout, so it is rebuilt here.
+    for frames_path in sorted(root.rglob("frames.json")):
+        if frames_path.parent.name == "metadata":
+            adapted = adapt_metashape_package(frames_path.parent.parent)
+            if adapted is not None:
+                return adapted
     return root
+
+
+def _column_major(rows: list) -> list[float] | None:
+    """The package writes a 4x4 as rows; the bundle's ``cameraTransform`` is
+    simd column-major (translation at 12..14)."""
+    if not isinstance(rows, list) or len(rows) != 4 or any(not isinstance(r, list) or len(r) != 4 for r in rows):
+        return None
+    try:
+        return [float(rows[i][j]) for j in range(4) for i in range(4)]
+    except (TypeError, ValueError):
+        return None
+
+
+def adapt_metashape_package(package: Path) -> Path | None:
+    """Rebuild the ``rooms/`` layout inside a flat Metashape export package.
+
+    One room per RoomPlan ``capturedRooms`` entry (``room.json`` is the same
+    Codable JSON either way); a capture with no RoomPlan structure at all --
+    an exterior walk around a garage -- becomes one room with photos and no
+    geometry, so the appearance pass can still say what it is. Frames go to
+    the room whose floor polygon holds the camera, else the nearest one, and
+    the images are hard-linked rather than copied. ``geometry/mesh_stats.json``
+    supplies the mesh extent, which is the only size an exterior has.
+    Returns the package dir, or None when it is not such a package.
+    """
+    import os
+    import shutil
+
+    from ..home_index import _load_json, _point_in_polygon, _polygon_world
+
+    frames = _load_json(package / "metadata" / "frames.json")
+    if not isinstance(frames, list) or not frames:
+        return None
+    manifest = _load_json(package / "manifest.json") or {}
+    roomplan = _load_json(package / "roomplan_optional" / "roomplan.json") or {}
+    stats = _load_json(package / "geometry" / "mesh_stats.json") or {}
+
+    captured = [r for r in (roomplan.get("capturedRooms") or []) if isinstance(r, dict)]
+    if not captured and isinstance(roomplan.get("capturedRoom"), dict):
+        captured = [roomplan["capturedRoom"]]
+    if not captured:
+        captured = [{}]
+
+    records: list[dict] = []
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        transform = _column_major(frame.get("camera_transform_camera_to_world_4x4"))
+        filename = str(frame.get("filename") or "")
+        stem = Path(filename).stem
+        values = [frame.get(k) for k in ("fx", "fy", "cx", "cy")]
+        if transform is None or not stem or any(not isinstance(v, (int, float)) for v in values):
+            continue
+        fx, fy, cx, cy = (float(v) for v in values)
+        width, height = frame.get("image_width"), frame.get("image_height")
+        resolution = [int(width), int(height)] if isinstance(width, int) and isinstance(height, int) else []
+        records.append(
+            {
+                "id": stem,
+                "cameraTransform": transform,
+                "intrinsics": [fx, 0.0, 0.0, 0.0, fy, 0.0, cx, cy, 1.0],
+                "imageResolution": resolution,
+                "intrinsicsReferenceResolution": resolution,
+                "timestamp": frame.get("timestamp"),
+                "sourceImage": filename,
+            }
+        )
+
+    polygons = []
+    for room in captured:
+        floors = room.get("floors") or []
+        polygons.append(_polygon_world(floors[0]) if floors and isinstance(floors[0], dict) else [])
+
+    def _owner(record: dict) -> int:
+        x, z = record["cameraTransform"][12], record["cameraTransform"][14]
+        for n, poly in enumerate(polygons):
+            if poly and _point_in_polygon(x, z, poly):
+                return n
+        nearest, best = 0, None
+        for n, poly in enumerate(polygons):
+            if not poly:
+                continue
+            cx = sum(p[0] for p in poly) / len(poly)
+            cz = sum(p[1] for p in poly) / len(poly)
+            d = (cx - x) ** 2 + (cz - z) ** 2
+            if best is None or d < best:
+                nearest, best = n, d
+        return nearest
+
+    assigned: list[list[dict]] = [[] for _ in captured]
+    for record in records:
+        assigned[_owner(record)].append(record)
+
+    for n, room in enumerate(captured, 1):
+        room_dir = package / "rooms" / f"room-{n}"
+        images_dir = room_dir / "rebuild" / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        (room_dir / "room.json").write_text(json.dumps(room), encoding="utf-8")
+        floors = room.get("floors") or []
+        floor_y = 0.0
+        transform = floors[0].get("transform") if floors and isinstance(floors[0], dict) else None
+        if isinstance(transform, list) and len(transform) >= 14:
+            try:
+                floor_y = float(transform[13])
+            except (TypeError, ValueError):
+                floor_y = 0.0
+        (room_dir / "floor.json").write_text(json.dumps({"floor": 0, "floorY": floor_y}), encoding="utf-8")
+        manifest_frames = []
+        for record in assigned[n - 1]:
+            source = package / record["sourceImage"]
+            if not source.is_file():
+                continue
+            target = images_dir / f"{record['id']}.jpg"
+            if not target.exists():
+                try:
+                    os.link(source, target)
+                except OSError:
+                    shutil.copyfile(source, target)
+            manifest_frames.append({k: v for k, v in record.items() if k != "sourceImage"})
+        (room_dir / "rebuild" / "manifest.json").write_text(
+            json.dumps({"source": "metashape-package", "frames": manifest_frames}), encoding="utf-8"
+        )
+
+    meta: dict = {
+        "id": str(manifest.get("scan_id") or package.name.removeprefix("scan_")),
+        "createdAt": manifest.get("created_at"),
+        "roomCount": len(captured),
+        "source": "metashape-package",
+        "hasRoomPlan": bool(roomplan.get("capturedRooms") or roomplan.get("capturedRoom")),
+    }
+    lo, hi = stats.get("bounds_min"), stats.get("bounds_max")
+    if isinstance(lo, list) and isinstance(hi, list) and len(lo) == 3 and len(hi) == 3:
+        try:
+            extent = [float(hi[i]) - float(lo[i]) for i in range(3)]
+        except (TypeError, ValueError):
+            extent = []
+        if extent and min(extent) > 0:
+            meta["meshBoundsMeters"] = {
+                "widthMeters": round(extent[0], 2),
+                "heightMeters": round(extent[1], 2),
+                "lengthMeters": round(extent[2], 2),
+            }
+    (package / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    logger.info(
+        "Adapted flat export package %s: %d room(s), %d frame(s)", package.name, len(captured), len(records)
+    )
+    return package
 
 
 # Ingest runs in the background; this is what a status call can see. Per
@@ -436,6 +592,15 @@ async def enrich_rooms(
         if room is not None and document:
             room.appearance = dict(document)
             stored += 1
+            # The photos say this is the outside of the house. The fixture
+            # heuristics ran before the photos were read and may have called
+            # a patio with two chairs a "living room"; the homeowner's own
+            # name still wins (Quintin, Sep 24).
+            if document.get("setting") == "exterior" and not room.named_by_homeowner:
+                room.role = "exterior"
+                room.display_name = "exterior"
+                room.name_basis = "the photos show the outside of the house"
+                room.confident = True
     if stored:
         save_index(home_id, index)
         logger.info("Appearance rides on the index for %s: %d rooms", home_id, stored)

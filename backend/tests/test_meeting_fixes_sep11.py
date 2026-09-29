@@ -47,7 +47,7 @@ def test_surfaces_from_the_scan_reach_the_model(monkeypatch):
             "room_key": room_key,
             "surfaces": {"floor": "honey-toned hardwood", "walls": "warm taupe"},
             "objects": [
-                {"class": "oven", "appearance": "stainless", "certainty": "observed"},
+                {"class": "oven", "appearance": "stainless", "certainty": "high"},
             ],
             "style": "transitional",
             "notable": ["a visible tile transition strip"],
@@ -60,6 +60,32 @@ def test_surfaces_from_the_scan_reach_the_model(monkeypatch):
     assert "stainless" in text
     assert "transitional" in text
     assert "only" in text.lower(), "the model must be told this is the whole list"
+
+
+def test_only_geometry_confirmed_objects_are_stated_as_fact(monkeypatch):
+    """#135: a `low` object is the vision model's word alone. It must not sit
+    in the statable list next to the objects RoomPlan also detected."""
+    from app.flow import home_registry
+
+    monkeypatch.setattr(
+        home_registry, "room_context_for",
+        lambda home_id, room_key: {
+            "room_key": room_key,
+            "surfaces": {"floor": "tile"},
+            "objects": [
+                {"class": "stove", "appearance": "stainless range", "certainty": "high"},
+                {"class": "pendant lights", "appearance": "brass", "certainty": "low"},
+            ],
+            "style": "", "notable": [], "coverage": "complete",
+        },
+    )
+    lines = flow_runtime._appearance_directives("home-1", _room())
+    statable = next(line for line in lines if "may state as fact" in line)
+    assert "stainless range" in statable
+    assert "brass" not in statable
+    unconfirmed = next(line for line in lines if "NOT CONFIRMED" in line)
+    assert "pendant lights (brass)" in unconfirmed
+    assert "check it with them" in unconfirmed
 
 
 def test_no_appearance_data_becomes_an_instruction_to_admit_it(monkeypatch):
