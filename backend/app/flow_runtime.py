@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import re
 import secrets
 import time
@@ -724,10 +725,18 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
         if request.homeId != state.home_id:
             # A different home in the same thread starts a fresh subject.
             state.active_room_key = None
+            state.scan_appearance = None
+            state.scan_mesh_bounds = None
         state.home_id = request.homeId
     index = load_index(state.home_id)
     if index is None:
         return None
+
+    # A staged context ZIP also creates an index for a single exterior
+    # capture. Keep that capture in focus so its appearance reaches the
+    # opener and later quote measurements without requiring a room name.
+    if not state.active_room_key and len(index.rooms) == 1 and index.rooms[0].role == "exterior":
+        state.active_room_key = index.rooms[0].key
 
     # "that little room" is how a homeowner points at the space the scan
     # could not identify, and it is usually the turn before they name it.
@@ -940,7 +949,7 @@ def _mesh_extent_feet(bounds: dict | None) -> tuple[float, float, float] | None:
         w, l, h = (float((bounds or {})[k]) for k in ("widthMeters", "lengthMeters", "heightMeters"))
     except (KeyError, TypeError, ValueError):
         return None
-    if min(w, l, h) <= 0:
+    if not all(math.isfinite(v) and v > 0 for v in (w, l, h)):
         return None
     return w * 3.28084, l * 3.28084, h * 3.28084
 
@@ -986,7 +995,7 @@ def _remember_mesh_bounds(state: FlowState, request: HomeAIChatRequest) -> None:
     out: dict[str, float] = {}
     for key in ("widthMeters", "lengthMeters", "heightMeters"):
         value = raw.get(key)
-        if not isinstance(value, (int, float)) or value <= 0 or value > 200:
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0 or value > 200:
             return
         out[key] = round(float(value), 2)
     out["roomCount"] = int(context.roomCount or 0)
@@ -1073,10 +1082,17 @@ def _home_appearance_directives(home_id: str | None, index) -> list[str]:
 
 
 def _home_directives(state: FlowState, index) -> list[str]:
-    lines = [
+    single_exterior = len(index.rooms) == 1 and index.rooms[0].role == "exterior"
+    scan_description = (
+        "- EXTERIOR CAPTURE. This homeowner scanned the outside of one building. "
+        "Describe this capture, without implying they walked the whole home:\n"
+        if single_exterior else
         "- WHOLE-HOME SCAN. This homeowner walked their whole home, so you "
         "know its rooms. These are the ONLY rooms you can see — never invent "
-        "or imply another one:\n" + index.as_text(),
+        "or imply another one:\n"
+    )
+    lines = [
+        scan_description + index.as_text(),
         "- Rooms marked 'name uncertain' are the server's best guess from "
         "fixtures. Use the name naturally, but if the conversation turns on "
         "which room it is, ask rather than asserting.",
@@ -1088,7 +1104,7 @@ def _home_directives(state: FlowState, index) -> list[str]:
             # Not a room: "about 0 sq ft" is the wrong fact. The mesh extent
             # is the size that means something for the outside of a building.
             detail = f"- ACTIVE CAPTURE: the {room.display_name} — the outside of the building, not a room"
-            extent = index.mesh_extent_feet()
+            extent = index.mesh_extent_feet(state.scan_mesh_bounds)
             if extent:
                 detail += (
                     f"; about {extent[0]:.0f} x {extent[1]:.0f} ft footprint and "
@@ -1339,7 +1355,11 @@ def _build_directives(
     if home_index is None:
         lines.extend(_capture_directives(state))
 
-    if opening and home_index is not None:
+    indexed_exterior = (
+        home_index is not None and len(home_index.rooms) == 1
+        and home_index.rooms[0].role == "exterior"
+    )
+    if opening and home_index is not None and not indexed_exterior:
         # A whole-home walk has no single room to open on: opening with one
         # would pick a room they never chose.
         lines.append(
@@ -1357,6 +1377,10 @@ def _build_directives(
         )
     elif opening:
         appearance = state.scan_appearance or {}
+        if indexed_exterior:
+            from .flow.home_registry import room_context_for
+
+            appearance = room_context_for(state.home_id, home_index.rooms[0].key) or {"setting": "exterior"}
         if appearance.get("setting") == "exterior":
             structure = appearance.get("structure") or "building"
             subject = (

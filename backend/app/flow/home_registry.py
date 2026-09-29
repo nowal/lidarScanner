@@ -210,6 +210,15 @@ def adapt_metashape_package(package: Path) -> Path | None:
             continue
         transform = _column_major(frame.get("camera_transform_camera_to_world_4x4"))
         filename = str(frame.get("filename") or "")
+        # Metadata is client supplied. Only image files inside this package
+        # may be linked into the capture, including when given a directory
+        # containing symlinks rather than a ZIP.
+        image_path = Path(filename)
+        if image_path.is_absolute() or ".." in image_path.parts:
+            continue
+        source = (package / image_path).resolve()
+        if not source.is_relative_to((package / "images").resolve()) or not source.is_relative_to(package.resolve()):
+            continue
         stem = Path(filename).stem
         values = [frame.get(k) for k in ("fx", "fy", "cx", "cy")]
         if transform is None or not stem or any(not isinstance(v, (int, float)) for v in values):

@@ -531,7 +531,7 @@ def _room_measurements(state: FlowState) -> tuple[dict[str, Any] | None, str | N
         measurements["capture"] = f"exterior of a {structure} (from the scan photos)"
         measurements.pop("floorAreaSquareFeet", None)
         measurements.pop("nameCaveat", None)
-        extent = index.mesh_extent_feet()
+        extent = index.mesh_extent_feet(state.scan_mesh_bounds)
         if extent:
             measurements["meshExtentFeet"] = {
                 "width": round(extent[0], 1), "length": round(extent[1], 1), "height": round(extent[2], 1),

@@ -682,15 +682,15 @@ class HomeIndex:
             "meshBounds": dict(self.mesh_bounds),
         }
 
-    def mesh_extent_feet(self) -> tuple[float, float, float] | None:
+    def mesh_extent_feet(self, fallback: dict | None = None) -> tuple[float, float, float] | None:
         """(width, length, height) in feet from the mesh bounds, or None."""
         try:
             w, l, h = (
-                float(self.mesh_bounds[k]) for k in ("widthMeters", "lengthMeters", "heightMeters")
+                float((self.mesh_bounds or fallback or {})[k]) for k in ("widthMeters", "lengthMeters", "heightMeters")
             )
         except (KeyError, TypeError, ValueError):
             return None
-        if min(w, l, h) <= 0:
+        if not all(math.isfinite(v) and v > 0 for v in (w, l, h)):
             return None
         return w * 3.28084, l * 3.28084, h * 3.28084
 

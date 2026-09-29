@@ -255,3 +255,52 @@ async def test_photo_analysis_progress_does_not_require_models(staged, monkeypat
     index = home_registry.load_index(HOME)
     assert index.upload['contextReady'] is True and index.upload['modelsReady'] is False
     assert not index.home_model and all(not room.model for room in index.rooms)
+
+
+@pytest.mark.asyncio
+async def test_staged_exterior_keeps_appearance_packet_extent_and_upload_readiness(staged, monkeypatch):
+    from app import flow_runtime
+    from app.flow_quotes import _room_measurements
+    from app.home_ai import HomeAIChatRequest, HomeAIContextPacket
+
+    archive = staged / 'exterior-context.zip'
+    with zipfile.ZipFile(archive, 'w') as z:
+        z.writestr('meta.json', json.dumps({'id': HOME}))
+        z.writestr('rooms/room-1/room.json', '{}')
+        z.writestr('rooms/room-1/rebuild/manifest.json', '{"frames": []}')
+    async def download(bucket, path, target): shutil.copyfile(archive, target); return True
+    async def analyze(*a, **kw):
+        return {'room_key': 'room-1', 'setting': 'exterior', 'structure': 'detached garage',
+                'surfaces': {'walls': 'white siding'}, 'objects': [], 'coverage': 'complete'}
+    monkeypatch.setattr(settings, 'anthropic_api_key', 'test-only')
+    monkeypatch.setattr(supabase_store, 'download_object', download)
+    monkeypatch.setattr(room_context, 'build', analyze)
+    status = await home_registry.ingest_from_storage(HOME, 'metashape-exports', OBJECT,
+        enrich=True, upload_revision=REV, owner_id=OWNER)
+    assert status['status'] == 'done'
+    home_registry._cache.clear()
+    index = home_registry.load_index(HOME)
+    assert index.upload['contextReady'] and not index.upload['modelsReady']
+    assert not index.mesh_bounds  # Current context ZIP deliberately excludes raw geometry.
+    request = HomeAIChatRequest(message='Hello', homeId=HOME, homeContext=HomeAIContextPacket(
+        roomCount=0, meshSummary={'boundsMeters': {'widthMeters': 7.3, 'lengthMeters': 6.7, 'heightMeters': 3.7}}))
+    state = FlowState(thread_id='exterior', client_flow_aware=True)
+    flow_runtime._reconcile_home(state, request)
+    flow_runtime._remember_mesh_bounds(state, request)
+    assert state.active_room_key == 'room-1'
+    plan = flow_runtime._engine.plan_turn(state, None)
+    text = flow_runtime._build_directives(state, plan, opening=True, price_guidance=None,
+        quotes_to_present=None, home_index=index)
+    assert 'outside of their detached garage' in text
+    assert 'EXTERIOR OF A DETACHED GARAGE' in text
+    assert 'about 24 x 22 ft footprint' in text
+    assert 'They walked their WHOLE HOME' not in text
+    measurements, _, _ = _room_measurements(state)
+    assert measurements['capture'] == 'exterior of a detached garage (from the scan photos)'
+    assert measurements['meshExtentFeet']['width'] == 24.0
+    assert 'floorAreaSquareFeet' not in measurements
+    await flow_api.upload_scan_models(HOME, models(), 'valid')
+    home_registry._cache.clear()
+    final = home_registry.load_index(HOME)
+    assert final.upload['modelsReady'] and final.upload['revision'] == REV
+    assert final.rooms[0].appearance['structure'] == 'detached garage'

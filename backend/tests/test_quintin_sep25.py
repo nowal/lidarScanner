@@ -332,6 +332,43 @@ def test_a_flat_export_package_ingests_as_a_capture(tmp_path):
     assert home_registry.adapt_metashape_package(tmp_path / "nothing-here") is None
 
 
+@pytest.mark.parametrize("path_kind", ["absolute", "traversal", "symlink"])
+def test_flat_package_cannot_import_files_outside_its_images(tmp_path, path_kind):
+    pkg = _write_package(tmp_path, roomplan=False)
+    outside = tmp_path / "private.jpg"
+    outside.write_bytes(b"private data must not be uploaded")
+    frames_file = pkg / "metadata" / "frames.json"
+    frames = json.loads(frames_file.read_text())
+    if path_kind == "absolute":
+        frames[0]["filename"] = str(outside)
+    elif path_kind == "traversal":
+        frames[0]["filename"] = "../private.jpg"
+    else:
+        (pkg / "images" / "escape.jpg").symlink_to(outside)
+        frames[0]["filename"] = "images/escape.jpg"
+    frames_file.write_text(json.dumps(frames))
+    home_registry.unpack_export(pkg, tmp_path / "work")
+    images = list((pkg / "rooms" / "room-1" / "rebuild" / "images").iterdir())
+    assert len(images) == 2
+    assert all(p.read_bytes() != outside.read_bytes() for p in images)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_nonfinite_mesh_bounds_are_ignored(value):
+    state = FlowState(thread_id="t")
+    packet = _packet().model_copy(update={"meshSummary": {"boundsMeters": {**BOUNDS, "widthMeters": value}}})
+    flow_runtime._remember_mesh_bounds(state, _request(packet))
+    assert state.scan_mesh_bounds is None
+
+
+def test_switching_homes_clears_capture_appearance_and_extent(monkeypatch):
+    monkeypatch.setattr(home_registry, "load_index", lambda _: None)
+    state = FlowState(thread_id="t", home_id="old", scan_appearance=dict(GARAGE), scan_mesh_bounds=dict(BOUNDS))
+    request = _request(_packet()).model_copy(update={"homeId": "new"})
+    flow_runtime._reconcile_home(state, request)
+    assert state.scan_appearance is None and state.scan_mesh_bounds is None
+
+
 @pytest.mark.asyncio
 async def test_a_package_without_roomplan_still_gets_its_photos_looked_at(tmp_path):
     pkg = _write_package(tmp_path, roomplan=False)
