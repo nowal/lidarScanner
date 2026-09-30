@@ -71,9 +71,17 @@ def _durable_write(home_id: str, payload: dict) -> None:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(supabase_store.put_home_index(home_id, payload))
+        if payload.get("upload", {}).get("durableV2"):
+            from . import scan_uploads
+            asyncio.run(scan_uploads.save_names(home_id, payload))
+        else:
+            asyncio.run(supabase_store.put_home_index(home_id, payload))
         return
-    task = loop.create_task(supabase_store.put_home_index(home_id, payload))
+    if payload.get("upload", {}).get("durableV2"):
+        from . import scan_uploads
+        task = loop.create_task(scan_uploads.save_names(home_id, payload))
+    else:
+        task = loop.create_task(supabase_store.put_home_index(home_id, payload))
     _pending.add(task)
     task.add_done_callback(_pending.discard)
 
@@ -103,6 +111,17 @@ async def load_index_async(home_id: str | None, *, refresh: bool = False) -> Hom
     survive a redeploy."""
     if not home_id:
         return None
+    from . import scan_uploads, supabase_store
+    if supabase_store.enabled():
+        state = await scan_uploads.transition(home_id, "read")
+        if state:
+            payload = scan_uploads.visible_index(state)
+            if not payload:
+                _cache.pop(home_id, None)
+                return None
+            index = HomeIndex.from_json(payload)
+            save_index(home_id, index, durable=False)
+            return index
     local = load_index(home_id)
     if local is not None and not refresh:
         return local
@@ -346,8 +365,11 @@ async def ingest_from_storage(
     import shutil
     import tempfile
 
-    from . import supabase_store
+    from . import supabase_store, scan_uploads
 
+    # Legacy ingest must never replace a home governed by durable revisions.
+    if await scan_uploads.transition(home_id, "read"):
+        return {"status": "failed", "error": "Use staged uploads for this scan."}
     status = {"status": "running", "stage": "reading_scan", "bucket": bucket,
               "objectPath": object_path, "revision": upload_revision}
     _ingest_status[home_id] = status
@@ -628,10 +650,10 @@ def room_context_for(home_id: str | None, room_key: str | None) -> dict | None:
         return None
     from .. import room_context
 
-    document = room_context.load(home_id, room_key)
-    if document is not None:
-        return document
     index = load_index(home_id)
+    document = room_context.load(home_id, room_key)
+    if document is not None and not (index and index.upload.get("durableV2")):
+        return document
     room = index.by_key(room_key) if index else None
     if room is None:
         return None
@@ -676,6 +698,10 @@ async def list_home_ids_async() -> list[str]:
     from . import supabase_store
 
     durable = set(await supabase_store.list_home_indexes() or [])
+    if supabase_store.enabled():
+        response = await supabase_store._rest().get('/scan_upload_heads', params={'select': 'home_id'})
+        response.raise_for_status()
+        durable.update(row['home_id'] for row in response.json())
     # Local file stems are sanitised (_safe); a durable id that sanitises to
     # the same stem is the same home, listed once under its real id.
     sanitised = {_safe(h) for h in durable}
@@ -705,8 +731,12 @@ def forget(home_id: str) -> None:
         return
 
     async def _delete_all() -> None:
+        from . import scan_uploads
+        state = await scan_uploads.transition(home_id, "read")
         payload = known_index.to_json() if known_index else await supabase_store.get_home_index(home_id)
-        owner = (payload or {}).get("upload", {}).get("ownerId")
+        owner = (state or {}).get("ownerId") or (payload or {}).get("upload", {}).get("ownerId")
+        if state:
+            await scan_uploads.transition(home_id, "delete", owner=owner)
         if owner:
             await supabase_store.delete_scan_uploads(home_id, owner)
         await supabase_store.delete_home_index(home_id)

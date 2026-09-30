@@ -181,6 +181,9 @@ def test_preselected_photos_are_not_selected_or_suppressed_again():
 async def test_forgetting_a_staged_home_removes_its_direct_uploads(staged, monkeypatch):
     import asyncio
     seed(ready=True)
+    from app.flow import scan_uploads
+    async def legacy(*a, **kw): return None
+    monkeypatch.setattr(scan_uploads, 'transition', legacy)
     calls = []
     async def remove_scan(home, owner): calls.append((home, owner)); return True
     async def remove(*a): return True

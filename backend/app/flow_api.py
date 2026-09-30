@@ -885,6 +885,7 @@ async def ops_entry_submit(request_id: str, body: OpsEntrySubmission) -> JSONRes
 # Staged on-device uploads. Legacy /ingest remains available to old builds;
 # these routes require a verified Supabase guest/account and its upload row.
 class ScanContextUpload(HomeIngestRequest):
+    generation: int | None = Field(default=None, gt=0)
     revision: str = Field(pattern=r"^[a-f0-9-]{36}$")
 
 
@@ -945,6 +946,10 @@ async def upload_scan_context(home_id: str, body: ScanContextUpload, background:
 
     owner = await _scan_upload_owner(home_id, x_homeowner_token)
     _check_scan_object(home_id, owner, body.bucket, body.objectPath, ".zip")
+    from .flow import scan_uploads, supabase_store
+    if supabase_store.enabled():
+        result = await scan_uploads.begin(home_id, body, owner, background)
+        return JSONResponse(status_code=202, content=result)
     current = home_registry.ingest_status(home_id)
     if current and current.get("status") in ("queued", "running"):
         if current.get("objectPath") != body.objectPath:
@@ -969,6 +974,11 @@ async def scan_context_status(home_id: str, objectPath: str,
 
     owner = await _scan_upload_owner(home_id, x_homeowner_token)
     _check_scan_object(home_id, owner, "metashape-exports", objectPath, ".zip")
+    from .flow import scan_uploads, supabase_store
+    if supabase_store.enabled():
+        state = await scan_uploads.transition(home_id, "read", owner=owner)
+        if state:
+            return JSONResponse(scan_uploads.status(state, objectPath))
     index = await home_registry.load_index_async(home_id)
     status = home_registry.ingest_status(home_id) or {}
     if (status.get("status") == "done" and status.get("objectPath") == objectPath
@@ -995,6 +1005,11 @@ async def upload_scan_models(home_id: str, body: ScanModelsUpload,
     from .home_index import HomeIndex
 
     owner = await _scan_upload_owner(home_id, x_homeowner_token)
+    if supabase_store.enabled():
+        from .flow import scan_uploads
+        state = await scan_uploads.transition(home_id, "read", owner=owner)
+        if state:
+            return JSONResponse(await scan_uploads.publish(home_id, body, owner))
     index = await home_registry.load_index_async(home_id)
     if not index or not index.upload.get("contextReady") or index.upload.get("revision") != body.revision:
         index = await home_registry.load_index_async(home_id, refresh=True)
