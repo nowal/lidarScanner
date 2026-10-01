@@ -250,7 +250,7 @@ async def upload_bytes(
     return await _signed_storage_url(bucket, object_path)
 
 
-async def download_object(bucket: str, object_path: str, dest: Path) -> bool:
+async def download_object(bucket: str, object_path: str, dest: Path, *, max_bytes: int | None = None) -> bool:
     """Stream a storage object to ``dest`` with the service role. False when
     storage is off or the object is missing; never raises."""
     if not enabled():
@@ -270,8 +270,12 @@ async def download_object(bucket: str, object_path: str, dest: Path) -> bool:
                     logger.warning("Storage object %s/%s not found", bucket, object_path)
                     return False
                 resp.raise_for_status()
+                received = 0
                 with dest.open("wb") as out:
                     async for chunk in resp.aiter_bytes():
+                        received += len(chunk)
+                        if max_bytes is not None and received > max_bytes:
+                            raise ValueError("Storage object exceeds its declared upload size")
                         out.write(chunk)
         return True
     except Exception as exc:  # noqa: BLE001

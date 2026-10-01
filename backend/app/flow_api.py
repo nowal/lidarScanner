@@ -15,6 +15,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any, Literal, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -899,6 +900,38 @@ class ScanModelUpload(BaseModel):
 class ScanModelsUpload(BaseModel):
     revision: str = Field(pattern=r"^[a-f0-9-]{36}$")
     models: list[ScanModelUpload] = Field(min_length=1, max_length=250)
+
+
+class CompressedHomeModel(ScanModelUpload):
+    key: str = Field(pattern=r'^home$')
+    encoding: str = Field(pattern=r'^gzip$')
+    uncompressedBytes: int = Field(gt=0, le=1_048_576_000)
+    sha256: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class CompressedHomeUpload(BaseModel):
+    revision: str = Field(pattern=r'^[a-f0-9-]{36}$')
+    model: CompressedHomeModel
+
+
+@router.post('/ai/homes/{home_id}/uploads/home-model', dependencies=[Depends(require_token)], status_code=202)
+async def upload_compressed_home(home_id: str, body: CompressedHomeUpload, background: BackgroundTasks,
+                                 x_homeowner_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    from .flow import model_archive, supabase_store
+    owner = await _scan_upload_owner(home_id, x_homeowner_token)
+    if not supabase_store.enabled(): raise HTTPException(503, detail='Model upload storage is unavailable')
+    return JSONResponse(await model_archive.begin(home_id, body, owner, background), status_code=202)
+
+
+@router.get('/ai/homes/{home_id}/uploads/home-model', dependencies=[Depends(require_token)])
+async def compressed_home_status(home_id: str, revision: str,
+                                  x_homeowner_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    from .flow import model_archive
+    owner = await _scan_upload_owner(home_id, x_homeowner_token)
+    try: UUID(revision)
+    except ValueError: raise HTTPException(422, detail='Invalid model revision')
+    state = await model_archive.transition(home_id, 'read', revision, owner)
+    return JSONResponse(model_archive.status(state))
 
 
 async def _scan_upload_owner(home_id: str, token: str | None) -> str:

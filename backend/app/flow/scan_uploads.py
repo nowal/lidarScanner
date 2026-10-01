@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 async def transition(home_id: str, action: str, *, revision: str | None = None,
-                     owner: str | None = None, payload: dict | None = None) -> dict | None:
+                     owner: str | None = None, payload: dict | None = None,
+                     rpc: str = 'scan_upload_transition') -> dict | None:
     if not supabase_store.enabled():
         return None
     try:
@@ -35,7 +36,7 @@ async def transition(home_id: str, action: str, *, revision: str | None = None,
         if action == 'read': return None  # pre-library/CLI home identifiers
         raise HTTPException(422, detail='Invalid scan identifier')
     try:
-        response = await supabase_store._rest().post('/rpc/scan_upload_transition', json={
+        response = await supabase_store._rest().post('/rpc/' + rpc, json={
             'p_home_id': home_id, 'p_action': action, 'p_revision': revision,
             'p_owner_id': owner, 'p_payload': payload or {}})
         response.raise_for_status()
