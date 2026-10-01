@@ -331,3 +331,57 @@ def test_a_repeated_scope_question_is_removed_and_an_uninvited_one_is_counted():
     # A reply that is only the question is left alone rather than emptied.
     only = "Are we keeping this to the porch, or are other rooms part of the plan too?"
     assert rt._strip_repeat_scope_question(settled, plan, only) == only
+
+
+# ------------------------------------------------------------ a dropped word in a reply
+OPENER = ("I'm TakeShape's AI assistant for your home, and I've walked through what you available, "
+          "two spaces totaling around 850 square feet, including your living room with its sofa and stairs.")
+FIXED = OPENER.replace("what you available", "what you have available")
+
+
+def test_a_proofread_may_only_make_small_grammatical_repairs():
+    from app.flow.proofread import accept
+
+    assert accept(OPENER, FIXED)
+    assert accept("Siding and the walkway both get get washed in one visit.",
+                  "Siding and the walkway both get washed in one visit.")
+    assert accept("Two spaces total around 850 square feet.", "Two spaces totaling around 850 square feet.")
+    assert not accept(OPENER, OPENER), "no change is nothing to apply"
+    assert not accept(OPENER, FIXED.replace("850", "950")), "numbers are not grammar"
+    assert not accept(OPENER, FIXED.replace("sofa", "sectional")), "content words stay"
+    assert not accept(OPENER, FIXED + " It is a beautiful space."), "nothing is added"
+    assert not accept(OPENER, "I have walked through the home that you have made available to me."), "not a rewrite"
+    assert not accept("One line.\nTwo lines here.", "One line. Two lines are here."), "line breaks stay"
+
+
+@pytest.mark.asyncio
+async def test_the_opener_gets_a_second_read_and_nothing_else_does_by_default(monkeypatch):
+    from app.flow import proofread as pr
+
+    monkeypatch.setattr(settings, "anthropic_api_key", "k")
+    monkeypatch.setattr(settings, "proofread_scope", "opening")
+    calls = []
+
+    async def fixes(text):
+        calls.append(text)
+        return f"<message>\n{FIXED}\n</message>"
+
+    assert await pr.proofread(OPENER, opening=True, caller=fixes) == FIXED
+    assert await pr.proofread(OPENER, opening=False, caller=fixes) == OPENER and len(calls) == 1
+    monkeypatch.setattr(settings, "proofread_scope", "all")
+    assert await pr.proofread(OPENER, opening=False, caller=fixes) == FIXED
+
+    async def rewrites(text):
+        return "Welcome! Your home is 950 square feet and lovely."
+
+    assert await pr.proofread(OPENER, opening=True, caller=rewrites) == OPENER, "a rewrite is refused"
+
+    async def boom(text):
+        raise RuntimeError("provider down")
+
+    assert await pr.proofread(OPENER, opening=True, caller=boom) == OPENER
+    monkeypatch.setattr(settings, "proofread_scope", "off")
+    assert await pr.proofread(OPENER, opening=True, caller=fixes) == OPENER
+    monkeypatch.setattr(settings, "proofread_scope", "all")
+    monkeypatch.setattr(settings, "anthropic_api_key", "")
+    assert await pr.proofread(OPENER, opening=True, caller=fixes) == OPENER, "no key, no call"

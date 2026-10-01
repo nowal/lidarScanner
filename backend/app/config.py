@@ -184,6 +184,13 @@ class Settings(BaseSettings):
     # later turns wait the shorter time while the conversation is blind.
     opening_context_wait_seconds: float = 20.0
     turn_context_wait_seconds: float = 4.0
+    # A second read of a reply for a dropped or doubled word (flow/proofread).
+    # "opening" costs one extra model call per thread; "all" costs one per
+    # turn and a second or two of latency; "off" disables it. Empty model =
+    # anthropic_model.
+    proofread_scope: str = "opening"
+    proofread_model: str = ""
+    proofread_timeout_seconds: float = 6.0
     # Ground the range in web-searched rates rather than the static national
     # table: near the homeowner's zip when we have one, nationally when we
     # don't. ON by default as of Sep 16 2026 — a static table is a guess about

@@ -58,6 +58,7 @@ from .flow.capture import SAID_EXTERIOR as _SAID_EXTERIOR
 from .flow.capture import geometry_less as _geometry_less
 from .flow.capture import is_exterior as _is_exterior
 from .flow.capture import surfaces_feet as _surfaces_feet
+from .flow.proofread import proofread as _proofread
 from .flow.state import ScopeIntent
 from .flow.pricing import (
     compute_price_guidance,
@@ -3346,6 +3347,7 @@ async def _run_flow_turn_locked(
         response.message.content = _strip_repeat_scope_question(
             state, plan, response.message.content
         )
+        response.message.content = await _proofread(response.message.content, opening=False)
     # A suppressed draft was never delivered, so it spends no ask or offer
     # budget: only the text the homeowner actually saw counts.
     wording_ids = _record_asks_and_wordings(
@@ -3668,6 +3670,10 @@ async def _run_opening_turn_locked(
         card_already_shown=not state.client_flow_aware,
     )
 
+    if not (response.usedFallback or _substituted):
+        # The opener is kept for the life of the thread, so it gets a second
+        # read for a dropped word before it is cached (Quintin, Oct 1).
+        response.message.content = await _proofread(response.message.content, opening=True)
     if not response.usedFallback:
         # A fallback opener is generic error copy — never cache it as the
         # thread's one grounded opener, and leave steps 1-2 incomplete so
