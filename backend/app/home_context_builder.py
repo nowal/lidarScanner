@@ -302,6 +302,17 @@ def _compact_mesh_summary(mesh_summary: Any) -> dict[str, Any]:
         }
         if all(value is not None for value in extent.values()):
             result["extentFeet"] = extent
+    # What the mesh actually covered, split by which way it faces: the only
+    # area an exterior capture has (Quintin, Oct 1).
+    surfaces = raw.get("surfaces")
+    if isinstance(surfaces, dict):
+        scanned = {
+            "uprightSqFt": _square_meters_to_feet(surfaces.get("uprightSquareMeters")),
+            "levelGroundSqFt": _square_meters_to_feet(surfaces.get("groundSquareMeters")),
+        }
+        scanned = {key: value for key, value in scanned.items() if value}
+        if scanned:
+            result["scannedSurfaces"] = scanned
     return result
 
 

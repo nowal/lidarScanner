@@ -187,6 +187,13 @@ class FlowState(BaseModel):
     # The LiDAR mesh's overall extent in metres, from the app. RoomPlan has
     # nothing to say outdoors; the mesh still has the building's size.
     scan_mesh_bounds: dict[str, float] | None = None
+    # Upright and level-ground surface area the mesh covered, in square
+    # metres, from the app. The only measurements an exterior capture has.
+    scan_surfaces: dict[str, float] | None = None
+    # The opener was written before any scan detail had reached the server
+    # (the staged upload was still in flight). The first turn that can see
+    # the scan says so, once.
+    opened_blind: bool = False
 
     # --- Scope intent (docs/SCAN_SCOPE.md) ---------------------------------
     # One room, a few named rooms, or the whole home -- from the homeowner's

@@ -179,6 +179,11 @@ class Settings(BaseSettings):
     # a detached garage opens as "a nice living room" (Quintin, Sep 25).
     capture_vision_enabled: bool = True
     capture_vision_timeout_seconds: float = 25.0
+    # A staged scan upload can still be in flight when the chat opens. The
+    # opening turn waits this long for it before opening without the scan;
+    # later turns wait the shorter time while the conversation is blind.
+    opening_context_wait_seconds: float = 20.0
+    turn_context_wait_seconds: float = 4.0
     # Ground the range in web-searched rates rather than the static national
     # table: near the homeowner's zip when we have one, nationally when we
     # don't. ON by default as of Sep 16 2026 — a static table is a guess about

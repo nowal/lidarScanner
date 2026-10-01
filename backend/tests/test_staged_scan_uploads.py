@@ -296,7 +296,7 @@ async def test_staged_exterior_keeps_appearance_packet_extent_and_upload_readine
         quotes_to_present=None, home_index=index)
     assert 'outside of their detached garage' in text
     assert 'EXTERIOR OF A DETACHED GARAGE' in text
-    assert 'about 24 x 22 ft footprint' in text
+    assert 'the scan spans about 24 x 22 ft' in text
     assert 'They walked their WHOLE HOME' not in text
     measurements, _, _ = _room_measurements(state)
     assert measurements['capture'] == 'exterior of a detached garage (from the scan photos)'

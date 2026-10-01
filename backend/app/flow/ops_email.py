@@ -81,9 +81,19 @@ def _fmt_measurements(measurements: dict[str, Any]) -> list[str]:
     extent = measurements.get("meshExtentFeet") or {}
     if extent:
         lines.append(
-            f"Overall size (LiDAR mesh, approx.): {extent.get('width')} x {extent.get('length')} ft "
-            f"footprint, {extent.get('height')} ft tall"
+            f"Scan extent (LiDAR mesh, approx.): {extent.get('width')} x {extent.get('length')} ft, "
+            f"{extent.get('height')} ft tall (the whole area walked)"
         )
+    scanned = measurements.get("scannedSurfacesSquareFeet") or {}
+    if scanned:
+        parts = []
+        if scanned.get("upright"):
+            high = f", up to {scanned['heightFeet']} ft high" if scanned.get("heightFeet") else ""
+            parts.append(f"upright (walls, siding, fences) ~{float(scanned['upright']):,.0f} sq ft{high}")
+        if scanned.get("ground"):
+            parts.append(f"level ground (drive, walks, patio, any lawn scanned) ~{float(scanned['ground']):,.0f} sq ft")
+        lines.append("Scanned surfaces (LiDAR mesh, approx.): " + "; ".join(parts))
+        lines.append("  (what the walk covered; anything it did not pass or above ~15 ft is not included)")
     area = measurements.get("floorAreaSquareFeet")
     if area:
         label = "Room area" if measurements.get("room") else "Floor area"

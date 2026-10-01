@@ -51,6 +51,19 @@ _PER_WINDOW: dict[str, tuple[float, float, float, float]] = {
 }
 
 
+# Trades priced by the surface being worked, when the scan measured it:
+# (low $/sq ft of surface, high $/sq ft, minimum low $, minimum high $).
+# House washing and flatwork sit in the same band per square foot; the
+# minimum is the call-out. Static, like the tables above.
+_PER_SURFACE: dict[str, tuple[float, float, float, float]] = {
+    "Power Washing": (0.15, 0.45, 150.0, 300.0),
+}
+
+
+def priced_by_surface(service_type: str | None) -> bool:
+    return bool(service_type) and service_type in _PER_SURFACE
+
+
 def priced_by_floor_area(service_type: str | None) -> bool:
     return bool(service_type) and service_type not in _NOT_FLOOR_AREA
 
@@ -197,6 +210,8 @@ def compute_price_guidance(
     researched=None,      # flow.price_research.ResearchedRates | None
     job_estimate=None,    # flow.price_research.JobEstimate | None (tightest)
     window_count: int | None = None,  # from the walk, for count-priced trades
+    surface_sqft: float | None = None,  # scanned surface, for surface-priced trades
+    surface_note: str | None = None,
 ) -> PriceGuidance | None:
     """Return guidance, or None when there is nothing sane to say.
 
@@ -212,6 +227,20 @@ def compute_price_guidance(
     """
     if not service_type:
         return None
+    if service_type in _PER_SURFACE and surface_sqft and surface_sqft > 0:
+        # The scan measured the thing being washed. "Nothing measured yet"
+        # next to a finished exterior scan is what Quintin got on Oct 1.
+        per_low, per_high, min_low, min_high = _PER_SURFACE[service_type]
+        low = _round_coarse(max(min_low, surface_sqft * per_low))
+        high = _round_coarse(max(min_high, surface_sqft * per_high))
+        if high <= low:
+            high = low * 2
+        basis = (
+            f"≈{int(round(surface_sqft, -1)):,} sq ft of surface measured from the scan"
+            + (f" ({surface_note})" if surface_note else "")
+            + f", {service_type.lower()} -- typical per-square-foot rates"
+        )
+        return PriceGuidance(lowUsd=low, highUsd=high, basis=basis, disclaimer=DISCLAIMER)
     if service_type in _PER_WINDOW:
         per_low, per_high, min_low, min_high = _PER_WINDOW[service_type]
         if window_count and window_count > 0:

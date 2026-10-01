@@ -128,7 +128,7 @@ async def test_the_opening_turn_learns_it_is_a_detached_garage_and_how_big(monke
     assert "THIS CAPTURE IS THE EXTERIOR OF A DETACHED GARAGE, not a room" in text
     assert "SEPARATE building from the house" in text
     assert "garage doors" in text
-    assert "OVERALL SIZE FROM THE LIDAR MESH: about 24 x 22 ft footprint and 12 ft tall" in text
+    assert "OVERALL SIZE FROM THE LIDAR MESH: the scan spans about 24 x 22 ft and 12 ft tall" in text
     assert "RoomPlan found no rooms in this capture" in text
     assert "the outside of their detached garage" in text
     assert "naming the room you can see" not in text
@@ -217,7 +217,7 @@ def test_the_lead_package_says_which_building_and_how_big():
     assert measurements["meshExtentFeet"] == {"width": 24.0, "length": 22.0, "height": 12.1}
     lines = "\n".join(ops_email._fmt_measurements(measurements))
     assert "Capture: exterior of a detached garage" in lines
-    assert "Overall size (LiDAR mesh, approx.): 24.0 x 22.0 ft footprint, 12.1 ft tall" in lines
+    assert "Scan extent (LiDAR mesh, approx.): 24.0 x 22.0 ft, 12.1 ft tall" in lines
 
 
 def test_mesh_bounds_reach_the_model_context():
@@ -252,7 +252,7 @@ def test_the_active_capture_directive_uses_the_mesh_not_a_zero_area(monkeypatch)
     })
     state = FlowState(thread_id="t", home_id="h", active_room_key="room-1")
     text = "\n".join(flow_runtime._home_directives(state, index))
-    assert "ACTIVE CAPTURE: the exterior — the outside of the building, not a room; about 24 x 22 ft footprint and 12 ft tall" in text
+    assert "ACTIVE CAPTURE: the exterior — the outside of the building, not a room; the scan spans about 24 x 22 ft and 12 ft tall" in text
     assert "about 0 sq ft" not in text
     assert "EXTERIOR OF A DETACHED GARAGE" in text
     assert "Talk about THIS capture" in text
