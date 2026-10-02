@@ -385,3 +385,23 @@ async def test_the_opener_gets_a_second_read_and_nothing_else_does_by_default(mo
     monkeypatch.setattr(settings, "proofread_scope", "all")
     monkeypatch.setattr(settings, "anthropic_api_key", "")
     assert await pr.proofread(OPENER, opening=True, caller=fixes) == OPENER, "no key, no call"
+
+
+def test_switching_homes_cannot_reuse_the_previous_exterior_measurements(monkeypatch):
+    monkeypatch.setattr(home_registry, "load_index", lambda home_id: None)
+    state = FlowState(thread_id="switch", home_id="old-home", scan_surfaces=dict(SURFACES))
+    rt._reconcile_home(state, _request(home_id="new-home", packet=HomeAIContextPacket()))
+    assert state.home_id == "new-home"
+    assert state.scan_surfaces is None
+
+
+@pytest.mark.parametrize("original,edited", [
+    ("A provider will not need an on-site visit.", "A provider will need an on-site visit."),
+    ("We can request quotes using this scan.", "We will request quotes using this scan."),
+    ("That paint looks worn in the scan.", "That painful looks worn in the scan."),
+    ("No, no visit is required.", "No, visit is required."),
+    ("This doesn't require a visit.", "This does require a visit."),
+])
+def test_proofreading_cannot_change_negation_promises_or_content(original, edited):
+    from app.flow.proofread import accept
+    assert not accept(original, edited)

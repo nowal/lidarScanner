@@ -732,6 +732,7 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
             state.active_room_key = None
             state.scan_appearance = None
             state.scan_mesh_bounds = None
+            state.scan_surfaces = None
         state.home_id = request.homeId
     index = load_index(state.home_id)
     _note_homeowner_setting(state, request, index)

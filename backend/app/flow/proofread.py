@@ -41,7 +41,7 @@ _FUNCTION_WORDS = frozenset(
     "a an the have has had having is are was were be been being am do does did "
     "to of in on at for with from by as that this these those it its it's i "
     "i've i'm you you've your you're we we've our they their there and or but "
-    "so if than then not no will would can could should may might".split()
+    "so if than then".split()
 )
 _TOKEN = re.compile(r"[A-Za-z0-9$%'’-]+|[^\sA-Za-z0-9]")
 _MIN_CHARS, _MAX_CHARS = 20, 1500
@@ -60,10 +60,12 @@ def _inflection(token: str, others: list[str]) -> bool:
     t = _norm(token)
     if len(t) < 3 or any(ch.isdigit() for ch in t):
         return False
-    return any(
-        _norm(o)[:4] == t[:4] and abs(len(o) - len(t)) <= 3 and not any(ch.isdigit() for ch in o)
-        for o in others
-    )
+    # A shared prefix is not an inflection: paint -> painful, for example.
+    # Keep this deliberately narrow; a missed repair leaves the original.
+    def forms(word: str) -> set[str]:
+        return {word + "s", word + "ed", word + "ing"}
+
+    return any(t in forms(_norm(o)) or _norm(o) in forms(t) for o in others)
 
 
 def accept(original: str, edited: str, *, max_edits: int = 4) -> bool:
@@ -72,6 +74,13 @@ def accept(original: str, edited: str, *, max_edits: int = 4) -> bool:
         return False
     a, b = _TOKEN.findall(original), _TOKEN.findall(edited)
     la, lb = [_norm(t) for t in a], [_norm(t) for t in b]
+    # A grammatical repair must not reverse a claim or change a promise.
+    # Check before doubled-word removal, which could otherwise erase "no".
+    protected = {"not", "no", "never", "will", "would", "can", "could", "should", "may", "might", "must"}
+    def claims(tokens: list[str]) -> list[str]:
+        return [t for t in tokens if t in protected or t.endswith("n't")]
+    if claims(la) != claims(lb):
+        return False
     if la == lb:
         return False  # nothing to apply
     edits = 0
