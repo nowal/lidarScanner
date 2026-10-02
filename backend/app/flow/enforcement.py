@@ -176,6 +176,17 @@ _HUMAN_CLAIM = re.compile(
 )
 
 
+_ONSITE_VISIT = re.compile(
+    r"(?i)\b(?:measure[sd]?|measuring|estimate[sd]?|quote[sd]?|assess(?:ment)?|look|walk[- ]?through|"
+    r"visit|come\s+out|check)\b[^.!?\n]{0,40}?\b(?:on[- ]site|in[- ]person|in[- ]home)\b"
+    r"|\b(?:on[- ]site|in[- ]home|in[- ]person)\s+(?:visit|estimate|quote|measure(?:ment)?s?|assessment|walk[- ]?through)\b"
+    r"|\bsite\s+visit\b|\bcome\s+out\s+to\s+(?:measure|look|see|quote)\b"
+)
+_ONSITE_NEGATED = re.compile(
+    r"(?i)\b(?:no|not|without|avoid(?:ing)?|skip(?:ping)?|never|instead\s+of|rather\s+than)\b|n't\b"
+)
+
+
 @dataclass
 class Violation:
     rule: str
@@ -261,6 +272,13 @@ def check(
         m = _ZIP_ASK.search(text)
         if m:
             violations.append(Violation("premature_zip_ask", m.group(0)))
+    # Ungated: the product is pricing from the scan. A reply that sends a
+    # provider out to measure contradicts it (Quintin, Oct 1). A sentence
+    # that says no visit is needed is the opposite, and is fine.
+    for m in _ONSITE_VISIT.finditer(text):
+        if not _ONSITE_NEGATED.search(text[max(0, m.start() - 60): m.end()]):
+            violations.append(Violation("onsite_visit_suggested", m.group(0)))
+            break
     if not gates.can_state_prices:
         m = _PRICE_STATEMENT.search(text)
         if m:
@@ -324,6 +342,12 @@ def correction_instruction(violations: list[Violation]) -> str:
             "don't have an address from this conversation, and carry on."
         ),
         "premature_zip_ask": "Do not ask for the zip code at this point in the conversation.",
+        "onsite_visit_suggested": (
+            "Do not tell the homeowner that a provider will measure, visit, or "
+            "estimate on site or in person. Pricing from the scan is the point. "
+            "Say what the scan captured and that providers price from the scan, "
+            "its photos and what they have told you."
+        ),
         "unauthorized_price_figure": (
             "Do not state any dollar amount, price, rate, or cost range. "
             "Explain instead that the quote request is how they get a real "

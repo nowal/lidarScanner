@@ -292,6 +292,15 @@ def _add_capture_measurements(state, measurements: dict[str, Any]) -> None:
         structure = appearance.get("structure") or "building"
         measurements["capture"] = f"exterior of a {structure} (from the scan photos)"
         measurements["note"] = f"The outside of a {structure}, from the home capture."
+    from .flow.capture import surfaces_feet
+
+    surfaces = surfaces_feet(state)
+    if surfaces:
+        measurements["scannedSurfacesSquareFeet"] = {
+            key: round(surfaces[name], 1 if name == "height" else 0)
+            for key, name in (("upright", "upright"), ("ground", "ground"), ("heightFeet", "height"))
+            if surfaces.get(name)
+        }
     bounds = state.scan_mesh_bounds or {}
     try:
         w, l, h = (float(bounds[k]) for k in ("widthMeters", "lengthMeters", "heightMeters"))

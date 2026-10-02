@@ -54,6 +54,11 @@ from .flow.machine import (
     GateDecision,
     TurnPlan,
 )
+from .flow.capture import SAID_EXTERIOR as _SAID_EXTERIOR
+from .flow.capture import geometry_less as _geometry_less
+from .flow.capture import is_exterior as _is_exterior
+from .flow.capture import surfaces_feet as _surfaces_feet
+from .flow.proofread import proofread as _proofread
 from .flow.state import ScopeIntent
 from .flow.pricing import (
     compute_price_guidance,
@@ -729,13 +734,14 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
             state.scan_mesh_bounds = None
         state.home_id = request.homeId
     index = load_index(state.home_id)
+    _note_homeowner_setting(state, request, index)
     if index is None:
         return None
 
     # A staged context ZIP also creates an index for a single exterior
     # capture. Keep that capture in focus so its appearance reaches the
     # opener and later quote measurements without requiring a room name.
-    if not state.active_room_key and len(index.rooms) == 1 and index.rooms[0].role == "exterior":
+    if not state.active_room_key and len(index.rooms) == 1 and _is_exterior(state, index.rooms[0]):
         state.active_room_key = index.rooms[0].key
 
     # "that little room" is how a homeowner points at the space the scan
@@ -954,6 +960,109 @@ def _mesh_extent_feet(bounds: dict | None) -> tuple[float, float, float] | None:
     return w * 3.28084, l * 3.28084, h * 3.28084
 
 
+def _note_homeowner_setting(state: FlowState, request: HomeAIChatRequest, index) -> None:
+    """Their own word for what they scanned stands in for a photo pass that
+    never ran. Quintin, Oct 1: "I scanned the outside of my house and
+    driveway" -- and the agent went on treating it as a room it could not
+    see. Only where the scan has no room geometry to contradict them."""
+    if not _SAID_EXTERIOR.search(request.message or ""):
+        return
+    appearance = dict(state.scan_appearance or {})
+    if appearance.get("setting") == "exterior":
+        return
+    if index is not None and not any(_geometry_less(r) for r in index.rooms):
+        return
+    context = request.homeContext
+    if index is None and context is not None and (context.roomCount or context.rooms):
+        return
+    appearance.update({"setting": "exterior", "source": "homeowner"})
+    appearance.setdefault("structure", "")
+    state.scan_appearance = appearance
+
+
+def _surface_line(state: FlowState) -> str | None:
+    """The mesh's own measurements for a capture RoomPlan could not measure."""
+    surfaces = _surfaces_feet(state)
+    if not surfaces:
+        return None
+    parts = []
+    if surfaces.get("upright", 0) >= 20:
+        high = f", up to about {surfaces['height']:.0f} ft high" if surfaces.get("height") else ""
+        parts.append(
+            f"about {surfaces['upright']:,.0f} sq ft of upright surface (walls, siding, "
+            f"fences: anything vertical the walk passed{high})"
+        )
+    if surfaces.get("ground", 0) >= 20:
+        parts.append(
+            f"about {surfaces['ground']:,.0f} sq ft of level ground (driveway, walkways, "
+            "patio, and any lawn that was scanned)"
+        )
+    if not parts:
+        return None
+    return (
+        "- MEASURED FROM THE SCAN (LiDAR mesh, what the walk actually covered): "
+        + " and ".join(parts)
+        + ". These ARE measurements, approximate: state them when they ask how big "
+        "it is or what it would cost, and say what they cover. They count only what "
+        "the scan reached, so a wall the walk did not pass, or anything above the "
+        "scanner's reach (roughly 15 ft), is not in them. If the job turns on one "
+        "surface (the driveway, the siding), ask ONE question to pin it down, for "
+        "example whether that level ground is all driveway or includes lawn. NEVER "
+        "say nothing was measured, or that the scan only measures interiors."
+    )
+
+
+def _scan_visible(state: FlowState, request: HomeAIChatRequest, home_index) -> bool:
+    """Has anything of the scan reached this turn -- an index, RoomPlan rooms
+    in the packet, photos, or a photo pass already kept on the thread?"""
+    if home_index is not None and home_index.rooms:
+        return True
+    context = request.homeContext
+    if context is not None and (
+        context.rooms or any(frame.jpegBase64 for frame in context.selectedKeyframes)
+    ):
+        return True
+    appearance = state.scan_appearance or {}
+    return bool(appearance) and appearance.get("source") != "homeowner"
+
+
+async def _await_staged_index(home_id: str | None, seconds: float):
+    """Give a staged scan upload that is still being read a moment to land.
+
+    The phone stops sending photos in the chat packet once it has started
+    the staged upload, so a chat opened before the server finished reading
+    that upload sees nothing at all, and said so: "I don't actually have any
+    room views loaded yet" was the cached opener of Quintin's exterior scan
+    (Oct 1). Waits only while an upload is queued or running; returns the
+    index when it lands, else None. Never raises."""
+    if not home_id or seconds <= 0:
+        return None
+    from .flow import scan_uploads, supabase_store
+    from .flow.home_registry import load_index_async
+
+    if not supabase_store.enabled():
+        return None
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            upload = await scan_uploads.transition(home_id, "read")
+            if not upload:
+                return None  # no staged upload is known for this scan
+            if scan_uploads.visible_index(upload):
+                return await load_index_async(home_id)
+            if (upload.get("progress") or {}).get("status") not in ("queued", "running"):
+                return None  # failed or abandoned: waiting will not help
+        except Exception as exc:  # noqa: BLE001 -- the turn goes on without it
+            logger.info("Staged index wait skipped for %s: %s", home_id, getattr(exc, "detail", exc))
+            return None
+        if time.monotonic() + _STAGED_POLL_SECONDS > deadline:
+            return None
+        await asyncio.sleep(_STAGED_POLL_SECONDS)
+
+
+_STAGED_POLL_SECONDS = 2.0
+
+
 def _capture_directives(state: FlowState) -> list[str]:
     """A single capture with no home index: what its own photos and mesh say.
 
@@ -972,9 +1081,12 @@ def _capture_directives(state: FlowState) -> list[str]:
     if extent and (exterior or no_rooms):
         w, l, h = extent
         line = (
-            f"- OVERALL SIZE FROM THE LIDAR MESH: about {w:.0f} x {l:.0f} ft footprint "
-            f"and {h:.0f} ft tall, approximate to a foot or so. This is measured, so "
-            f"you MAY state it when they ask how big the {'building' if exterior else 'space'} is."
+            f"- OVERALL SIZE FROM THE LIDAR MESH: the scan spans about {w:.0f} x {l:.0f} ft "
+            f"and {h:.0f} ft tall, approximate to a foot or so. That is the whole area "
+            "the walk covered: for a walk around one building it is roughly that "
+            "building's footprint, and if a yard or driveway was scanned too it is all "
+            "of it together, so say 'the scan covers', never 'the house is'. This is "
+            "measured, so you MAY state it when they ask how big it is."
         )
         if no_rooms:
             line += (
@@ -982,6 +1094,9 @@ def _capture_directives(state: FlowState) -> list[str]:
                 "area, wall count or window count; do not invent them."
             )
         lines.append(line)
+    surface = _surface_line(state)
+    if surface:
+        lines.append(surface)
     return lines
 
 
@@ -1000,6 +1115,22 @@ def _remember_mesh_bounds(state: FlowState, request: HomeAIChatRequest) -> None:
         out[key] = round(float(value), 2)
     out["roomCount"] = int(context.roomCount or 0)
     state.scan_mesh_bounds = out
+
+
+def _remember_scan_surfaces(state: FlowState, request: HomeAIChatRequest) -> None:
+    """Keep the surface areas the app measured off the mesh. A later turn may
+    arrive with the mesh no longer in memory on the phone."""
+    context = request.homeContext
+    raw = (context.meshSummary or {}).get("surfaces") if context else None
+    if not isinstance(raw, dict):
+        return
+    keep: dict[str, float] = {}
+    for key in ("uprightSquareMeters", "groundSquareMeters", "levelSquareMeters", "heightMeters"):
+        value = raw.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(value) and 0 < value < 100000:
+            keep[key] = round(float(value), 1)
+    if keep.get("uprightSquareMeters") or keep.get("groundSquareMeters"):
+        state.scan_surfaces = keep
 
 
 async def _maybe_capture_appearance(state: FlowState, request: HomeAIChatRequest, home_index) -> None:
@@ -1082,17 +1213,30 @@ def _home_appearance_directives(home_id: str | None, index) -> list[str]:
 
 
 def _home_directives(state: FlowState, index) -> list[str]:
-    single_exterior = len(index.rooms) == 1 and index.rooms[0].role == "exterior"
-    scan_description = (
-        "- EXTERIOR CAPTURE. This homeowner scanned the outside of one building. "
-        "Describe this capture, without implying they walked the whole home:\n"
-        if single_exterior else
-        "- WHOLE-HOME SCAN. This homeowner walked their whole home, so you "
-        "know its rooms. These are the ONLY rooms you can see — never invent "
-        "or imply another one:\n"
-    )
+    exterior_keys = {r.key for r in index.rooms if _is_exterior(state, r)}
+    if exterior_keys and len(exterior_keys) == len(index.rooms):
+        areas = "" if len(index.rooms) == 1 else f", in {len(index.rooms)} areas"
+        scan_description = (
+            f"- EXTERIOR CAPTURE. This homeowner scanned the outside of their property{areas}. "
+            "Describe this capture, without implying they walked the whole home "
+            "or that what they scanned is a room:\n"
+        )
+    elif exterior_keys or any(_geometry_less(r) for r in index.rooms):
+        scan_description = (
+            "- SCANNED AREAS. These are the areas this homeowner scanned, and the "
+            "ONLY ones you can see — never invent or imply another one. An area "
+            "marked 'no room structure' is one the scan found no walls or floor "
+            "plan in (often outdoors, or one open space): never call it a room, "
+            "and ask what it is when it matters:\n"
+        )
+    else:
+        scan_description = (
+            "- WHOLE-HOME SCAN. This homeowner walked their whole home, so you "
+            "know its rooms. These are the ONLY rooms you can see — never invent "
+            "or imply another one:\n"
+        )
     lines = [
-        scan_description + index.as_text(),
+        scan_description + index.as_text(exterior_keys),
         "- Rooms marked 'name uncertain' are the server's best guess from "
         "fixtures. Use the name naturally, but if the conversation turns on "
         "which room it is, ask rather than asserting.",
@@ -1100,15 +1244,17 @@ def _home_directives(state: FlowState, index) -> list[str]:
     room = index.by_key(state.active_room_key) if state.active_room_key else None
     if room is not None:
         fixtures = ", ".join(f"{n} {c}" for c, n in room.objects.most_common(6))
-        if room.role == "exterior":
+        if room.key in exterior_keys:
             # Not a room: "about 0 sq ft" is the wrong fact. The mesh extent
             # is the size that means something for the outside of a building.
-            detail = f"- ACTIVE CAPTURE: the {room.display_name} — the outside of the building, not a room"
+            name = room.display_name if room.role == "exterior" else "exterior"
+            detail = f"- ACTIVE CAPTURE: the {name} — the outside of the building, not a room"
             extent = index.mesh_extent_feet(state.scan_mesh_bounds)
             if extent:
                 detail += (
-                    f"; about {extent[0]:.0f} x {extent[1]:.0f} ft footprint and "
-                    f"{extent[2]:.0f} ft tall from the LiDAR mesh (measured, approximate)"
+                    f"; the scan spans about {extent[0]:.0f} x {extent[1]:.0f} ft and "
+                    f"{extent[2]:.0f} ft tall from the LiDAR mesh (measured, approximate; "
+                    "the whole area the walk covered, not necessarily one building)"
                 )
             if room.window_count:
                 detail += f", {room.window_count} window opening(s)"
@@ -1125,7 +1271,7 @@ def _home_directives(state: FlowState, index) -> list[str]:
             detail += f" (opening sizes, w x h: {sizes})"
         if fixtures:
             detail += f", with {fixtures}"
-        subject = "capture" if room.role == "exterior" else "room"
+        subject = "capture" if room.key in exterior_keys else "room"
         lines.append(
             detail + f". Talk about THIS {subject} unless the homeowner moves to "
             "another. Do not describe rooms they have not raised."
@@ -1145,7 +1291,13 @@ def _home_directives(state: FlowState, index) -> list[str]:
                 "another. If they ask what is next to it, say so plainly, ask "
                 "them which room it is, and use their answer from then on."
             )
-        lines.extend(_appearance_directives(state.home_id, room))
+        appearance_lines = _appearance_directives(state.home_id, room)
+        if room.key in exterior_keys and room.role != "exterior":
+            # Exterior on the homeowner's word: there is no photo pass to quote.
+            appearance_lines = _photo_lines({"setting": "exterior", "structure": ""}, "this capture")
+        lines.extend(appearance_lines)
+        if room.key in exterior_keys and (surface := _surface_line(state)):
+            lines.append(surface)
         if room.named_by_homeowner:
             lines.append(
                 f"- They told you this room is the {room.display_name}, and "
@@ -1166,6 +1318,8 @@ def _home_directives(state: FlowState, index) -> list[str]:
             "work in that one."
         )
         lines.extend(_home_appearance_directives(state.home_id, index))
+        if exterior_keys and (surface := _surface_line(state)):
+            lines.append(surface)
         overview = index.layout_overview()
         if overview:
             lines.append(
@@ -1313,6 +1467,8 @@ def _build_directives(
     quotes_on_file: list[dict[str, Any]] | None = None,
     declined_quotes: list[dict[str, Any]] | None = None,
     lead_delivered: bool = False,
+    scan_visible: bool = True,
+    scan_arrived: bool = False,
 ) -> str:
     g = plan.gates
     lines: list[str] = [
@@ -1332,6 +1488,13 @@ def _build_directives(
         "those sections, and use THEIR number in anything you write up. If "
         "they have not said, the request must say 'N window sections; "
         "individual count not confirmed', not a number of windows.",
+        # Quintin, Oct 1: "A provider will measure on site for the real
+        # number" -- to someone using the app to avoid exactly that.
+        "- NEVER tell the homeowner that a provider will have to measure, "
+        "visit, or estimate on site or in person: pricing from the scan, "
+        "without a site visit, is the reason they are here. If something was "
+        "not measured, say what the scan did capture and that providers price "
+        "from the scan, its photos and what they have told you.",
     ]
     if home_index is not None:
         lines.extend(_home_directives(state, home_index))
@@ -1355,11 +1518,34 @@ def _build_directives(
     if home_index is None:
         lines.extend(_capture_directives(state))
 
-    indexed_exterior = (
-        home_index is not None and len(home_index.rooms) == 1
-        and home_index.rooms[0].role == "exterior"
+    if scan_arrived:
+        lines.append(
+            "- THE SCAN HAS NOW COME THROUGH. Your opener said you could not see "
+            "it yet; you can now. Begin this reply by saying so in one short "
+            "clause and naming what it is from the lines above, then answer them."
+        )
+    elif not scan_visible and not opening:
+        lines.append(
+            "- YOU STILL CANNOT SEE THIS SCAN: its photos and layout have not "
+            "reached you. If it comes up, say so plainly and that you will have "
+            "them once it finishes syncing. Never say the scan cannot measure "
+            "this kind of space, and never call it a room. You can still take "
+            "down what they want done"
+            + (", and you DO have the measurements above" if (state.scan_surfaces or state.scan_mesh_bounds) else "")
+            + "."
+        )
+
+    exterior_rooms = (
+        [r for r in home_index.rooms if _is_exterior(state, r)] if home_index is not None else []
     )
-    if opening and home_index is not None and not indexed_exterior:
+    indexed_exterior = bool(exterior_rooms) and len(exterior_rooms) == len(home_index.rooms)
+    # Every area came through with no room in it and nobody has said what it
+    # is: not a home walk-through, and not something to name.
+    structureless = (
+        home_index is not None and not indexed_exterior
+        and all(_geometry_less(r) for r in home_index.rooms)
+    )
+    if opening and home_index is not None and not indexed_exterior and not structureless:
         # A whole-home walk has no single room to open on: opening with one
         # would pick a room they never chose.
         lines.append(
@@ -1380,8 +1566,27 @@ def _build_directives(
         if indexed_exterior:
             from .flow.home_registry import room_context_for
 
-            appearance = room_context_for(state.home_id, home_index.rooms[0].key) or {"setting": "exterior"}
-        if appearance.get("setting") == "exterior":
+            appearance = {**(room_context_for(state.home_id, exterior_rooms[0].key) or {}), "setting": "exterior"}
+        if not scan_visible:
+            # Nothing of the scan has reached the server. Saying "no room
+            # views loaded" and asking about "the room" is what a homeowner
+            # with a finished exterior scan was told (Quintin, Oct 1).
+            subject = (
+                "You cannot see this scan yet: its details have not reached you "
+                "(it is still uploading or being read). Say that plainly in one "
+                "short sentence, and that you will have it shortly. Do not call "
+                "it a room, do not guess what was scanned, and do not describe "
+                "anything. Then ask what they have in mind for it, "
+            )
+        elif structureless:
+            subject = (
+                "The scan has come through, but there is no room layout in it "
+                "(usual for an outdoor or open area) and you have no description "
+                "of its photos. Say you have their scan, do not call it a room or "
+                "a walk-through of their home, and do not guess what it is. Then "
+                "ask what they scanned and what they have in mind for it, "
+            )
+        elif appearance.get("setting") == "exterior":
             structure = appearance.get("structure") or "building"
             subject = (
                 f"Then open by saying what you can see — the outside of their "
@@ -2142,6 +2347,44 @@ _SCOPE_SINGLE_ROOM = re.compile(
     r"|\b(?:this|the)\s+(?:room|space)\s+(?:only|is\s+(?:the\s+)?(?:whole|entire|only)\s+project)\b"
     r"|\bone\s+room\s+(?:only|for\s+now)\b|\bjust\s+(?:the\s+)?one\s+room\b"
 )
+# "Just the porch", "I mainly just wanna focus on this screened in porch":
+# one named space, which is as explicit as "just this room".
+_SCOPE_NAMED_FOCUS = re.compile(
+    r"(?i)\b(?:just|only|mainly|mostly|primarily)\b[^.!?\n]{0,40}?\b(?:the|this|these|that|my|our)\s+"
+    r"(?:[a-z'-]+\s+){0,3}?(?:room|space|area|porch|sunroom|kitchen|bath(?:room)?|bedroom|garage|"
+    r"basement|deck|patio|office|den|hall(?:way)?|closet|attic|laundry|mudroom|pantry|nursery|"
+    r"exterior|outside|driveway|yard)\b(?!\s+(?:and|plus|,)\s)"
+)
+_SCOPE_SECOND_SPACE = re.compile(r"(?i)(?:\b(?:and|plus)|,)\s+(?:the|my|our|this|that)\s+\w+")
+# The scope question itself, as a sentence: what gets removed when it is
+# asked again after it was answered.
+_SCOPE_QUESTION = re.compile(
+    r"(?i)[^.!?\n]*\b(?:other\s+rooms|other\s+(?:areas|spaces)|whole\s+(?:home|house)|"
+    r"one\s+room\s+or|rest\s+of\s+(?:the|your)\s+(?:home|house))\b[^.!?\n]*\?"
+)
+
+
+def _strip_repeat_scope_question(state: FlowState, plan: TurnPlan, text: str) -> str:
+    """Drop a second "just this room, or others too?" from a reply.
+
+    The question is settled when they have said it is one room, and it is
+    not open while the ask is cooling down. A directive says so; the model
+    asked anyway, twice back to back (Quintin, Oct 1). Only the question
+    sentence goes, and only when what is left still reads as a reply."""
+    settled = state.scope_intent is ScopeIntent.SINGLE_ROOM
+    cooling = (
+        state.scope_intent is ScopeIntent.UNDECIDED and state.scope_asks > 0
+        and not plan.gates.can_ask_scope
+    )
+    if not (settled or cooling) or not text:
+        return text
+    stripped = re.sub(r"\s{2,}", " ", _SCOPE_QUESTION.sub("", text)).strip()
+    if stripped == text.strip() or len(stripped) < 40:
+        return text
+    logger.info("Removed a repeated scope question thread=%s", state.thread_id)
+    return stripped
+
+
 _SCOPE_SELECTED = re.compile(
     r"(?i)\b(?:a\s+few|a\s+couple\s+of|two|three|several|these\s+two|those\s+two)\s+rooms\b"
     r"|\b(?:this\s+room\s+and\s+the|this\s+one\s+and\s+the)\s+\w+"
@@ -2161,6 +2404,15 @@ def _detect_scope_intent(message: str | None) -> ScopeIntent | None:
     ("not the whole house") never reads as whole_home (review, Sep 10)."""
     text = message or ""
     if _SCOPE_SINGLE_ROOM.search(text):
+        return ScopeIntent.SINGLE_ROOM
+    named = _SCOPE_NAMED_FOCUS.search(text)
+    if (
+        named
+        and not _SCOPE_SELECTED.search(text)
+        # "just the kitchen and the hall bath" names two.
+        and not _SCOPE_SECOND_SPACE.search(text[named.start(): named.end() + 40])
+        and not (_SCOPE_WHOLE_HOME.search(text) and not _SCOPE_NEGATED_WHOLE.search(text))
+    ):
         return ScopeIntent.SINGLE_ROOM
     if _SCOPE_SELECTED.search(text):
         return ScopeIntent.SELECTED_ROOMS
@@ -2474,6 +2726,10 @@ def _record_asks_and_wordings(
     if plan.gates.can_ask_scope and plan.scope_wording_id and _SCOPE_MENTION.search(final_text):
         _engine.record_asks(state, asked_scope=True)
         wording_ids.append(plan.scope_wording_id)
+    elif _SCOPE_QUESTION.search(final_text):
+        # Asked without being invited to. It still happened, so it still
+        # spends the budget and starts the cooldown.
+        _engine.record_asks(state, asked_scope=True)
     # A step-6 invitation actually made -- a scan suggestion or the one
     # generic offer -- spends the scope's extension budget. Only an
     # invitation counts: the opening's "your whole home mapped out" is a
@@ -2574,6 +2830,30 @@ async def _maybe_price_guidance(
     if area is None:
         area = _total_floor_area_sqft(request.homeContext) or parse_size_hint(request.message)
     windows = _window_count(state, home_index, request.homeContext)
+
+    # A trade priced by the surface being worked, on a capture whose
+    # surfaces the mesh measured: that beats the typical-job band, and it
+    # must never read "nothing measured yet" (Quintin, Oct 1).
+    from .flow.pricing import priced_by_surface
+
+    surfaces = _surfaces_feet(state) if priced_by_surface(service) else None
+    if surfaces:
+        total = round(surfaces.get("upright", 0.0) + surfaces.get("ground", 0.0))
+        pinned = state.price_guidance_snapshot
+        if pinned and pinned.get("service") == service and pinned.get("surfaceSqft") == total:
+            return PriceGuidance.model_validate(pinned["guidance"]), asked
+        note = ", ".join(
+            f"≈{surfaces[key]:,.0f} {label}"
+            for key, label in (("upright", "upright"), ("ground", "level ground"))
+            if surfaces.get(key)
+        )
+        measured = compute_price_guidance(service, None, surface_sqft=total, surface_note=note)
+        if measured is not None:
+            state.price_guidance_snapshot = {
+                "service": service, "areaSqft": None, "areaLabel": None, "windows": windows,
+                "surfaceSqft": total, "guidance": measured.model_dump(mode="json"),
+            }
+            return measured, asked
 
     # Pin the first card of the conversation: the range the homeowner saw
     # must never silently change on a later ask (observed jumping when a
@@ -2915,6 +3195,14 @@ async def _run_flow_turn_locked(
     home_index = _reconcile_home(state, request)
     home_switched = bool(previous_home and state.home_id and previous_home != state.home_id)
     _remember_mesh_bounds(state, request)
+    _remember_scan_surfaces(state, request)
+    if not _scan_visible(state, request, home_index):
+        if await _await_staged_index(request.homeId, settings.turn_context_wait_seconds) is not None:
+            home_index = _reconcile_home(state, request)
+    scan_visible = _scan_visible(state, request, home_index)
+    scan_arrived = bool(state.opened_blind and scan_visible)
+    if scan_arrived:
+        state.opened_blind = False
     # Screen the message before anything is spent on it, and before anything
     # is READ from it (issue #57). A blocked turn reaches no model, no research
     # call, no ask budget, and no slot — it is both the safe answer and the
@@ -2940,6 +3228,14 @@ async def _run_flow_turn_locked(
             state.request_accepted = True
         # Same reason, for the other half of the card's preconditions.
         precapture = _precapture_from_message(state, request.message)
+        # And for scope: "just the porch" has to reach THIS reply's
+        # directives, or the reply asks the question it was just answered
+        # (Quintin, Oct 1: asked twice back to back).
+        if (
+            state.scope_intent is ScopeIntent.UNDECIDED
+            and _detect_scope_intent(request.message) is ScopeIntent.SINGLE_ROOM
+        ):
+            state.scope_intent = ScopeIntent.SINGLE_ROOM
     if not guard.blocked:
         # A blocked message does not advance the conversation: no ask budget
         # spent, no step progression, nothing for a troll to walk forward.
@@ -2994,6 +3290,8 @@ async def _run_flow_turn_locked(
             state,
             plan,
             opening=False,
+            scan_visible=scan_visible,
+            scan_arrived=scan_arrived,
             price_guidance=price_guidance,
             price_asked=price_asked,
             quotes_to_present=quotes_to_present,
@@ -3045,6 +3343,11 @@ async def _run_flow_turn_locked(
         quote_draft=response.quoteDraft.model_dump() if response.quoteDraft else None,
         home_index=home_index,
     )
+    if not (substituted or response.usedFallback):
+        response.message.content = _strip_repeat_scope_question(
+            state, plan, response.message.content
+        )
+        response.message.content = await _proofread(response.message.content, opening=False)
     # A suppressed draft was never delivered, so it spends no ask or offer
     # budget: only the text the homeowner actually saw counts.
     wording_ids = _record_asks_and_wordings(
@@ -3342,13 +3645,21 @@ async def _run_opening_turn_locked(
     # The opener for a walked home speaks about the home, not one room.
     home_index = _reconcile_home(state, request)
     _remember_mesh_bounds(state, request)
+    _remember_scan_surfaces(state, request)
     # A single capture's opener is the turn that names what was scanned, so
     # its photos are looked at before the directives are written.
     await _maybe_capture_appearance(state, request, home_index)
+    if not _scan_visible(state, request, home_index):
+        # The staged upload may still be in flight. The opener is cached for
+        # the life of the thread, so it is worth a short wait to see the scan.
+        if await _await_staged_index(request.homeId, settings.opening_context_wait_seconds) is not None:
+            home_index = _reconcile_home(state, request)
+    scan_visible = _scan_visible(state, request, home_index)
+    state.opened_blind = not scan_visible
     plan = _engine.plan_turn(state, None)
     directives = _build_directives(
         state, plan, opening=True, price_guidance=None, quotes_to_present=None,
-        home_index=home_index,
+        home_index=home_index, scan_visible=scan_visible,
     )
     response, suppressed, _substituted = await _generate_enforced(
         request,
@@ -3359,6 +3670,10 @@ async def _run_opening_turn_locked(
         card_already_shown=not state.client_flow_aware,
     )
 
+    if not (response.usedFallback or _substituted):
+        # The opener is kept for the life of the thread, so it gets a second
+        # read for a dropped word before it is cached (Quintin, Oct 1).
+        response.message.content = await _proofread(response.message.content, opening=True)
     if not response.usedFallback:
         # A fallback opener is generic error copy — never cache it as the
         # thread's one grounded opener, and leave steps 1-2 incomplete so

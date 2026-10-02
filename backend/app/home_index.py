@@ -760,23 +760,33 @@ class HomeIndex:
         pairs.sort()
         return "; ".join(text for _gap, text in pairs[:limit])
 
-    def as_text(self) -> str:
+    def as_text(self, exterior_keys: set[str] | None = None) -> str:
         """Compact home description for the agent's context: one line per
-        room, cheap in tokens, no coordinates, uncertainty marked."""
+        room, cheap in tokens, no coordinates, uncertainty marked.
+        ``exterior_keys`` adds areas the conversation knows are outside even
+        though the photo pass never said so (the homeowner did)."""
         lines = []
+        exterior = set(exterior_keys or ()) | {r.key for r in self.rooms if r.role == "exterior"}
         for r in sorted(self.rooms, key=lambda x: (x.storey, -x.area_sqft)):
             fixtures = ", ".join(c for c, _ in r.objects.most_common(4))
             hedge = "" if r.confident else " (name uncertain)"
-            if r.role == "exterior":
+            if r.key in exterior:
                 # Not a room: no floor area to quote. The building's size,
                 # when the mesh carried it, is the number that means something.
-                line = f"- {r.display_name}: the outside of the building"
+                name = r.display_name if r.role == "exterior" else "exterior"
+                if len(exterior) > 1:
+                    name += f" (area {r.index})"
+                line = f"- {name}: the outside of the building"
                 extent = self.mesh_extent_feet()
                 if extent:
                     line += f", about {extent[0]:.0f} x {extent[1]:.0f} ft footprint, {extent[2]:.0f} ft tall (LiDAR mesh)"
                 if r.window_count:
                     line += f", {r.window_count} window opening(s)"
                 lines.append(line)
+                continue
+            if not r.polygon and not r.wall_count and not r.area_sqft:
+                # RoomPlan found nothing here. "~0 sq ft" reads as a tiny room.
+                lines.append(f"- {r.display_name}: no room structure found in this area")
                 continue
             line = f"- {r.display_name}{hedge}: ~{round(r.area_sqft)} sq ft, {r.window_count} window opening(s)"
             lines.append(line + (f", {fixtures}" if fixtures else ""))
