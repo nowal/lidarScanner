@@ -181,6 +181,12 @@ _ONSITE_VISIT = re.compile(
     r"visit|come\s+out|check)\b[^.!?\n]{0,40}?\b(?:on[- ]site|in[- ]person|in[- ]home)\b"
     r"|\b(?:on[- ]site|in[- ]home|in[- ]person)\s+(?:visit|estimate|quote|measure(?:ment)?s?|assessment|walk[- ]?through)\b"
     r"|\bsite\s+visit\b|\bcome\s+out\s+to\s+(?:measure|look|see|quote)\b"
+    # "a provider would need to see them to give an accurate quote": no site
+    # named, same meaning to a homeowner (Quintin, Oct 5).
+    r"|\b(?:needs?|need\s+to|would\s+(?:need|want|have)\s+to|has\s+to|have\s+to|will\s+(?:need|want)\s+to|wants?\s+to)\b"
+    r"[^.!?\n]{0,25}?\b(?:see|look\s+at|inspect|take\s+a\s+look\s+at|eyeball)\b[^.!?\n]{0,60}?"
+    r"\b(?:quote|quotes|price|pricing|estimate|number|bid|accurate)\b"
+    r"|\bsee\s+(?:it|them|the\s+\w+(?:\s+\w+)?)\s+(?:in\s+person|first|themselves|for\s+themselves)\b"
 )
 _ONSITE_NEGATED = re.compile(
     r"(?i)\b(?:no|not|without|avoid(?:ing)?|skip(?:ping)?|never|instead\s+of|rather\s+than)\b|n't\b"

@@ -172,7 +172,10 @@ def test_an_indexed_area_with_no_room_in_it_becomes_exterior_on_their_word(monke
     rt._remember_scan_surfaces(state, request)
     text = _directives(state, index=index)
     assert "EXTERIOR CAPTURE. This homeowner scanned the outside of their property." in text
-    assert "ACTIVE CAPTURE: the exterior — the outside of the building, not a room" in text
+    # Their word names the one area the photos could not name, and it stays
+    # the outside of a building (Oct 5).
+    assert index.rooms[0].display_name == "garage" and index.rooms[0].role == "exterior"
+    assert "ACTIVE CAPTURE: the garage — the outside of the building, not a room" in text
     assert "the scan spans about 92 x 102 ft" in text
     assert "MEASURED FROM THE SCAN" in text
     assert "SHAPE ONLY" not in text and "~0 sq ft" not in text and "WHOLE-HOME SCAN" not in text

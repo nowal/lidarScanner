@@ -717,6 +717,22 @@ def _detect_room_naming(state: FlowState, index, message: str, target=None):
     return room.key, name
 
 
+_ROOM_MODIFIERS = (
+    "front", "back", "rear", "side", "screened", "screened-in", "screen", "upstairs",
+    "downstairs", "main", "guest", "primary", "master", "half", "spare", "covered",
+)
+
+
+def _room_phrase(message: str, word: str) -> str:
+    """"front porch", not just "porch", when that is what they said."""
+    m = re.search(rf"(?i)\b((?:[a-z-]+\s+)?{re.escape(word)})\b", message)
+    if not m:
+        return word
+    phrase = m.group(1).lower()
+    lead = phrase.split()[0] if " " in phrase else ""
+    return phrase if lead in _ROOM_MODIFIERS else word
+
+
 def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
     """Attach the whole-home index and track which room is being discussed.
 
@@ -739,10 +755,10 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
     if index is None:
         return None
 
-    # A staged context ZIP also creates an index for a single exterior
-    # capture. Keep that capture in focus so its appearance reaches the
-    # opener and later quote measurements without requiring a room name.
-    if not state.active_room_key and len(index.rooms) == 1 and _is_exterior(state, index.rooms[0]):
+    # One area is the subject whether or not they name it: a lone porch
+    # with no room in focus had no door count, no sizes and no wall area in
+    # front of the agent (Quintin, Oct 5).
+    if not state.active_room_key and len(index.rooms) == 1:
         state.active_room_key = index.rooms[0].key
 
     # "that little room" is how a homeowner points at the space the scan
@@ -750,6 +766,33 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
     room, unresolved = index.mentioned_room(request.message or "")
     if room is None and not unresolved:
         room = index.small_unnamed_room(request.message or "")
+    state.unnamed_room_phrase = None
+    if room is None and unresolved:
+        # "I scanned my front porch": the index holds areas the photos could
+        # not name, and their word is the name. Telling them the porch they
+        # just scanned is "not in the scan" was the Oct 5 report.
+        phrase = _room_phrase(request.message or "", unresolved)
+        candidates = [
+            r for r in index.rooms
+            if not r.named_by_homeowner and (not r.confident or _is_exterior(state, r))
+        ]
+        if len(candidates) == 1:
+            outside = _is_exterior(state, candidates[0])
+            renamed = index.rename_room(candidates[0].key, phrase)
+            if renamed is not None:
+                if outside:
+                    # "the exterior of the garage": their word names it AND
+                    # it stays the outside of a building.
+                    renamed.role = "exterior"
+                from .flow.home_registry import save_index
+
+                save_index(state.home_id, index)
+                logger.info("Homeowner's word names the one unnamed area %s '%s' (home=%s)",
+                            candidates[0].key, phrase, state.home_id)
+                room, unresolved = renamed, None
+        elif candidates:
+            state.unnamed_room_phrase = phrase
+            unresolved = None
 
     # "that space you called unnamed area 1 is the mudroom": the room the
     # message names is the one being named, not whichever was in focus.
@@ -1242,6 +1285,19 @@ def _home_directives(state: FlowState, index) -> list[str]:
         "fixtures. Use the name naturally, but if the conversation turns on "
         "which room it is, ask rather than asserting.",
     ]
+    if state.unnamed_room_phrase:
+        count = sum(
+            1 for r in index.rooms
+            if not r.named_by_homeowner and (not r.confident or r.key in exterior_keys)
+        )
+        lines.append(
+            f"- They call a space the {state.unnamed_room_phrase}. It is not listed "
+            f"under that name because the photos could not name {count} of the "
+            "areas above (marked exterior, name uncertain, or no room structure); "
+            "it is one of those. NEVER say it is not in the scan or was not "
+            "scanned. Use their name for it, and if it matters which area it is, "
+            "ask them which."
+        )
     room = index.by_key(state.active_room_key) if state.active_room_key else None
     if room is not None:
         fixtures = ", ".join(f"{n} {c}" for c, n in room.objects.most_common(6))
@@ -1259,12 +1315,27 @@ def _home_directives(state: FlowState, index) -> list[str]:
                 )
             if room.window_count:
                 detail += f", {room.window_count} window opening(s)"
+        elif _geometry_less(room):
+            detail = (
+                f"- ACTIVE AREA: the {room.display_name} — the scan found no room "
+                "structure here (no walls or floor plan; often outdoors or one open "
+                "space). Never call it a room or give it a size; ask what it is if "
+                "that matters"
+            )
         else:
+            size = index.footprint_feet(room)
+            dims = f" (about {size[0]:.0f} x {size[1]:.0f} ft)" if size else ""
             detail = (
                 f"- ACTIVE ROOM: the {room.display_name} — about "
-                f"{round(room.area_sqft)} sq ft, {room.window_count} window opening(s), "
+                f"{round(room.area_sqft)} sq ft{dims}, {room.window_count} window opening(s), "
                 f"{room.door_count} door(s)"
             )
+            geometry = room.measurements or {}
+            if geometry.get("mean_wall_height_m"):
+                detail += f"; walls about {float(geometry['mean_wall_height_m']) * 3.28084:.0f} ft high"
+            if geometry.get("paintable_sqft"):
+                detail += f", about {float(geometry['paintable_sqft']):,.0f} sq ft of paintable wall"
+            detail += ". These ARE measurements from the scan: use them"
         if room.window_openings:
             sizes = ", ".join(
                 f"{w * 3.28084:.1f} x {h * 3.28084:.1f} ft" for w, h in room.window_openings[:8]
@@ -1292,10 +1363,15 @@ def _home_directives(state: FlowState, index) -> list[str]:
                 "another. If they ask what is next to it, say so plainly, ask "
                 "them which room it is, and use their answer from then on."
             )
-        appearance_lines = _appearance_directives(state.home_id, room)
-        if room.key in exterior_keys and room.role != "exterior":
-            # Exterior on the homeowner's word: there is no photo pass to quote.
+        from .flow import home_registry
+
+        if room.key in exterior_keys and not home_registry.room_context_for(state.home_id, room.key):
+            # Exterior with no photo pass to quote (the homeowner's word, or
+            # a pass that never ran): "this room's SHAPE ONLY" is the wrong
+            # line for the outside of a building.
             appearance_lines = _photo_lines({"setting": "exterior", "structure": ""}, "this capture")
+        else:
+            appearance_lines = _appearance_directives(state.home_id, room)
         lines.extend(appearance_lines)
         if room.key in exterior_keys and (surface := _surface_line(state)):
             lines.append(surface)
@@ -1492,10 +1568,13 @@ def _build_directives(
         # Quintin, Oct 1: "A provider will measure on site for the real
         # number" -- to someone using the app to avoid exactly that.
         "- NEVER tell the homeowner that a provider will have to measure, "
-        "visit, or estimate on site or in person: pricing from the scan, "
-        "without a site visit, is the reason they are here. If something was "
-        "not measured, say what the scan did capture and that providers price "
-        "from the scan, its photos and what they have told you.",
+        "visit, or estimate on site or in person, or that a provider needs "
+        "to see something before pricing it: pricing from the scan, without "
+        "a site visit, is the reason they are here. The request carries the "
+        "3D model, the photos and the measurements, and providers price from "
+        "those plus what they have told you. If something was not measured, "
+        "say what the scan did capture; never that someone has to come and "
+        "look.",
     ]
     if home_index is not None:
         lines.extend(_home_directives(state, home_index))

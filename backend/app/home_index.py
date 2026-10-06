@@ -760,6 +760,18 @@ class HomeIndex:
         pairs.sort()
         return "; ".join(text for _gap, text in pairs[:limit])
 
+    @staticmethod
+    def footprint_feet(room: "Room") -> tuple[float, float] | None:
+        """Bounding width x length of the floor polygon, in feet."""
+        if not room.polygon:
+            return None
+        xs = [p[0] for p in room.polygon]
+        zs = [p[1] for p in room.polygon]
+        w, l = (max(xs) - min(xs)) * 3.28084, (max(zs) - min(zs)) * 3.28084
+        if w <= 0 or l <= 0:
+            return None
+        return (max(w, l), min(w, l))
+
     def as_text(self, exterior_keys: set[str] | None = None) -> str:
         """Compact home description for the agent's context: one line per
         room, cheap in tokens, no coordinates, uncertainty marked.
@@ -788,7 +800,15 @@ class HomeIndex:
                 # RoomPlan found nothing here. "~0 sq ft" reads as a tiny room.
                 lines.append(f"- {r.display_name}: no room structure found in this area")
                 continue
-            line = f"- {r.display_name}{hedge}: ~{round(r.area_sqft)} sq ft, {r.window_count} window opening(s)"
+            # Doors and the footprint were only on the ACTIVE ROOM line, so a
+            # home with no room in focus had no door count anywhere (Quintin,
+            # Oct 5: "doesn't know ... how many doors there are in the scan").
+            size = self.footprint_feet(r)
+            dims = f" (about {size[0]:.0f} x {size[1]:.0f} ft)" if size else ""
+            line = (
+                f"- {r.display_name}{hedge}: ~{round(r.area_sqft)} sq ft{dims}, "
+                f"{r.window_count} window opening(s), {r.door_count} door(s)"
+            )
             lines.append(line + (f", {fixtures}" if fixtures else ""))
         return "\n".join(lines)
 

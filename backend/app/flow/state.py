@@ -177,6 +177,11 @@ class FlowState(BaseModel):
     # A room the homeowner named that the index could not resolve: the agent
     # must say it cannot see that room rather than describe a different one.
     unresolved_room_phrase: str | None = None
+    # A room they named that is not in the index by that name, while the
+    # index holds areas the photos could not name: it is one of those, not
+    # a room that was never scanned (Quintin, Oct 5: "you never scanned the
+    # front porch", about the porch he had just scanned).
+    unnamed_room_phrase: str | None = None
 
     # --- Single captures (no whole-home index) -----------------------------
     # What the capture's own photos show, from one vision pass on the first
