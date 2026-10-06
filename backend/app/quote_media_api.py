@@ -25,7 +25,7 @@ async def viewer(request_id: str, exp: int, sig: str):
     await media.authorized(request_id, exp, sig)
     page = (STATIC / 'viewer.html').read_text()
     return HTMLResponse(page, headers=dict(HEADERS, **{'Content-Security-Policy':
-        "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: blob:; "
+        "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' https: blob:; "
         "connect-src 'self' https: blob:; worker-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"}))
 
 
