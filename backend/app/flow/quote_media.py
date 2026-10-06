@@ -126,7 +126,14 @@ async def put_bytes(path: str, data: bytes, content_type: str, *, replace=False)
             headers={'Authorization': f'Bearer {settings.supabase_service_role_key}',
                      'apikey': settings.supabase_service_role_key, 'Content-Type': content_type,
                      'x-upsert': 'true' if replace else 'false'}, content=data)
-        if response.status_code == 409 and not replace: return
+        if not replace and response.status_code in (400, 409):
+            # Storage's HTTP status can be 400 while its JSON error is 409.
+            # The bytes are deterministic for this immutable derivative name.
+            try:
+                duplicate = str(response.json().get('statusCode')) == '409'
+            except ValueError:
+                duplicate = False
+            if response.status_code == 409 or duplicate: return
         response.raise_for_status()
 
 

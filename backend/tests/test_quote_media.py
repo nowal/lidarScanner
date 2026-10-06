@@ -205,3 +205,17 @@ async def test_conversion_failure_cooldown_and_restart_queue(monkeypatch):
     state['status'] = 'ready'
     assert (await media.conversion_status(rec.scanMedia, m))['status'] == 'ready'
     assert len(queued) == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_immutable_photo_upload_accepts_storage_duplicate(monkeypatch):
+    monkeypatch.setattr(settings, 'supabase_url', 'https://storage.example')
+    monkeypatch.setattr(settings, 'supabase_service_role_key', 'test')
+    code = '409'
+    async def post(self, url, **kwargs):
+        return httpx.Response(400, json={'statusCode': code, 'error': 'Duplicate'}, request=httpx.Request('POST', url))
+    monkeypatch.setattr(httpx.AsyncClient, 'post', post)
+    await media.put_bytes('owner/home/photo.jpg', b'jpeg', 'image/jpeg')
+    code = '400'
+    with pytest.raises(httpx.HTTPStatusError):
+        await media.put_bytes('owner/home/photo.jpg', b'jpeg', 'image/jpeg')
