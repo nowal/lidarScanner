@@ -219,3 +219,14 @@ async def test_repeated_immutable_photo_upload_accepts_storage_duplicate(monkeyp
     code = '400'
     with pytest.raises(httpx.HTTPStatusError):
         await media.put_bytes('owner/home/photo.jpg', b'jpeg', 'image/jpeg')
+
+
+@pytest.mark.asyncio
+async def test_legacy_scan_keeps_its_existing_original_download(monkeypatch):
+    async def no_published(*args, **kwargs): return None
+    monkeypatch.setattr(media.scan_uploads, 'transition', no_published)
+    rec = record(modelLink={'url': 'https://signed.example/original.usdz'})
+    rec.scanMedia = await media.capture(rec)
+    assert rec.scanMedia == {}
+    await media.prepare_email(rec)
+    assert rec.modelLink['url'] == 'https://signed.example/original.usdz'

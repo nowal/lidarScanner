@@ -43,13 +43,13 @@ async def capture(record) -> dict:
         return {}
     state = await scan_uploads.transition(record.homeId, 'read')
     if not state or not state.get('publishedIndex'):
-        return {'version': 1, 'reason': 'No published scan media is available.'}
+        return {}  # Legacy scan: retain its submission-time USDZ link.
     if record.homeownerId and state.get('ownerId') != record.homeownerId:
         raise HTTPException(403, 'This scan belongs to another homeowner')
     raw = state['publishedIndex']
     upload = raw.get('upload') or {}
     if not upload.get('modelsReady') or not upload.get('revision'):
-        return {'version': 1, 'reason': 'No complete scan revision is available.'}
+        return {}  # Older indexes have no revision-pinned context gallery.
     if state.get('revision') != upload['revision']:
         # The submit gate raced a new build. Do not silently quote the old scan.
         raise HTTPException(409, detail='A scan update is still uploading. Submit after it finishes.')
