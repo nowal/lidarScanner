@@ -84,7 +84,7 @@ def test_extract_selected_frames_upright_and_missing(tmp_path):
     info, full, thumb = photos[0]
     assert info['roomKey'] == 'room-1'
     assert Image.open(io.BytesIO(full)).size == (400, 768)
-    assert max(Image.open(io.BytesIO(thumb)).size) <= 360
+    assert Image.open(io.BytesIO(thumb)).size == (360, 270)
 
 
 async def saved_snapshot(monkeypatch):

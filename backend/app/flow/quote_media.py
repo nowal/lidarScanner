@@ -182,7 +182,9 @@ def photo_bytes(archive: Path, media: dict) -> list[tuple[dict, bytes, bytes]]:
                         image.thumbnail((768, 768))
                         full = io.BytesIO(); image.save(full, format='JPEG', quality=88)
                         image.thumbnail((360, 270))
-                        thumb = io.BytesIO(); image.save(thumb, format='JPEG', quality=82)
+                        canvas = Image.new('RGB', (360, 270), '#edf0f3')
+                        canvas.paste(image, ((360 - image.width) // 2, (270 - image.height) // 2))
+                        thumb = io.BytesIO(); canvas.save(thumb, format='JPEG', quality=82)
                     result.append(({'roomKey': room['key'], 'label': f"{room['label']} · view {n + 1}", 'frameId': ids[n]}, full.getvalue(), thumb.getvalue()))
                 except (OSError, ValueError):
                     continue
@@ -205,7 +207,7 @@ async def prepare_email(record):
                 photos = await asyncio.to_thread(photo_bytes, archive, media)
                 entries = []
                 for info, full, thumb in photos:
-                    key = _hash([media['snapshotId'], info['frameId'], 'upright-v1'])
+                    key = _hash([media['snapshotId'], info['frameId'], 'upright-v2'])
                     obj = prefix(media) + f'quote-photo-{key}.jpg'
                     small = prefix(media) + f'quote-thumb-{key}.jpg'
                     await put_bytes(obj, full, 'image/jpeg'); await put_bytes(small, thumb, 'image/jpeg')
