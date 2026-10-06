@@ -38,6 +38,7 @@ sys.path.insert(0, str(BACKEND))
 
 from app.config import settings  # noqa: E402
 from app.flow import partners  # noqa: E402
+from app.flow import service_rubrics
 from app.flow.ops_email import build_ops_email, build_ops_email_html  # noqa: E402
 from app.flow_quotes import QuoteRequestRecord  # noqa: E402
 
@@ -110,6 +111,7 @@ def sample_record(name: str) -> QuoteRequestRecord:
         address="1 Withheld Street, Not In The Email",
         scopeOptions=s["scopeOptions"], materials=s["materials"], synopsis=s["synopsis"],
         measurements=s["measurements"],
+        rubric=service_rubrics.package(s["serviceType"], s["scopeOptions"], s["materials"], s["measurements"]),
         modelLink={"kind": "supabase_signed_url", "jobId": "job-not-in-email",
                    "url": "https://storage.example.com/home-assets/flow-models/sample.usdz?token=sample",
                    "note": "Signed link, valid ~30 days; no credentials needed."},

@@ -1685,6 +1685,12 @@ def _scope_notes(context: HomeAIContextPacket, service_type: str | None) -> list
 
 def _missing_details(service_type: str | None) -> list[str]:
     common = ["Preferred timing", "Any access constraints or pets"]
+    from .flow.service_rubrics import rubric_for
+
+    rubric = rubric_for(service_type)
+    if rubric is not None:
+        # The rubric's price-changing questions, capitalised as a checklist.
+        return [item[0].upper() + item[1:] for item in rubric.ask[:4]] + common
     if service_type == "Painting":
         return ["Paint color/finish", "Whether ceilings, trim, or repairs are included"] + common
     if service_type == "Flooring":

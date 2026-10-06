@@ -393,6 +393,12 @@ def build_ops_email(
     caveat = (record.measurements or {}).get("nameCaveat")
     if caveat:
         lines.append(f"  NOTE: {caveat}")
+    rubric = getattr(record, "rubric", None) or {}
+    if rubric:
+        from .service_rubrics import package_lines
+
+        lines.append("")
+        lines.extend(package_lines(rubric))
     lines.append("")
     from .quote_media import link as media_link
     media_url = media_link(record)
@@ -642,6 +648,23 @@ def build_ops_email_html(
     materials = ", ".join(record.materials) or "—"
     area = (record.measurements or {}).get("floorAreaSquareFeet")
     area_str = f"~{float(area):,.0f} sq ft" if area else "—"
+    rubric = getattr(record, "rubric", None) or {}
+    rubric_block = ""
+    if rubric:
+        items = "".join(f"<li style=\"margin:2px 0\">{e(item)}</li>" for item in rubric.get("providerFields", []))
+        from_scan = "; ".join(rubric.get("fromScan") or []) or ("nothing measured for this trade. " + rubric.get("scanNote", ""))
+        told = "; ".join(rubric.get("fromHomeowner") or []) or "see the synopsis above"
+        rubric_block = (
+            '<div style="margin-top:12px;padding:12px 14px;border:1px solid #E3E8EC;border-radius:8px;color:#3D4852;font-size:13px;line-height:1.5">'
+            f'<div style="font-weight:700;color:#17212B;margin-bottom:4px">Provider fields ({e(rubric.get("label", ""))})</div>'
+            f'<div>What a quote needs, when applicable:</div><ul style="margin:4px 0 8px 18px;padding:0">{items}</ul>'
+            f'<div><b>From the scan:</b> {e(from_scan)}</div>'
+            f'<div><b>From the homeowner:</b> {e(told)} (and the synopsis above). Anything not covered is unknown: ask through the app rather than assume.</div>'
+            f'<div style="margin-top:6px"><b>Quote rule:</b> {e(rubric.get("quoteRule", ""))}</div>'
+            f'<div style="margin-top:6px"><b>Concealed conditions:</b> {e(rubric.get("concealedConditions", ""))}</div>'
+            f'<div style="margin-top:6px"><b>In your quote, please state:</b> {e(rubric.get("responseFields", ""))}.</div>'
+            '</div>'
+        )
 
     return f"""<!doctype html><html><body style="margin:0;padding:0;background:#F2F4F6">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F2F4F6;padding:28px 12px">
@@ -674,6 +697,7 @@ def build_ops_email_html(
     {row("Floor area", e(area_str))}
   </table>
   <div style="margin-top:10px;padding:12px 14px;background:#F7F9FA;border-radius:8px;color:#3D4852;font-size:13.5px;line-height:1.55">{e(record.synopsis)}</div>
+  {rubric_block}
   <div style="margin-top:12px">{model_block}</div>
 {gallery}
 </td></tr>

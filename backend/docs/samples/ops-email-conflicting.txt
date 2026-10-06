@@ -20,29 +20,46 @@ MEASUREMENTS
   Window openings (scan): 14
   windowCount: 14
 
+PROVIDER FIELDS (Window cleaning)
+  What a quote needs, when applicable:
+  - Count and type: windows by elevation and level; units versus individual panes; divided lites, sliders, casements, picture windows, glass doors
+  - Scope: exterior, interior or both; skylights, storm windows, French panes, mirrors, specialty glass
+  - Add-ons: screens (count, removal, wash, reinstall), tracks, sills, frames, shutters
+  - Building access: stories, glass height, roof, ladder or lift access, slope, landscaping, locked areas, water source
+  - Condition: routine dirt versus hard-water spots, paint, construction debris, adhesive, oxidation, scratched or coated glass
+  - Interior readiness: furniture, blinds and curtains, fragile items, pets, access to each room
+  - Frequency and boundaries: one-time or recurring; post-construction or restoration as separate scope; exclusions; weather
+  From the scan: 14 window opening(s).
+  From the homeowner: interior + exterior; screens (and the synopsis above).
+  Anything not covered above is UNKNOWN: ask through the app rather than assume.
+  Quote rule: Routine work is ready once counts, service depth and access are resolved. An uncertain stain or coating response is a separate test or restoration condition. No scan is a complete whole-home count without coverage confirmation.
+  Concealed conditions: This scope uses the attached scan measurements, key frames and homeowner answers, with their sources and limitations identified. Concealed conditions have not been verified. Please state what the base price includes, any allowances or unit rates, required checks and exclusions. Document newly discovered issues and obtain homeowner approval of price or schedule changes before additional work.
+  In your quote, please state: your business name and confirmation that you serve this area; the quote request ID; price and its basis; included work and options; taxes or fees, deposit and payment terms, validity, warranty, estimated duration and available appointment windows; assumptions and exclusions; and whether you accept the supplied measurements or need a specific verification (say which).
+
 3D MODEL · ORIGINAL USDZ DOWNLOAD
   https://storage.example.com/home-assets/flow-models/sample.usdz?token=sample
   (Signed link, valid ~30 days; no credentials needed.)
 
 SUGGESTED PROVIDERS
   Ranked by review and social presence (partners tagged; scores explained per row):
-    1. Crystal Pane Window Co. | prospect from google_places | (615) 555-0180 | https://crystalpane.example | score 0.90
-       Google: 4.9 stars, 388 reviews (verified 2026-09-08) https://maps.google.com/?cid=5001
-       Nextdoor: profile link only (verified 2026-09-08) https://nextdoor.com/pages/crystal-pane-window-co
-    2. [PAST QUOTER x4] Shine Squad Nashville | quoted 4x through TakeShape | (615) 555-0181 | score 0.77
-       Google: 3.4 stars, 41 reviews (verified 2026-09-08) https://maps.google.com/?cid=5002
-       Yelp: profile link only (verified 2026-09-08) https://www.yelp.com/biz/shine-squad-nashville
-       quoted boost +0.22
-    3. Glasshouse Social Cleaning | prospect from sheet:providers | https://glasshousesocial.example | score 0.75
+    1. Glasshouse Social Cleaning | prospect from sheet:providers | https://glasshousesocial.example | score 0.75
        Facebook: 2100 followers (verified 2026-09-02) https://www.facebook.com/glasshousesocial
        Instagram: 5400 followers (verified 2026-09-02) https://www.instagram.com/glasshousesocial/
        multi-platform +0.05
-    4. Cumberland Glass Care | TakeShape partner | contact Morgan | (615) 555-0183 | hello@cumberlandglass.example
+    2. [PAST QUOTER x4] Shine Squad Nashville | quoted 4x through TakeShape | (615) 555-0181
+       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=5002
+       Yelp: profile link only (verified 2026-09-08) https://www.yelp.com/biz/shine-squad-nashville
+       quoted boost +0.22; profile links only, no numbers on file
+    3. Cumberland Glass Care | TakeShape partner | contact Morgan | (615) 555-0183 | hello@cumberlandglass.example
        no review or social data on file
+    4. Crystal Pane Window Co. | prospect from google_places | (615) 555-0180 | https://crystalpane.example
+       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=5001
+       Nextdoor: profile link only (verified 2026-09-08) https://nextdoor.com/pages/crystal-pane-window-co
+       profile links only, no numbers on file
   Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
 
 ENTER THE CHECKED QUOTE
-  https://ops.example.com/api/v1/ops/entry/qr_sample_conflict/1792517357/ef501dbea35682db626c93d561df2e548a4c554272a557c7966d0e54c95c06a6
+  https://ops.example.com/api/v1/ops/entry/qr_sample_conflict/1792778499/6e4c431fea43fa34f2a99caceb818cf1f1c457e69e4a1ee17aa56ead909fda4f
   (link is signed for this request and expires in 14 days; the quote
   you enter is presented to the homeowner in the app automatically)
 

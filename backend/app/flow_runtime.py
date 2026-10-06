@@ -59,6 +59,7 @@ from .flow.capture import geometry_less as _geometry_less
 from .flow.capture import is_exterior as _is_exterior
 from .flow.capture import surfaces_feet as _surfaces_feet
 from .flow.proofread import proofread as _proofread
+from .flow import service_rubrics
 from .flow.state import ScopeIntent
 from .flow.pricing import (
     compute_price_guidance,
@@ -1696,6 +1697,23 @@ def _build_directives(
             f"{FIRST_NAME_WORDING.guidance} Keep it under 80 words."
         )
 
+    # The service rubric: what a provider needs, what the scan supplies, what
+    # to ask (Quintin's rubric document, Oct 6; flow/service_rubrics.py).
+    rubric = service_rubrics.rubric_for(state.slots.project_type, list(state.slots.scope_options))
+    if rubric is not None:
+        exterior_capture = (state.scan_appearance or {}).get("setting") == "exterior" or bool(
+            home_index is not None and any(_is_exterior(state, r) for r in home_index.rooms)
+        )
+        room_measured = bool(home_index is not None and home_index.rooms) or bool(
+            (state.scan_mesh_bounds or {}).get("roomCount")
+        )
+        lines.append(service_rubrics.directive(
+            rubric,
+            room_measured=room_measured,
+            surfaces_measured=_surfaces_feet(state) is not None,
+            exterior_capture=exterior_capture,
+        ))
+
     # SOW §3 hard constraint, then the stated scope narrows an open gate.
     continuity = (
         "always with this continuity guidance: start from the room already "
@@ -1984,6 +2002,11 @@ def _build_directives(
             else " They have given no street address, so do not tell them "
             "where their address goes; the provider they pick gets what they "
             "did share."
+        )
+        lines.append(
+            "- Once, when you present these, say what a quote does and does not "
+            "cover, in your own words and in a sentence or two: "
+            + service_rubrics.HOMEOWNER_CONCEALED_WORDING
         )
         if 0 < new_quote_count < len(quotes_to_present):
             lines.append(
