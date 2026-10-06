@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     # Lead packages are emailed here on submission (Quintin in production;
     # a test inbox during development). Unset = webhook/API only.
     ops_email: str = ""
+    ops_quote_cc: str = ""  # submission copies only; never a trusted command sender
     ops_email_from: str = ""  # defaults to smtp_username / Resend onboarding sender
     # Preferred transport: Resend HTTPS API (hosts like Railway and Render
     # block outbound SMTP ports at the network level; HTTPS always works).

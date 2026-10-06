@@ -30,6 +30,8 @@ import logging
 import smtplib
 import time
 from email.message import EmailMessage
+from email.utils import getaddresses
+import re
 from pathlib import Path
 from typing import Any
 
@@ -392,7 +394,18 @@ def build_ops_email(
     if caveat:
         lines.append(f"  NOTE: {caveat}")
     lines.append("")
-    lines.append("3D MODEL")
+    from .quote_media import link as media_link
+    media_url = media_link(record)
+    if media_url:
+        lines.append("SCAN PHOTOS AND DESKTOP VIEWER")
+        lines.append(f"  {media_url}")
+        for n, photo in enumerate(record.scanMedia.get('photos', [])[:6]):
+            lines.append(f"  {photo['label']}: {media_url}/photos/{n}/full")
+        if not record.scanMedia.get('photos'):
+            lines.append("  No scan photos are available for this scope.")
+        lines.append("  Private scan links expire in 30 days. The viewer opens in a browser.")
+        lines.append("")
+    lines.append("3D MODEL · ORIGINAL USDZ DOWNLOAD")
     model = record.modelLink or {}
     if model.get("url"):
         lines.append(f"  {model['url']}")
@@ -584,6 +597,28 @@ def build_ops_email_html(
         if model_url
         else '<span style="color:#5A6772;font-size:13px">3D model link not available for this request.</span>'
     )
+    from .quote_media import link as media_link
+    media_url = media_link(record)
+    gallery = ""
+    if media_url:
+        model_block = (f'<a href="{e(media_url)}" style="display:inline-block;background:#2E7D53;color:white;'
+            'border-radius:8px;padding:11px 18px;font-size:14px;font-weight:600;text-decoration:none">'
+            'Open scan gallery &amp; 3D viewer</a>')
+        if model_url:
+            model_block += f'<div style="margin-top:10px;font-size:13px"><a href="{e(model_url)}" style="color:#2E7D53">Download original USDZ</a></div>'
+        photos = record.scanMedia.get('photos', [])
+        cells = []
+        for n, photo in enumerate(photos[:6]):
+            cells.append(f'<td width="50%" valign="top" style="padding:6px"><a href="{e(media_url)}/photos/{n}/full" '
+                f'style="color:#2E7D53;text-decoration:none"><img src="{e(media_url)}/photos/{n}/thumb" '
+                f'width="248" alt="{e(photo["label"])}" style="display:block;width:100%;max-width:248px;height:auto;border:0;border-radius:6px">'
+                f'<div style="padding:6px 0;font-size:12px">{e(photo["label"])}</div></a></td>')
+        rows = ''.join('<tr>' + ''.join(cells[n:n+2]) + ('<td></td>' if len(cells[n:n+2]) == 1 else '') + '</tr>' for n in range(0, len(cells), 2))
+        gallery = ('<div style="margin-top:18px;font-size:14px;font-weight:600;color:#17212B">Scan photos</div>'
+            + (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table>' if photos else '<p style="font-size:13px;color:#5A6772">No scan photos are available for this scope.</p>')
+            + f'<div style="font-size:12px;color:#5A6772">Saved scan {e(record.scanMedia["revision"][:8])} · '
+            + (f'Showing {min(6, len(photos))} of {len(photos)} photos. ' if photos else '')
+            + f'<a href="{e(media_url)}" style="color:#2E7D53">Open the full gallery</a>. Private links expire in 30 days.</div>')
     reply_note = (
         '<p style="color:#5A6772;font-size:13.5px;line-height:1.5;margin:14px 0 0">'
         "Prefer email? <strong>Just reply to this message</strong> with the provider's "
@@ -640,6 +675,7 @@ def build_ops_email_html(
   </table>
   <div style="margin-top:10px;padding:12px 14px;background:#F7F9FA;border-radius:8px;color:#3D4852;font-size:13.5px;line-height:1.55">{e(record.synopsis)}</div>
   <div style="margin-top:12px">{model_block}</div>
+{gallery}
 </td></tr>
 <tr><td style="padding:20px 28px 0">
   <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:8px">Suggested providers</div>
@@ -675,95 +711,88 @@ def _smtp_configured() -> bool:
     return bool(settings.smtp_host and settings.smtp_username and settings.smtp_password)
 
 
-async def _send_via_resend(to: str, subject: str, body: str, html: str | None = None) -> None:
-    """HTTPS transport (api.resend.com). PaaS hosts (Railway, Render) block
-    outbound SMTP ports at the network level, so this is the transport that
-    actually works from the deployed demo. An unverified Resend account can
-    send only to its own signup address — exactly the test-phase setup; a
-    verified domain lifts that for production."""
-    import httpx
+def recipient_list(value: str | list[str]) -> list[str]:
+    """Parse headers into actual mailbox lists and reject header injection."""
+    raw = ','.join(value) if isinstance(value, list) else value
+    if '\r' in raw or '\n' in raw:
+        raise ValueError('Invalid email recipient')
+    result = []
+    for _, addr in getaddresses([raw]):
+        if not re.fullmatch(r"[^\s@,<>]+@[^\s@,<>]+\.[^\s@,<>]+", addr):
+            raise ValueError('Invalid email recipient')
+        if addr.casefold() not in {a.casefold() for a in result}: result.append(addr)
+    return result
 
-    payload = {
-        "from": settings.ops_email_from or "TakeShape Ops <onboarding@resend.dev>",
-        "to": [to],
-        "subject": subject,
-        "text": body,
-    }
-    if html:
-        payload["html"] = html
-    if settings.ops_reply_enabled:
-        # Replies must land in the mailbox the reply poller reads, not at
-        # the transactional sender.
-        payload["reply_to"] = [reply_to_address()]
+
+async def _send_via_resend(to: str | list[str], subject: str, body: str, html: str | None = None,
+                           *, cc: list[str] | None = None, idempotency_key: str | None = None) -> None:
+    import httpx
+    recipients = recipient_list(to)
+    copies = [a for a in recipient_list(cc or []) if a.casefold() not in {t.casefold() for t in recipients}]
+    payload = {"from": settings.ops_email_from or "TakeShape Ops <onboarding@resend.dev>",
+               "to": recipients, "subject": subject, "text": body}
+    if copies: payload['cc'] = copies
+    if html: payload['html'] = html
+    if settings.ops_reply_enabled: payload['reply_to'] = recipient_list(reply_to_address())
+    headers = {"Authorization": f"Bearer {settings.resend_api_key}"}
+    if idempotency_key: headers['Idempotency-Key'] = idempotency_key
     async with httpx.AsyncClient(timeout=20) as client:
-        resp = await client.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {settings.resend_api_key}"},
-            json=payload,
-        )
+        resp = await client.post('https://api.resend.com/emails', headers=headers, json=payload)
         resp.raise_for_status()
 
 
-def _send_smtp(to: str, subject: str, body: str, html: str | None = None) -> None:
+def _send_smtp(to: str | list[str], subject: str, body: str, html: str | None = None,
+               *, cc: list[str] | None = None, idempotency_key: str | None = None) -> None:
+    recipients = recipient_list(to)
+    copies = [a for a in recipient_list(cc or []) if a.casefold() not in {t.casefold() for t in recipients}]
     msg = EmailMessage()
-    msg["From"] = settings.ops_email_from or settings.smtp_username
-    msg["To"] = to
-    msg["Subject"] = subject
-    if settings.ops_reply_enabled:
-        msg["Reply-To"] = reply_to_address()
+    msg['From'] = settings.ops_email_from or settings.smtp_username
+    msg['To'] = ', '.join(recipients)
+    if copies: msg['Cc'] = ', '.join(copies)
+    if idempotency_key:
+        msg['Message-ID'] = f'<{hashlib.sha256(idempotency_key.encode()).hexdigest()}@takeshapehome.com>'
+    msg['Subject'] = subject
+    if settings.ops_reply_enabled: msg['Reply-To'] = reply_to_address()
     msg.set_content(body)
-    if html:
-        msg.add_alternative(html, subtype="html")
-    # Port 465 is implicit TLS from the first byte; 587 upgrades via
-    # STARTTLS. Some hosts (Railway included) treat the two differently in
-    # their egress policy, so both paths matter.
-    if settings.smtp_port == 465:
-        with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=20) as server:
-            server.login(settings.smtp_username, settings.smtp_password)
-            server.send_message(msg)
-        return
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20) as server:
-        if settings.smtp_starttls:
-            server.starttls()
+    if html: msg.add_alternative(html, subtype='html')
+    transport = smtplib.SMTP_SSL if settings.smtp_port == 465 else smtplib.SMTP
+    with transport(settings.smtp_host, settings.smtp_port, timeout=20) as server:
+        if settings.smtp_port != 465 and settings.smtp_starttls: server.starttls()
         server.login(settings.smtp_username, settings.smtp_password)
-        server.send_message(msg)
+        server.send_message(msg, to_addrs=recipients + copies)
 
 
-def _write_outbox(record_id: str, to: str, subject: str, body: str, html: str | None = None) -> Path:
+def _write_outbox(record_id: str, to: str | list[str], subject: str, body: str, html: str | None = None,
+                  *, cc: list[str] | None = None) -> Path:
     outbox = Path(settings.storage_dir) / "ops_outbox"
     outbox.mkdir(parents=True, exist_ok=True)
     path = outbox / f"{record_id}.json"
-    path.write_text(
-        json.dumps(
-            {"to": to, "subject": subject, "body": body, "html": html, "composedAt": time.time()},
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps({"to": to, 'toRecipients': recipient_list(to), 'cc': cc or [],
+        "subject": subject, "body": body, "html": html, "composedAt": time.time()}, ensure_ascii=False, indent=2), encoding='utf-8')
     return path
 
 
-async def send_ops_message(
-    subject: str, body: str, html: str | None = None, *, outbox_key: str = "message"
-) -> str:
-    """Deliver an arbitrary message to the ops address over the configured
-    transport (Resend > SMTP > outbox capture). Used for lead emails and for
-    reply confirmations. Never raises."""
-    if not settings.ops_email:
-        return "disabled"
+async def send_ops_message(subject: str, body: str, html: str | None = None, *, outbox_key: str = "message",
+                           cc: list[str] | None = None, idempotency_key: str | None = None,
+                           to: str | list[str] | None = None) -> str:
+    """Other operations emails opt into no copies. Recipient lists never grant trust."""
+    to = to or settings.ops_email
+    if not to: return 'disabled'
     try:
+        extras = {}
+        if cc: extras['cc'] = cc
+        if idempotency_key: extras['idempotency_key'] = idempotency_key
         if settings.resend_api_key:
-            await _send_via_resend(settings.ops_email, subject, body, html)
-            return "sent"
+            await _send_via_resend(to, subject, body, html, **extras)
+            return 'sent'
         if _smtp_configured():
-            await asyncio.to_thread(_send_smtp, settings.ops_email, subject, body, html)
-            return "sent"
-        _write_outbox(outbox_key, settings.ops_email, subject, body, html)
-        return "outbox"
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Ops message '%s' failed: %s", subject[:60], exc)
-        return "failed"
+            await asyncio.to_thread(_send_smtp, to, subject, body, html, **extras)
+            return 'sent'
+        _write_outbox(outbox_key, to, subject, body, html, cc=cc)
+        return 'outbox'
+    except Exception as exc:
+        logger.warning("Ops message delivery failed (%s)", type(exc).__name__)
+        return 'failed'
 
 
 async def send_decision_email(record: Any, quote: Any) -> str:
@@ -912,13 +941,36 @@ async def _mark_delivered(record: Any) -> None:
 
     try:
         record.opsEmailDeliveredAt = now_utc().isoformat()
-        await quote_store.save(record)
+        latest = await quote_store.get(record.id)
+        if latest and latest.opsEmailDeliveryId == record.opsEmailDeliveryId:
+            latest.opsEmailDeliveredAt = record.opsEmailDeliveredAt
+            await quote_store.save(latest, require_durable=True)
+        elif latest is None:
+            await quote_store.save(record, require_durable=True)
         (Path(settings.storage_dir) / "ops_outbox" / f"{record.id}.json").unlink(missing_ok=True)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not stamp lead email delivery on %s: %s", getattr(record, "id", "?"), exc)
 
 
+_delivery_locks: dict[str, asyncio.Lock] = {}
+
+
 async def send_ops_email(record: Any) -> str:
+    from ..flow_quotes import quote_store
+    lock = _delivery_locks.setdefault(record.id, asyncio.Lock())
+    async with lock:
+        latest = await quote_store.get(record.id)
+        if record.opsEmailDeliveredAt or (latest and latest.opsEmailDeliveredAt):
+            return 'already_sent'
+        if latest and latest.opsEmailDeliveryId != record.opsEmailDeliveryId:
+            return 'superseded'
+        if latest and latest.opsEmailPayload:
+            record.opsEmailPayload = latest.opsEmailPayload
+            record.scanMedia = latest.scanMedia
+        return await _deliver_ops_email(record)
+
+
+async def _deliver_ops_email(record: Any) -> str:
     """Compose and deliver the lead email. Returns 'sent', 'outbox',
     'disabled', or 'failed'. Never raises — delivery problems must not block
     the homeowner's submission (same rule as the webhook)."""
@@ -929,16 +981,11 @@ async def send_ops_email(record: Any) -> str:
         from .local_research import discover_providers, lookup_provider_leads
         from .partners import coverage_gap, find_partners, find_prospects, rank_for_lead
 
-        if record.homeId:
-            # Requeued outbox mail may predate the final upload, and old signed
-            # links may have expired. Resolve the current room model at send.
-            from ..flow_quotes import build_model_link, quote_store
-            from .state import FlowState
-            latest = await build_model_link(FlowState(
-                thread_id=record.threadId, home_id=record.homeId, active_room_key=record.roomKey))
-            if latest.get("url"):
-                record.modelLink = latest
-                await quote_store.save(record)
+        from ..flow_quotes import quote_store
+        if record.opsEmailPayload:
+            return await _deliver_payload(record)
+        from .quote_media import prepare_email
+        await prepare_email(record)
 
         # Durable table first: a cold instance must not rank the sample seed.
         await partner_table.rehydrate()
@@ -968,16 +1015,24 @@ async def send_ops_email(record: Any) -> str:
                             json.dumps(entry["components"], default=str))
         subject, body = build_ops_email(record, partners, researched, prospects, ranked)
         html = build_ops_email_html(record, partners, researched, prospects, ranked)
-        result = await send_ops_message(subject, body, html, outbox_key=record.id)
-        logger.info("Ops lead email for %s: %s", record.id, result)
-        if result == "sent":
-            await _mark_delivered(record)
-        elif result == "outbox":
-            from ..flow_quotes import quote_store
-            from ..models import now_utc
-            record.opsEmailCapturedAt = now_utc().isoformat()
-            await quote_store.save(record)
-        return result
+        record.opsEmailPayload = {'subject': subject, 'body': body, 'html': html,
+            'to': settings.ops_email, 'cc': recipient_list(settings.ops_quote_cc)}
+        await quote_store.save(record, require_durable=True)
+        return await _deliver_payload(record)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Ops lead email for %s failed: %s", record.id, exc)
         return "failed"
+
+
+async def _deliver_payload(record):
+    from ..flow_quotes import quote_store
+    from ..models import now_utc
+    p = record.opsEmailPayload
+    result = await send_ops_message(p['subject'], p['body'], p['html'], outbox_key=record.id,
+        to=p['to'], cc=p['cc'], idempotency_key=f'quote/{record.id}/{record.opsEmailDeliveryId}')
+    if result == 'sent':
+        await _mark_delivered(record)
+    elif result == 'outbox':
+        record.opsEmailCapturedAt = now_utc().isoformat()
+        await quote_store.save(record)
+    return result

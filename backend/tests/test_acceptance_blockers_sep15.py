@@ -238,7 +238,7 @@ async def test_delivery_is_stamped_on_the_record(monkeypatch, tmp_path):
     record = _record(id="qr_stamp01", opsEmailQueuedAt="2026-09-15T12:00:00+00:00")
     await quote_store.save(record)
 
-    async def fake_transport(subject, body, html=None, *, outbox_key="message"):
+    async def fake_transport(subject, body, html=None, *, outbox_key="message", **kwargs):
         return "sent"
 
     monkeypatch.setattr(module, "send_ops_message", fake_transport)
@@ -254,7 +254,11 @@ async def test_submission_stamps_the_queue_time(monkeypatch, tmp_path):
     from app import flow_api
 
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
-    monkeypatch.setattr(flow_api, "_schedule_ops_email", lambda record: True)
+    monkeypatch.setattr(settings, "ops_email", "ops@example.com")
+    def scheduled(record):
+        assert record.opsEmailQueuedAt is not None
+        return True
+    monkeypatch.setattr(flow_api, "_schedule_ops_email", scheduled)
     state = _underway_state("t-stamp", request_accepted=True)
     state.slots.scope_options = ["walls only"]
     state.slots.zip = "37203"

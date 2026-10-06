@@ -175,6 +175,9 @@ class QuoteRequestRecord(BaseModel):
     scopeRooms: list[str] = Field(default_factory=list)
     measurements: dict[str, Any] = Field(default_factory=dict)
     modelLink: dict[str, Any] = Field(default_factory=dict)
+    scanMedia: dict[str, Any] = Field(default_factory=dict)
+    opsEmailDeliveryId: str = "initial"
+    opsEmailPayload: dict[str, Any] = Field(default_factory=dict)
     quoteDraft: dict[str, Any] = Field(default_factory=dict)
     quotes: list[ReturnedQuote] = Field(default_factory=list)
     selectedQuoteId: Optional[str] = None
@@ -289,18 +292,21 @@ class QuoteRequestStore:
         safe = re.sub(r"[^A-Za-z0-9_-]", "_", request_id)
         return self._dir() / f"{safe}.json"
 
-    async def save(self, record: QuoteRequestRecord) -> None:
+    async def save(self, record: QuoteRequestRecord, *, require_durable: bool = False) -> None:
         try:
             self._path(record.id).write_text(record.model_dump_json(), encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not write quote request file %s: %s", record.id, exc)
-        await supabase_store.upsert_quote_request(
+        saved = await supabase_store.upsert_quote_request(
             record.id,
             record.threadId,
             record.homeownerId,
             record.status,
             record.model_dump(mode="json"),
         )
+
+        if require_durable and supabase_store.enabled() and not saved:
+            raise RuntimeError("Quote receipt could not be saved durably")
 
     def _get_local(self, request_id: str) -> QuoteRequestRecord | None:
         path = self._path(request_id)
@@ -573,7 +579,7 @@ async def create_quote_request(
         firstName=state.slots.first_name,
         synopsis=await build_synopsis(thread_id, state),
         homeId=state.home_id,
-        roomKey=room_key,
+        roomKey=room_key or state.active_room_key,
         roomName=room_name,
         scopeIntent=str(state.scope_intent),
         scopeRooms=list(state.scope_rooms),
@@ -581,7 +587,17 @@ async def create_quote_request(
         modelLink=await build_model_link(state),
         quoteDraft=quote_draft or {},
     )
-    await quote_store.save(record)
+    from .flow import quote_media
+    record.scanMedia = await quote_media.capture(record)
+    if record.scanMedia.get('snapshotId'):
+        import time
+        record.scanMedia['expiresAt'] = int(time.time()) + quote_media.TTL
+        viewer = quote_media.link(record)
+        record.modelLink = {'kind': 'quote_media', 'viewerUrl': viewer,
+            'url': viewer + '/models/0/usdz' if viewer and record.scanMedia['models'] else None}
+    elif record.scanMedia:
+        record.modelLink = {'status': 'not_available', 'reason': record.scanMedia['reason']}
+    await quote_store.save(record, require_durable=True)
     state.quote_request = QuoteRequestRef(id=record.id, status="submitted")
     state.mark_complete(FlowStep.QUOTE_REQUEST)
     return record

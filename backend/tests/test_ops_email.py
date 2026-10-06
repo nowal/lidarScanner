@@ -139,7 +139,7 @@ async def test_resend_transport_preferred_over_smtp(monkeypatch):
 
     calls = {}
 
-    async def fake_resend(to, subject, body, html=None):
+    async def fake_resend(to, subject, body, html=None, **kwargs):
         calls["to"] = to
         calls["has_html"] = bool(html)
 

@@ -26,6 +26,7 @@ def no_live_services(monkeypatch):
     monkeypatch.setattr(settings, "anthropic_api_key", "")
     monkeypatch.setattr(settings, "ops_webhook_url", "")
     monkeypatch.setattr(settings, "ops_email", "")
+    monkeypatch.setattr(settings, "ops_quote_cc", "")
     monkeypatch.setattr(settings, "resend_api_key", "")
     monkeypatch.setattr(settings, "smtp_host", "")
     monkeypatch.setattr(settings, "smtp_username", "")

@@ -80,6 +80,8 @@ def require_token(
 
 
 app.include_router(flow_router)
+from .quote_media_api import router as quote_media_router
+app.include_router(quote_media_router, prefix=settings.api_prefix)
 if demo_router is not None:
     app.include_router(demo_router)
 

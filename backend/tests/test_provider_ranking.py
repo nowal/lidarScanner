@@ -561,6 +561,8 @@ async def test_send_ops_email_rehydrates_discovers_and_ranks(monkeypatch, tmp_pa
             service, zip_code, source="google_places")
         return [{"name": "Harpeth Finishes"}, {"name": "Cumberland Coatings"}]
 
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(supabase_store, "upsert_quote_request", AsyncMock(return_value=True))
     monkeypatch.setattr(lr, "discover_providers", fake_discover)
     assert await ops_email.send_ops_email(_record()) == "outbox"
     assert discovered["called"] == 1

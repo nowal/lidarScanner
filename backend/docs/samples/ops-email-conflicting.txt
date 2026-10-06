@@ -20,7 +20,7 @@ MEASUREMENTS
   Window openings (scan): 14
   windowCount: 14
 
-3D MODEL
+3D MODEL · ORIGINAL USDZ DOWNLOAD
   https://storage.example.com/home-assets/flow-models/sample.usdz?token=sample
   (Signed link, valid ~30 days; no credentials needed.)
 
@@ -42,7 +42,7 @@ SUGGESTED PROVIDERS
   Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
 
 ENTER THE CHECKED QUOTE
-  https://ops.example.com/api/v1/ops/entry/qr_sample_conflict/1791485500/d47dd3ce84c17920d6f61ed341a8261c620ef49f45c554df4a0b871c3d4944ab
+  https://ops.example.com/api/v1/ops/entry/qr_sample_conflict/1792517357/ef501dbea35682db626c93d561df2e548a4c554272a557c7966d0e54c95c06a6
   (link is signed for this request and expires in 14 days; the quote
   you enter is presented to the homeowner in the app automatically)
 

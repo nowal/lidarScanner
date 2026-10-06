@@ -112,7 +112,7 @@ def tus_endpoint() -> str:
 
 
 async def upload_model(path: Path, object_path: str, session_url: str | None, save_session,
-                       *, client: httpx.AsyncClient | None = None) -> None:
+                       *, client: httpx.AsyncClient | None = None, content_type: str = 'model/vnd.usdz+zip') -> None:
     """Stream six-MB chunks; saved URLs survive backend restarts. Never overwrite."""
     size = path.stat().st_size
     try:
@@ -144,7 +144,7 @@ async def upload_model(path: Path, object_path: str, session_url: str | None, sa
                 offset = int(head.headers['upload-offset'])
         if not session_url:
             metadata = {'bucketName': BUCKET, 'objectName': object_path,
-                        'contentType': 'model/vnd.usdz+zip', 'cacheControl': '3600'}
+                        'contentType': content_type, 'cacheControl': '3600'}
             created = await client.post(endpoint, headers=dict(headers, **{
                 'Upload-Length': str(size), 'Upload-Metadata': ','.join(
                     f'{k} {base64.b64encode(v.encode()).decode()}' for k, v in metadata.items())}))

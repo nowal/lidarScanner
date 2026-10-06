@@ -198,12 +198,11 @@ async def submit_quote_request(
     # The ops email runs provider research that can take a minute or two —
     # never on the homeowner's submit. Fire it in the background; the
     # package stays retrievable via the ops API (and resendable) regardless.
-    emailed = "scheduled" if _schedule_ops_email(record) else "disabled"
-    if emailed == "scheduled":
-        # Durable "queued, not yet delivered": the worker re-drives it after
-        # a restart (see ops_email.requeue_undelivered).
+    if settings.ops_email:
+        # Persist before making the record visible to the worker.
         record.opsEmailQueuedAt = now_utc().isoformat()
-        await quote_store.save(record)
+        await quote_store.save(record, require_durable=True)
+    emailed = "scheduled" if _schedule_ops_email(record) else "disabled"
     logger.info(
         "Quote request %s created (thread=%s, webhook_delivered=%s, ops_email=%s)",
         record.id,
@@ -580,6 +579,15 @@ async def ops_resend_email(request_id: str) -> JSONResponse:
     record = await quote_store.get(request_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Quote request not found")
+    import uuid, time
+    record.opsEmailDeliveryId = uuid.uuid4().hex
+    record.opsEmailDeliveredAt = None
+    record.opsEmailCapturedAt = None
+    record.opsEmailPayload = {}
+    record.opsEmailQueuedAt = now_utc().isoformat()
+    if record.scanMedia.get('snapshotId'):
+        record.scanMedia['expiresAt'] = int(time.time()) + 30 * 86400
+    await quote_store.save(record, require_durable=True)
     queued = _schedule_ops_email(record)
     return JSONResponse(
         status_code=202 if queued else 200,

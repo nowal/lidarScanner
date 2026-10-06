@@ -146,7 +146,7 @@ async def ingest(home_id: str, bucket: str, object_path: str, revision: str,
         if previous:
             index.home_model = dict(previous.home_model)
         index.upload = {'revision': revision, 'ownerId': owner, 'contextObject': object_path,
-                        'contextReady': True, 'modelsReady': False, 'durableV2': True}
+                        'contextBucket': bucket, 'contextReady': True, 'modelsReady': False, 'durableV2': True}
         await transition(home_id, 'context_complete', revision=revision, owner=owner,
                          payload={'token': token, 'index': index.to_json()})
         logger.info('Completed durable context %s revision=%s rooms=%s', home_id, revision, len(index.rooms))

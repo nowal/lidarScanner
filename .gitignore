@@ -12,3 +12,6 @@ __pycache__/
 backend/.env
 backend/.venv/
 backend/backend_storage/
+
+.venv/
+backend_storage/

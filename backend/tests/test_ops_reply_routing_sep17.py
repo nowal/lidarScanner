@@ -48,7 +48,7 @@ def test_the_sent_message_carries_that_reply_to(monkeypatch):
         def login(self, *a, **k):
             pass
 
-        def send_message(self, msg):
+        def send_message(self, msg, **kwargs):
             sent["reply_to"] = msg["Reply-To"]
             sent["to"] = msg["To"]
 

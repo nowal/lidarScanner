@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>TakeShape · Scan gallery</title>
+<link rel="stylesheet" href="/api/v1/quote-media-assets/viewer.css">
+<script type="module" src="/api/v1/quote-media-assets/model-viewer.min.js"></script>
+<script defer src="/api/v1/quote-media-assets/viewer.js"></script></head>
+<body><main><header><span class="brand">TakeShape</span><span>Private scan gallery</span></header>
+<h1>Explore the scan</h1><p id="revision">Loading scan details…</p>
+<section aria-label="3D model"><div class="toolbar"><label for="models">Area</label><select id="models"></select><a id="usdz" hidden>Download original USDZ</a><a id="glb" hidden>Download GLB</a></div>
+<p id="status" role="status">Preparing the desktop viewer…</p>
+<model-viewer id="viewer" camera-controls touch-action="pan-y" interaction-prompt="auto" shadow-intensity="0" exposure="1" camera-orbit="35deg 65deg auto" alt="Textured scan of the requested area" hidden></model-viewer>
+<p class="hint">Drag to orbit · scroll to zoom · right-drag to pan. Original USDZ downloads can be opened with compatible 3D software.</p></section>
+<section aria-label="Scan photos"><h2>Scan photos</h2><p>Selected views from the same saved scan. Select a photo to open its larger image.</p><div id="photos" class="gallery"></div></section>
+<footer>This private link expires after 30 days. Keep it with the quote request.</footer></main></body></html>

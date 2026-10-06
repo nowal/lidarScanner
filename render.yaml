@@ -78,6 +78,9 @@ services:
       # verified Resend domain for production.
       - key: LIDARAI_OPS_EMAIL
         sync: false
+      # Submission copies only. Does not authorize reply-by-email commands.
+      - key: LIDARAI_OPS_QUOTE_CC
+        sync: false
       - key: LIDARAI_RESEND_API_KEY
         sync: false
       - key: LIDARAI_OPS_EMAIL_FROM

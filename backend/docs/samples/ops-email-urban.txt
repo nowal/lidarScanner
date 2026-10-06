@@ -24,7 +24,7 @@ MEASUREMENTS
   wallCount: 4
   windowCount: 2
 
-3D MODEL
+3D MODEL · ORIGINAL USDZ DOWNLOAD
   https://storage.example.com/home-assets/flow-models/sample.usdz?token=sample
   (Signed link, valid ~30 days; no credentials needed.)
 
@@ -55,7 +55,7 @@ SUGGESTED PROVIDERS
   Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
 
 ENTER THE CHECKED QUOTE
-  https://ops.example.com/api/v1/ops/entry/qr_sample_urban/1791485500/57101159f2441d692dd47d48d6b0b8e0aa5329865d861f6b14c063f21e314f1b
+  https://ops.example.com/api/v1/ops/entry/qr_sample_urban/1792517357/ff626c16fd1b256602e6df2d6500a1d9ea208b659538ced80d455984fa3c3118
   (link is signed for this request and expires in 14 days; the quote
   you enter is presented to the homeowner in the app automatically)
 
