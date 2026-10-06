@@ -33,7 +33,7 @@ def make_nested(tmp_path):
     mesh = UsdGeom.Mesh.Define(stage, '/Scan/Mesh')
     mesh.CreatePointsAttr([(0,0,0),(1,0,0),(0,1,0)])
     mesh.CreateFaceVertexCountsAttr([3]); mesh.CreateFaceVertexIndicesAttr([0,1,2])
-    mesh.CreateNormalsAttr([(0,0,1)]*3); mesh.SetNormalsInterpolation('vertex')
+    mesh.CreateNormalsAttr([(0,0,2)]*3); mesh.SetNormalsInterpolation('vertex')
     mesh.CreateSubdivisionSchemeAttr('none'); mesh.CreateDoubleSidedAttr(True)
     uv = UsdGeom.PrimvarsAPI(mesh).CreatePrimvar('st', Sdf.ValueTypeNames.TexCoord2fArray, 'faceVarying')
     uv.Set([(0,0),(1,0),(0,1)]); uv.SetIndices([0,1,2])
@@ -80,6 +80,7 @@ def test_nested_material_texture_uv_geometry_and_transforms_preserved(tmp_path):
     assert values(doc,binary,p['attributes']['POSITION']).tolist()==[0,0,0,1,0,0,0,1,0]
     assert values(doc,binary,p['attributes']['TEXCOORD_0']).tolist()==[0,1,1,1,0,0]
     assert values(doc,binary,p['indices']).tolist()==[0,1,2]
+    assert values(doc,binary,p['attributes']['NORMAL']).tolist()==[0,0,1]*3
     v=doc['bufferViews'][doc['images'][0]['bufferView']]
     assert binary[v['byteOffset']:v['byteOffset']+v['byteLength']]==texture
     material=doc['materials'][0]

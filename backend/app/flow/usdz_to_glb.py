@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 from pxr import Ar, Usd, UsdGeom, UsdShade
 
-VERSION = 'usd25.11-glb-v1'
+VERSION = 'usd25.11-glb-v2'
 
 
 def convert(source: Path, destination: Path) -> dict:
@@ -51,7 +51,9 @@ def convert(source: Path, destination: Path) -> dict:
         values = np.asarray(values, dtype='<u4' if indices else '<f4')
         if not indices and not np.isfinite(values).all():
             raise ValueError('Non-finite mesh attribute')
-        a = {'bufferView': view(values.tobytes()), 'componentType': 5125 if indices else 5126,
+        vi = view(values.tobytes())
+        doc['bufferViews'][vi]['target'] = 34963 if indices else 34962
+        a = {'bufferView': vi, 'componentType': 5125 if indices else 5126,
              'count': len(values), 'type': kind}
         if kind == 'VEC3':
             a.update(min=values.min(axis=0).tolist(), max=values.max(axis=0).tolist())
@@ -171,6 +173,24 @@ def convert(source: Path, destination: Path) -> dict:
             attrs = {'POSITION': accessor(p, 'VEC3')}
             if n is not None:
                 if len(n) != len(p): raise ValueError('Mismatched normals')
+                # Apple trim/interpolation can leave normals with lengths other
+                # than one. glTF requires unit normals; preserve their directions.
+                n = n.copy()
+                lengths = np.linalg.norm(n, axis=1)
+                zero = lengths < 1e-12
+                if zero.any():
+                    tri = points[faces.reshape(-1, 3)]
+                    face_normals = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+                    if expanded:
+                        fallback = np.repeat(face_normals, 3, axis=0)
+                    else:
+                        fallback = np.zeros_like(points)
+                        for corner in range(3): np.add.at(fallback, faces.reshape(-1, 3)[:, corner], face_normals)
+                    n[zero] = fallback[zero]
+                    lengths = np.linalg.norm(n, axis=1)
+                    n[lengths < 1e-12] = [0, 1, 0]
+                    lengths = np.linalg.norm(n, axis=1)
+                n /= lengths[:, None]
                 attrs['NORMAL'] = accessor(n, 'VEC3')
             if t is not None:
                 if len(t) != len(p): raise ValueError('Mismatched texture coordinates')
@@ -197,6 +217,8 @@ def convert(source: Path, destination: Path) -> dict:
             doc['nodes'][0]['children'].append(len(doc['nodes']))
             doc['nodes'].append({'name': str(prim.GetPath()), 'mesh': len(doc['meshes']) - 1,
                                  'matrix': np.asarray(cache.GetLocalToWorldTransform(prim)).reshape(-1).tolist()})
+            if np.array_equal(np.asarray(cache.GetLocalToWorldTransform(prim)), np.eye(4)):
+                del doc['nodes'][-1]['matrix']
             total_vertices += len(p); total_triangles += len(counts)
         if not doc['meshes']: raise ValueError('No visible mesh in the USD scene')
         binary.write(b'\0' * (-binary.tell() % 4)); length = binary.tell(); binary.close()

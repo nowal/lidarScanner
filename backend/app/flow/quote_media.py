@@ -28,7 +28,7 @@ from . import supabase_store, scan_uploads
 logger = logging.getLogger(__name__)
 TTL = 30 * 86400
 BUCKET = 'metashape-exports'
-CONVERTER_VERSION = 'usd25.11-glb-v1'
+CONVERTER_VERSION = 'usd25.11-glb-v2'
 _tasks: dict[str, asyncio.Task] = {}
 _slots = asyncio.Semaphore(1)
 

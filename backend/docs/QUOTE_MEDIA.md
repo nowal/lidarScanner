@@ -29,7 +29,8 @@ pinned `@google/model-viewer` 4.1.0 and a GLB derivative. USDZ is not the viewer
 rendering format. OpenUSD 25.11 resolves the actual binary USD and nested USDZ
 references; the converter carries triangle geometry, world transforms, stage
 units/up-axis, normals, indexed UVs, material bindings, diffuse/emissive textures,
-opacity and metallic/roughness factors into GLB. Embedded PNG/JPEG bytes are copied
+opacity and metallic/roughness factors into GLB. Non-unit source normals are normalized without changing their direction.
+Embedded PNG/JPEG bytes are copied
 without recompression. UV V coordinates are translated to glTF's convention.
 The original is never modified. Unsupported shading/geometry or unresolved/external
 references fail the derivative rather than quietly dropping parts of the model.
