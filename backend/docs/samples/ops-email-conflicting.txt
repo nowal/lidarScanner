@@ -42,24 +42,23 @@ PROVIDER FIELDS (Window cleaning)
 
 SUGGESTED PROVIDERS
   Ranked by review and social presence (partners tagged; scores explained per row):
-    1. Glasshouse Social Cleaning | prospect from sheet:providers | https://glasshousesocial.example | score 0.75
+    1. Crystal Pane Window Co. | prospect from google_places | (615) 555-0180 | https://crystalpane.example | score 0.90
+       Google: 4.9 stars, 388 reviews (verified 2026-09-08) https://maps.google.com/?cid=5001
+       Nextdoor: profile link only (verified 2026-09-08) https://nextdoor.com/pages/crystal-pane-window-co
+    2. [PAST QUOTER x4] Shine Squad Nashville | quoted 4x through TakeShape | (615) 555-0181 | score 0.77
+       Google: 3.4 stars, 41 reviews (verified 2026-09-08) https://maps.google.com/?cid=5002
+       Yelp: profile link only (verified 2026-09-08) https://www.yelp.com/biz/shine-squad-nashville
+       quoted boost +0.22
+    3. Glasshouse Social Cleaning | prospect from sheet:providers | https://glasshousesocial.example | score 0.75
        Facebook: 2100 followers (verified 2026-09-02) https://www.facebook.com/glasshousesocial
        Instagram: 5400 followers (verified 2026-09-02) https://www.instagram.com/glasshousesocial/
        multi-platform +0.05
-    2. [PAST QUOTER x4] Shine Squad Nashville | quoted 4x through TakeShape | (615) 555-0181
-       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=5002
-       Yelp: profile link only (verified 2026-09-08) https://www.yelp.com/biz/shine-squad-nashville
-       quoted boost +0.22; profile links only, no numbers on file
-    3. Cumberland Glass Care | TakeShape partner | contact Morgan | (615) 555-0183 | hello@cumberlandglass.example
+    4. Cumberland Glass Care | TakeShape partner | contact Morgan | (615) 555-0183 | hello@cumberlandglass.example
        no review or social data on file
-    4. Crystal Pane Window Co. | prospect from google_places | (615) 555-0180 | https://crystalpane.example
-       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=5001
-       Nextdoor: profile link only (verified 2026-09-08) https://nextdoor.com/pages/crystal-pane-window-co
-       profile links only, no numbers on file
   Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
 
 ENTER THE CHECKED QUOTE
-  https://ops.example.com/api/v1/ops/entry/qr_sample_conflict/1792778499/6e4c431fea43fa34f2a99caceb818cf1f1c457e69e4a1ee17aa56ead909fda4f
+  https://ops.example.com/api/v1/ops/entry/qr_sample_conflict/1792778667/7aebd8ce1c1976fc7dbde7557c6f8144655fc67fed1aa82f54abe8644d16d081
   (link is signed for this request and expires in 14 days; the quote
   you enter is presented to the homeowner in the app automatically)
 

@@ -41,9 +41,9 @@ PROVIDER FIELDS (Power washing)
 
 SUGGESTED PROVIDERS
   Ranked by review and social presence (partners tagged; scores explained per row):
-    1. Duck River Pressure Washing | prospect from google_places | (931) 555-0170
-       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=4001
-       profile links only, no numbers on file; small local set (<3 candidates)
+    1. Duck River Pressure Washing | prospect from google_places | (931) 555-0170 | score 0.62
+       Google: 4.9 stars, 7 reviews (verified 2026-09-08) https://maps.google.com/?cid=4001
+       small local set (<3 candidates)
     2. Hickman County Exteriors | prospect from sheet:providers
        no review or social data on file; small local set (<3 candidates)
   Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.

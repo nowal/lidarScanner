@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -38,6 +39,8 @@ sys.path.insert(0, str(BACKEND))
 
 from app.config import settings  # noqa: E402
 from app.flow import partners  # noqa: E402
+
+PRESENCE_CLOCK = "2026-09-15T12:00:00+00:00"
 from app.flow import service_rubrics
 from app.flow.ops_email import build_ops_email, build_ops_email_html  # noqa: E402
 from app.flow_quotes import QuoteRequestRecord  # noqa: E402
@@ -124,6 +127,9 @@ def compose(name: str, storage_dir: Path) -> tuple[str, str, str]:
     send_ops_email composes a real lead (minus transport)."""
     install_fixture_table(storage_dir)
     settings.storage_dir = str(storage_dir)
+    # Same instant tests/conftest.py pins: the fixture's September Places
+    # numbers must still be inside their thirty-day window when rendered.
+    partners.utcnow = lambda: datetime.fromisoformat(PRESENCE_CLOCK)
     record = sample_record(name)
     researched = SCENARIOS[name]["researched"]
     partner_rows = partners.find_partners(record.serviceType, record.zip)

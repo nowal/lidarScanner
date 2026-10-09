@@ -48,35 +48,32 @@ PROVIDER FIELDS (Painting)
 
 SUGGESTED PROVIDERS
   Ranked by review and social presence (partners tagged; scores explained per row):
-    1. Belmont Brush Co. | prospect from google_places | (615) 555-0141 | https://belmontbrush.example | score 0.78
-       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=1002
+    1. Cumberland Coatings | prospect from google_places | (615) 555-0140 | https://cumberlandcoatings.example | score 0.95
+       Google: 4.8 stars, 412 reviews (verified 2026-09-08) https://maps.google.com/?cid=1001
+    2. Belmont Brush Co. | prospect from google_places | (615) 555-0141 | https://belmontbrush.example | score 0.85
+       Google: 4.5 stars, 95 reviews (verified 2026-09-08) https://maps.google.com/?cid=1002
        Yelp: 4.0 stars, 22 reviews (verified 2026-09-01) https://www.yelp.com/biz/belmont-brush-co-nashville
        Facebook: 1200 followers (verified 2026-09-01) https://www.facebook.com/belmontbrushco
        Instagram: 800 followers (verified 2026-09-01) https://www.instagram.com/belmontbrushco/
-       multi-platform +0.10
-    2. [PAST QUOTER x3] Music City Paint Pros | quoted 3x through TakeShape | (615) 555-0145
-       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=1005
-       quoted boost +0.19; profile links only, no numbers on file
-    3. Riverbend Interiors | TakeShape partner | contact Jordan | (615) 555-0146 | hello@riverbend.example
+       multi-platform +0.15
+    3. Harpeth Finishes | prospect from google_places | (615) 555-0143 | score 0.84
+       Google: 4.6 stars, 150 reviews (verified 2026-09-08) https://maps.google.com/?cid=1004
+    4. [PAST QUOTER x3] Music City Paint Pros | quoted 3x through TakeShape | (615) 555-0145 | score 0.64
+       Google: 3.8 stars, 3 reviews (verified 2026-09-08) https://maps.google.com/?cid=1005
+       quoted boost +0.19
+    5. Twelve South Painting | prospect from google_places | score 0.47
+       Google: 5.0 stars, 3 reviews (verified 2026-09-08) https://maps.google.com/?cid=1003
+    6. Riverbend Interiors | TakeShape partner | contact Jordan | (615) 555-0146 | hello@riverbend.example
        no review or social data on file
-    4. Cumberland Coatings | prospect from google_places | (615) 555-0140 | https://cumberlandcoatings.example
-       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=1001
-       profile links only, no numbers on file
-    5. Harpeth Finishes | prospect from google_places | (615) 555-0143
-       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=1004
-       profile links only, no numbers on file
-    6. Nolensville Wall Works | prospect from sheet:providers
+    7. Nolensville Wall Works | prospect from sheet:providers
        Yelp: profile link only (verified 2026-09-08) https://www.yelp.com/biz/nolensville-wall-works
-       profile links only, no numbers on file
-    7. Twelve South Painting | prospect from google_places
-       Google: profile link only (verified 2026-09-08) https://maps.google.com/?cid=1003
        profile links only, no numbers on file
     8. Found Online Painting LLC | found online, unvetted | (615) 555-0199 | https://foundonlinepainting.example
        no review or social data on file
   Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
 
 ENTER THE CHECKED QUOTE
-  https://ops.example.com/api/v1/ops/entry/qr_sample_urban/1792778499/354bf06d700b000e7d09de4d1259c61a9874c0b4dc21386dda716bb96c60fa65
+  https://ops.example.com/api/v1/ops/entry/qr_sample_urban/1792778667/9d58c89555d7784094067e2fb4576c2d6e29881f208f000e6acb1c4aced30e06
   (link is signed for this request and expires in 14 days; the quote
   you enter is presented to the homeowner in the app automatically)
 
