@@ -744,6 +744,10 @@ def recipient_list(value: str | list[str]) -> list[str]:
         raise ValueError('Invalid email recipient')
     result = []
     for _, addr in getaddresses([raw]):
+        if not addr.strip():
+            # An empty header (no cc) parses as ('', '') on Python 3.12;
+            # that is no recipient, not a bad one.
+            continue
         if not re.fullmatch(r"[^\s@,<>]+@[^\s@,<>]+\.[^\s@,<>]+", addr):
             raise ValueError('Invalid email recipient')
         if addr.casefold() not in {a.casefold() for a in result}: result.append(addr)
