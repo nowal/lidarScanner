@@ -594,6 +594,13 @@ _VARIANTS: dict[str, tuple[tuple[str, str], ...]] = {
 _DEFAULT_VARIANT = {"Roofing & Siding": "Roofing", "Window & Door Install": "Window Installation"}
 
 
+def in_catalog(service_type: str | None) -> bool:
+    """A trade the catalog, the price tables and the partner lists know."""
+    from ..home_guide_tools import KNOWN_SERVICE_TYPES
+
+    return bool(service_type) and service_type.strip() in KNOWN_SERVICE_TYPES
+
+
 def rubric_for(service_type: str | None, scope_options: list[str] | None = None, text: str = "") -> Rubric | None:
     """The rubric for the service in play, or None for a service without one."""
     if not service_type:

@@ -62,6 +62,7 @@ from .flow.proofread import proofread as _proofread
 from .flow import service_rubrics
 from .flow.state import ScopeIntent
 from .flow.pricing import (
+    area_from_measurements,
     compute_price_guidance,
     parse_size_hint,
     priced_per_window,
@@ -314,6 +315,22 @@ def _gives_own_details(message: str) -> bool:
     return len(message.split()) <= 6 or bool(_OWN_CONTACT.search(message))
 
 
+def _precapture_measurements(state: FlowState, message: str) -> None:
+    """Sizes they typed, kept on the thread. "My driveway is about 15 feet
+    wide" after a scan that could not size it must land somewhere the agent
+    and the request can see (Quintin, Oct 9: it did not help)."""
+    from .flow.pricing import parse_measurements
+
+    found = parse_measurements(message)
+    if not found:
+        return
+    kept = list(state.slots.homeowner_measurements)
+    for phrase in found:
+        if phrase.lower() not in {k.lower() for k in kept}:
+            kept.append(phrase)
+    state.slots.homeowner_measurements = kept[-8:]
+
+
 def _precapture_from_message(state: FlowState, message: str) -> dict[str, str]:
     """Take contact details straight out of the homeowner's message, BEFORE
     the turn is planned.
@@ -371,7 +388,7 @@ _SAFE_TIMEOUT_COPY = (
 )
 
 _SAFE_NO_PRICE_COPY = (
-    "A real number has to come from a provider who's seen your actual space, "
+    "A real number has to come from a provider pricing it from your scan, "
     "so I won't guess at one. If you'd like, I'll package what we've "
     "discussed as a quote request and bring their figures back to you here."
 )
@@ -1576,7 +1593,30 @@ def _build_directives(
         "those plus what they have told you. If something was not measured, "
         "say what the scan did capture; never that someone has to come and "
         "look.",
+        # The handoff agreed on the Oct 9 call: a rough range and "this gets
+        # done for you" beat another question.
+        "- WHEN A MEASUREMENT OR DETAIL IS MISSING: say so in a clause, give "
+        "the rough range you have, and tell them the providers take their "
+        "measurements from the 3D scan they already made, so there is no "
+        "tape measure and no walkthrough for them. Prefer that to asking "
+        "another question; ask only when the answer would change the price "
+        "band materially, and never more than one question per reply."
+        + (
+            " If they really want more accuracy, they are welcome to measure "
+            "the 3D model themselves; mention it once, as an option, never as "
+            "something they must do."
+            if settings.model_measure_tool_available else ""
+        ),
     ]
+    if state.slots.homeowner_measurements:
+        lines.append(
+            "- MEASUREMENTS THEY GAVE YOU, in their words: "
+            + "; ".join(state.slots.homeowner_measurements)
+            + ". These count as measured for this conversation: use them, thank "
+            "them once, never say you cannot size it, and they go on the "
+            "request. If one dimension is still missing for an area, say which "
+            "one, or simply let the providers take it from the scan."
+        )
     if home_index is not None:
         lines.extend(_home_directives(state, home_index))
         # Their word for a room beats the scan's label, and which words are
@@ -1700,7 +1740,7 @@ def _build_directives(
     # The service rubric: what a provider needs, what the scan supplies, what
     # to ask (Quintin's rubric document, Oct 6; flow/service_rubrics.py).
     rubric = service_rubrics.rubric_for(state.slots.project_type, list(state.slots.scope_options))
-    if rubric is not None:
+    if rubric is not None and settings.rubric_directive_enabled:
         exterior_capture = (state.scan_appearance or {}).get("setting") == "exterior" or bool(
             home_index is not None and any(_is_exterior(state, r) for r in home_index.rooms)
         )
@@ -1895,8 +1935,8 @@ def _build_directives(
                 "their area that you looked up just now, and you may say so "
                 "plainly. Do NOT tell them you cannot look prices up or "
                 "search the web. What you cannot do is produce a real QUOTE "
-                "that way: a quote is priced by a provider who has seen the "
-                "space, and it comes back through the request."
+                "that way: a quote is priced by a provider working from their "
+                "scan, and it comes back through the request."
             )
         # Not when real quotes are also going out this turn: those ARE quotes,
         # and telling the model to call them a ballpark undersells them.
@@ -1922,7 +1962,7 @@ def _build_directives(
                 "screen. Never answer a cost question with a flat refusal: you "
                 "CAN give a rough range, and a wide honest one is the answer. "
                 "Stress it is wide on purpose and that a real local provider "
-                "has to see the space for a true price. Call it a rough "
+                "prices it from their scan for a true price. Call it a rough "
                 "ballpark and never a quote -- a quote is a real price for "
                 "their home and only comes back after you send their request "
                 "out and a provider prices it. If they are NOT asking about "
@@ -1948,16 +1988,33 @@ def _build_directives(
                 "is shown on their screen alongside this message, so do not "
                 "mention a card or tell them to look at one — if you do not say "
                 "the numbers, they never see them. Stress the range is wide on "
-                "purpose and that a real local provider has to look at the space "
-                "for a true price. State no other numbers."
+                "purpose and that a real local provider prices it from their "
+                "scan for a true price. State no other numbers."
             )
-            if "nothing measured yet" in price_guidance.basis:
-                lines.append(
-                    "- That range is wide because nothing about their home has been "
-                    "measured yet. Say so plainly, then offer ONE way to narrow it — "
-                    "either they tell you the rough size (square footage or number of "
-                    "rooms) or they scan the space. Offer, do not insist."
+        if not price_guidance.options and "nothing measured yet" in price_guidance.basis:
+            # Whichever way the question arrived (regex or the model's own
+            # judgement), an unmeasured band gets the handoff clause, not a
+            # size question (Oct 9 call).
+            lines.append(
+                "- That range is wide because this was not measured. Say so in "
+                "a clause, then say the providers take their measurements from "
+                "the 3D scan, so it gets done for them: no tape measure, no "
+                "walkthrough. If they volunteer a rough size, use it; do not "
+                "ask for one."
+                + (
+                    " If they really want more accuracy, they are welcome to "
+                    "measure the 3D model themselves; the providers will do it "
+                    "from the model either way."
+                    if settings.model_measure_tool_available else ""
                 )
+            )
+    elif state.slots.project_type and not service_rubrics.in_catalog(state.slots.project_type):
+        lines.append(
+            f"- You have NO pricing data for {state.slots.project_type}: give no "
+            "figure and no range, say so plainly, and say local providers can "
+            "price it from the scan and the request. Never borrow a range from "
+            "another trade."
+        )
     else:
         lines.append(
             "- Never state prices, cost ranges, or estimates yourself. If cost "
@@ -2022,7 +2079,7 @@ def _build_directives(
                 "them exactly that way: 'here's roughly what this runs in your "
                 "area, and a couple of real local painters you could go "
                 "through.' Do not say a business 'quoted' a price. Remind them "
-                "a real quote comes once a provider sees the space."
+                "a real quote comes once a provider prices it from their scan."
                 + address_line
                 + " Data: "
                 + json.dumps(quotes_to_present, ensure_ascii=True)
@@ -2087,8 +2144,9 @@ def _build_directives(
             "NOT make the people working behind you the story (no 'a person "
             "on my team reviews every request'). You never claim to have "
             "done the pricing yourself. NEVER promise a specific turnaround "
-            "time (no hour or day figures). Final prices land within about "
-            "10% of the quote once a provider has seen the space. Don't "
+            "time (no hour or day figures). The providers take their "
+            "measurements from the scan, so there is nothing more for them to "
+            "measure; final prices land within about 10% of the quote. Don't "
             "re-collect project details unless they want to change "
             "something."
         )
@@ -2217,7 +2275,9 @@ def _build_directives(
                 "so YOU can get real pricing from local companies for them, "
                 "and then wait for their answer. Say it as something you do "
                 "for them ('I'll get pricing from local companies'), never as "
-                "a hand-off to a team. Do NOT present, describe, or promise a "
+                "a hand-off to a team. Say in a clause that the providers take "
+                "their measurements from the 3D scan, so there is nothing more "
+                "for them to measure. Do NOT present, describe, or promise a "
                 "request card this turn: nothing goes anywhere until they say "
                 "yes."
             )
@@ -2235,7 +2295,9 @@ def _build_directives(
                 "a quoteDraft in your reply, the app displays it as a card "
                 "IMMEDIATELY in this same message with a Confirm button — so "
                 "present it ('here is the request, look it over and confirm when "
-                "ready'), never ask whether you should draft it."
+                "ready'), never ask whether you should draft it. Say once that "
+                "the providers take their measurements from the 3D scan, so "
+                "there is nothing more for them to measure."
             )
         else:
             lines.append(
@@ -2931,7 +2993,11 @@ async def _maybe_price_guidance(
     # a reason to refuse a ballpark.
     area, area_label = _active_room_area_sqft(state, home_index)
     if area is None:
-        area = _total_floor_area_sqft(request.homeContext) or parse_size_hint(request.message)
+        area = (
+            _total_floor_area_sqft(request.homeContext)
+            or parse_size_hint(request.message)
+            or area_from_measurements(state.slots.homeowner_measurements)
+        )
     windows = _window_count(state, home_index, request.homeContext)
 
     # A trade priced by the surface being worked, on a capture whose
@@ -2940,6 +3006,11 @@ async def _maybe_price_guidance(
     from .flow.pricing import priced_by_surface
 
     surfaces = _surfaces_feet(state) if priced_by_surface(service) else None
+    if surfaces is None and priced_by_surface(service):
+        # No mesh number, but they told us a size: that is the surface.
+        given = area_from_measurements(state.slots.homeowner_measurements)
+        if given:
+            surfaces = {"ground": given, "given": True}
     if surfaces:
         total = round(surfaces.get("upright", 0.0) + surfaces.get("ground", 0.0))
         pinned = state.price_guidance_snapshot
@@ -2950,6 +3021,8 @@ async def _maybe_price_guidance(
             for key, label in (("upright", "upright"), ("ground", "level ground"))
             if surfaces.get(key)
         )
+        if surfaces.get("given"):
+            note = f"≈{total:,.0f} sq ft, the size they gave you"
         measured = compute_price_guidance(service, None, surface_sqft=total, surface_note=note)
         if measured is not None:
             state.price_guidance_snapshot = {
@@ -3331,6 +3404,7 @@ async def _run_flow_turn_locked(
             state.request_accepted = True
         # Same reason, for the other half of the card's preconditions.
         precapture = _precapture_from_message(state, request.message)
+        _precapture_measurements(state, request.message)
         # And for scope: "just the porch" has to reach THIS reply's
         # directives, or the reply asks the question it was just answered
         # (Quintin, Oct 1: asked twice back to back).

@@ -10,12 +10,22 @@ from __future__ import annotations
 import pytest
 
 import app.flow_runtime as rt
+from app.config import settings
 from app.flow import ops_email, service_rubrics
 from app.flow.service_rubrics import HOMEOWNER_CONCEALED_WORDING, PROVIDER_CONCEALED_WORDING, RUBRICS
 from app.flow.state import FlowState
 from app.flow_quotes import QuoteRequestRecord
 from app.home_ai import _missing_details
 from app.home_guide_tools import SCAN_SUPPORT as SERVICE_COVERAGE
+
+
+def test_the_rubric_directive_is_off_this_sprint_by_default():
+    # Oct 9 call: fewer questions and rough ranges; the lead package still
+    # carries the rubric's provider fields.
+    assert settings.rubric_directive_enabled is False
+    state = FlowState(thread_id="t", client_flow_aware=True, opening_delivered=True, user_turns=2)
+    state.slots.project_type = "Painting"
+    assert "SERVICE RUBRIC" not in _directives(state)
 
 
 def test_every_catalog_service_with_a_rubric_resolves_and_decking_does_not():
@@ -44,7 +54,8 @@ def _directives(state: FlowState, index=None, message: str = "ok") -> str:
                                 quotes_to_present=None, home_index=index)
 
 
-def test_the_agent_gets_the_rubric_for_the_service_in_play():
+def test_the_agent_gets_the_rubric_for_the_service_in_play(monkeypatch):
+    monkeypatch.setattr(settings, "rubric_directive_enabled", True)
     state = FlowState(thread_id="t", client_flow_aware=True, opening_delivered=True, user_turns=2)
     assert "SERVICE RUBRIC" not in _directives(state)
     state.slots.project_type = "Painting"
@@ -57,7 +68,8 @@ def test_the_agent_gets_the_rubric_for_the_service_in_play():
     assert "a fact they have not given is unknown, not a guess" in text
 
 
-def test_an_exterior_trade_on_an_indoor_scan_says_the_scan_cannot_supply_it():
+def test_an_exterior_trade_on_an_indoor_scan_says_the_scan_cannot_supply_it(monkeypatch):
+    monkeypatch.setattr(settings, "rubric_directive_enabled", True)
     state = FlowState(thread_id="t", client_flow_aware=True, opening_delivered=True, user_turns=2)
     state.slots.project_type = "Power Washing"
     inside = _directives(state)

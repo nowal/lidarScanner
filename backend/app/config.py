@@ -190,6 +190,16 @@ class Settings(BaseSettings):
     # turn and a second or two of latency; "off" disables it. Empty model =
     # anthropic_model.
     proofread_scope: str = "opening"
+    # The handoff (Oct 9 call), Noah's two parts: when a measurement is
+    # missing the agent says providers take their measurements from the
+    # model, and that the homeowner is welcome to measure the model
+    # themselves if they want more accuracy. The second part is this flag;
+    # off hides it (for a build without the measure mode).
+    model_measure_tool_available: bool = True
+    # The service rubric as a per-turn directive (asks the rubric's
+    # questions). Off this sprint: fewer questions, rough ranges; the lead
+    # package still carries the rubric's provider fields.
+    rubric_directive_enabled: bool = False
     proofread_model: str = ""
     proofread_timeout_seconds: float = 6.0
     # Ground the range in web-searched rates rather than the static national

@@ -82,6 +82,10 @@ class Slots(BaseModel):
     address: str | None = None  # never sent to the client (client_view + token both exclude it)
     contact_email: str | None = None
     contact_phone: str | None = None
+    # Sizes the homeowner typed ("my driveway is about 15 feet wide", "20 by
+    # 40"). They count as measured for the conversation and go on the
+    # request (Quintin, Oct 9: giving the width did not help).
+    homeowner_measurements: list[str] = Field(default_factory=list)
     # Set by the token codec when it strips a sensitive value from the
     # client-held token: the flow still knows the value WAS captured (so it
     # never re-asks), while the value itself lives only in the durable store

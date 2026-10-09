@@ -111,6 +111,8 @@ def _fmt_measurements(measurements: dict[str, Any]) -> list[str]:
         sizes = ", ".join(f"{o['widthFeet']} x {o['heightFeet']} ft" for o in openings[:12])
         lines.append(f"  Opening sizes (w x h): {sizes}")
         lines.append("  (a bank of several sashes reads as one opening; confirm the sash count)")
+    if measurements.get("homeownerSupplied"):
+        lines.append("From the homeowner, in their words: " + "; ".join(measurements["homeownerSupplied"]))
     if measurements.get("fixtures"):
         lines.append("In the room: " + ", ".join(measurements["fixtures"]))
     rooms = measurements.get("rooms") or []

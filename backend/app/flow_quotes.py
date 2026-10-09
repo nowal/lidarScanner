@@ -56,7 +56,9 @@ EXPECTATIONS = {
     # (it reaches operations first) and by promising no turnaround.
     "copy": (
         "Sounds good — I'm getting your request in front of local providers "
-        "now. As soon as their quotes come back, I'll bring them to you here."
+        "now. They take their measurements from your scan, so there's nothing "
+        "more for you to measure. As soon as their quotes come back, I'll "
+        "bring them to you here."
     ),
     "accuracyCaveatPct": 10,
 }
@@ -567,6 +569,9 @@ async def create_quote_request(
     room_measurements, room_key, room_name = _room_measurements(state)
     if room_measurements is not None:
         measurements = room_measurements
+    if state.slots.homeowner_measurements:
+        measurements = dict(measurements)
+        measurements["homeownerSupplied"] = list(state.slots.homeowner_measurements)
     record = QuoteRequestRecord(
         id=f"qr_{uuid.uuid4().hex[:12]}",
         createdAt=now_utc().isoformat(),

@@ -262,8 +262,8 @@ async def test_power_washing_is_priced_from_the_scanned_surface(monkeypatch):
     again, _ = await rt._maybe_price_guidance(state, request, None)
     assert (again.lowUsd, again.highUsd) == (measured.lowUsd, measured.highUsd), "pinned"
     # A trade not priced by surface is untouched by the measurement.
-    assert compute_price_guidance("Interior Painting", None, surface_sqft=2000) is not None
-    assert "surface measured" not in compute_price_guidance("Interior Painting", None, surface_sqft=2000).basis
+    assert compute_price_guidance("Painting", None, surface_sqft=2000) is not None
+    assert "surface measured" not in compute_price_guidance("Painting", None, surface_sqft=2000).basis
 
 
 def test_the_lead_package_and_the_ops_email_carry_the_scanned_surfaces():
