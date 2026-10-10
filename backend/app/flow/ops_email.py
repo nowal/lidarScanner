@@ -742,12 +742,14 @@ def recipient_list(value: str | list[str]) -> list[str]:
     raw = ','.join(value) if isinstance(value, list) else value
     if '\r' in raw or '\n' in raw:
         raise ValueError('Invalid email recipient')
+    if not raw.strip():
+        # An empty header (no cc) parses as ('', '') on Python 3.12; asking
+        # for no recipients is not a bad recipient. A header that HAS text
+        # but no mailbox ("Ops <>", ", ,") is still rejected below, and so
+        # is a list where only some entries resolve.
+        return []
     result = []
     for _, addr in getaddresses([raw]):
-        if not addr.strip():
-            # An empty header (no cc) parses as ('', '') on Python 3.12;
-            # that is no recipient, not a bad one.
-            continue
         if not re.fullmatch(r"[^\s@,<>]+@[^\s@,<>]+\.[^\s@,<>]+", addr):
             raise ValueError('Invalid email recipient')
         if addr.casefold() not in {a.casefold() for a in result}: result.append(addr)

@@ -751,6 +751,18 @@ def _room_phrase(message: str, word: str) -> str:
     return phrase if lead in _ROOM_MODIFIERS else word
 
 
+# Telling us what a space is, as opposed to asking about it. "I scanned my
+# front porch" names the area; "did you get the attic?" does not, and only
+# the first may write a name into the index.
+# ponytail: a word list, not intent parsing. Anything it misses is still
+# handled for the thread, just not persisted -- the safe direction.
+_ROOM_NAMING = re.compile(
+    r"(?i)\b(?:i|we)\s+(?:just\s+|already\s+)?"
+    r"(?:scanned|scan|walked|captured|recorded|did|got|have|added)\b"
+    r"|\b(?:it|that|this)(?:'s|s| is| was)\s+(?:the|my|our)\b"
+)
+
+
 def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
     """Attach the whole-home index and track which room is being discussed.
 
@@ -785,6 +797,7 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
     if room is None and not unresolved:
         room = index.small_unnamed_room(request.message or "")
     state.unnamed_room_phrase = None
+    state.unnamed_room_key = None
     if room is None and unresolved:
         # "I scanned my front porch": the index holds areas the photos could
         # not name, and their word is the name. Telling them the porch they
@@ -794,23 +807,41 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
             r for r in index.rooms
             if not r.named_by_homeowner and (not r.confident or _is_exterior(state, r))
         ]
-        if len(candidates) == 1:
-            outside = _is_exterior(state, candidates[0])
-            renamed = index.rename_room(candidates[0].key, phrase)
-            if renamed is not None:
-                if outside:
-                    # "the exterior of the garage": their word names it AND
-                    # it stays the outside of a building.
-                    renamed.role = "exterior"
-                from .flow.home_registry import save_index
-
-                save_index(state.home_id, index)
-                logger.info("Homeowner's word names the one unnamed area %s '%s' (home=%s)",
-                            candidates[0].key, phrase, state.home_id)
-                room, unresolved = renamed, None
-        elif candidates:
+        if candidates:
             state.unnamed_room_phrase = phrase
             unresolved = None
+            if len(candidates) == 1:
+                # Only one area can be the space they mean, so it is the
+                # subject either way: its footprint and door count go in
+                # front of the model instead of nothing (Oct 5).
+                state.unnamed_room_key = candidates[0].key
+                state.active_room_key = candidates[0].key
+                if _ROOM_NAMING.search(request.message or ""):
+                    # "I scanned my front porch", "it's the exterior of the
+                    # garage": they are telling us what the space is. Their
+                    # word is the name and it keeps.
+                    outside = _is_exterior(state, candidates[0])
+                    renamed = index.rename_room(candidates[0].key, phrase)
+                    if renamed is not None:
+                        if outside:
+                            # "the exterior of the garage": their word names
+                            # it AND it stays the outside of a building.
+                            renamed.role = "exterior"
+                        from .flow.home_registry import save_index
+
+                        save_index(state.home_id, index)
+                        logger.info("Homeowner's word names the one unnamed area %s '%s' (home=%s)",
+                                    candidates[0].key, phrase, state.home_id)
+                        room, unresolved = renamed, None
+                        state.unnamed_room_phrase = None
+                        state.unnamed_room_key = None
+                else:
+                    # "did you get the attic?" asks a question, it does not
+                    # give a name. Their word is used for this thread and
+                    # the index is left alone: a rename written off an
+                    # inference is not something the homeowner can undo.
+                    logger.info("Homeowner's word '%s' must mean the one unnamed area %s, "
+                                "thread-scoped (home=%s)", phrase, candidates[0].key, state.home_id)
 
     # "that space you called unnamed area 1 is the mudroom": the room the
     # message names is the one being named, not whichever was in focus.
@@ -840,6 +871,13 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
             else 1
         )
         state.unresolved_room_phrase = unresolved
+    elif state.unnamed_room_phrase:
+        # It IS in the scan, as one of the areas the photos could not name.
+        # Leaving a stale phrase here put both directives in one prompt:
+        # "NEVER say it is not in the scan" next to "which is NOT in the
+        # scan", about the same space.
+        state.unresolved_room_phrase = None
+        state.unresolved_room_turns = 0
     elif state.unresolved_room_phrase:
         # Still stuck on it. The follow-ups in a dead end ("ok how?",
         # "which room is closest?") rarely repeat the room's name, and
@@ -1304,18 +1342,32 @@ def _home_directives(state: FlowState, index) -> list[str]:
         "which room it is, ask rather than asserting.",
     ]
     if state.unnamed_room_phrase:
-        count = sum(
-            1 for r in index.rooms
-            if not r.named_by_homeowner and (not r.confident or r.key in exterior_keys)
-        )
-        lines.append(
-            f"- They call a space the {state.unnamed_room_phrase}. It is not listed "
-            f"under that name because the photos could not name {count} of the "
-            "areas above (marked exterior, name uncertain, or no room structure); "
-            "it is one of those. NEVER say it is not in the scan or was not "
-            "scanned. Use their name for it, and if it matters which area it is, "
-            "ask them which."
-        )
+        named = index.by_key(state.unnamed_room_key) if state.unnamed_room_key else None
+        if named is not None:
+            # Only one area could be the space they mean, so say which, and
+            # use their word for it from here. Still a thread-scoped name:
+            # if they correct it, take the correction, nothing was written.
+            lines.append(
+                f"- They call a space the {state.unnamed_room_phrase}, and it is "
+                f"the area listed above as '{named.display_name}' — the only one "
+                "it can be. NEVER say it is not in the scan or was not scanned. "
+                f"Call it the {state.unnamed_room_phrase} from here, and use its "
+                "measurements as that space's. If they say it is somewhere else, "
+                "accept that immediately."
+            )
+        else:
+            count = sum(
+                1 for r in index.rooms
+                if not r.named_by_homeowner and (not r.confident or r.key in exterior_keys)
+            )
+            lines.append(
+                f"- They call a space the {state.unnamed_room_phrase}. It is not listed "
+                f"under that name because the photos could not name {count} of the "
+                "areas above (marked exterior, name uncertain, or no room structure); "
+                "it is one of those. NEVER say it is not in the scan or was not "
+                "scanned. Use their name for it, and if it matters which area it is, "
+                "ask them which."
+            )
     room = index.by_key(state.active_room_key) if state.active_room_key else None
     if room is not None:
         fixtures = ", ".join(f"{n} {c}" for c, n in room.objects.most_common(6))

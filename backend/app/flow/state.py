@@ -186,6 +186,12 @@ class FlowState(BaseModel):
     # a room that was never scanned (Quintin, Oct 5: "you never scanned the
     # front porch", about the porch he had just scanned).
     unnamed_room_phrase: str | None = None
+    # Which area that phrase must mean, when only one could be it. Their
+    # word names it for this thread and the agent uses it, but nothing is
+    # written to the index: "did you get the attic?" is a question, and a
+    # persisted rename off an inference is not something they can undo.
+    # An explicit naming ("that space is the mudroom") still persists.
+    unnamed_room_key: str | None = None
 
     # --- Single captures (no whole-home index) -----------------------------
     # What the capture's own photos show, from one vision pass on the first

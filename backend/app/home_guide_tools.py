@@ -175,8 +175,11 @@ def detect_service_type(message: str, *, strong_only: bool = False) -> str | Non
                 best_service, best_length = service, len(keyword)
     if best_service == "Power Washing" and _HARDSCAPE_WORK.search(text) and not _WASHING.search(text):
         # "replace the concrete on my driveway" is not a wash (Quintin, Oct
-        # 8: priced as power washing because of the word "driveway").
-        best_service = None
+        # 8: priced as power washing because of the word "driveway"). Return
+        # rather than fall through: the weak words below read "crack repair"
+        # as Handyman and band it off that table, which is the same wrong
+        # price under a different trade. Hardscape is not in the catalog.
+        return None
     if best_service is not None or strong_only:
         return best_service
     for service in KNOWN_SERVICE_TYPES:
