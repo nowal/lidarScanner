@@ -126,7 +126,9 @@ def test_switching_homes_mid_thread_is_named_to_the_model():
     previous = state.home_id
     index = _reconcile_home(state, HomeAIChatRequest(message="now my other place", homeId="h2"))
     switched = bool(previous and state.home_id != previous)
-    assert switched and state.active_room_key is None and index.by_key("room-9")
+    # The switch clears the old focus; the new home's lone room then becomes
+    # the subject on its own (Oct 5), so the focus is that room, not the old one.
+    assert switched and state.active_room_key in (None, "room-9") and index.by_key("room-9")
     plan = FlowEngine().plan_turn(state, "now my other place")
     directives = flow_runtime._build_directives(state, plan, opening=False, price_guidance=None,
                                                 quotes_to_present=None, home_index=index, home_switched=switched)

@@ -7,9 +7,19 @@ test_api.py — can reach a live service by accident. Individual tests
 opt back in by monkeypatching what they stub.
 """
 
+from datetime import datetime
+
 import pytest
 
 from app.config import settings
+from app.flow import partners
+
+# Google Places numbers expire thirty days after lastVerifiedAt, read-time
+# (partners.presence_expired). The provider fixture and the goldens carry
+# September 2026 timestamps, so the ranking and rendering tests started
+# failing on Oct 8 with nothing changed. Every test reads this clock
+# instead; scripts/ops_email_samples.py pins the same instant.
+PRESENCE_CLOCK = "2026-09-15T12:00:00+00:00"
 
 
 @pytest.fixture(autouse=True)
@@ -32,3 +42,8 @@ def no_live_services(monkeypatch):
     monkeypatch.setattr(settings, "smtp_username", "")
     monkeypatch.setattr(settings, "smtp_password", "")
     yield
+
+
+@pytest.fixture(autouse=True)
+def pinned_presence_clock(monkeypatch):
+    monkeypatch.setattr(partners, "utcnow", lambda: datetime.fromisoformat(PRESENCE_CLOCK))
