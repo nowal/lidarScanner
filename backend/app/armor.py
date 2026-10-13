@@ -168,7 +168,7 @@ def _address_key(request: Request) -> str:
 
 
 def _limited(path: str) -> bool:
-    return any(path.endswith(suffix) for suffix in _LIMITED_SUFFIXES)
+    return any(path.endswith(suffix) for suffix in _LIMITED_SUFFIXES) or ("/quote-media/" in path and path.endswith("/responses"))
 
 
 class MaxBodyMiddleware(BaseHTTPMiddleware):
