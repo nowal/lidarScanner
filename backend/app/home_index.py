@@ -200,6 +200,9 @@ class Room:
     # machine that holds the export, the index is the copy that reaches the
     # server, and the host's disk is wiped on every redeploy.
     appearance: dict = field(default_factory=dict)
+    # Hash of capture geometry and selected photo bytes, before any AI pass.
+    # Names, model links and nondeterministic vision wording are not changes.
+    context_fingerprint: str | None = None
 
     @property
     def centroid(self) -> tuple[float, float]:
@@ -250,6 +253,7 @@ class Room:
             "measurements": dict(self.measurements),
             "model": dict(self.model),
             "appearance": dict(self.appearance),
+            "contextFingerprint": self.context_fingerprint,
         }
 
     @classmethod
@@ -272,6 +276,7 @@ class Room:
             named_by_homeowner=bool(data.get("namedByHomeowner", False)),
             measurements=dict(data.get("measurements") or {}),
             appearance=dict(data.get("appearance") or {}),
+            context_fingerprint=data.get("contextFingerprint"),
             model=dict(data.get("model") or {}),
         )
 

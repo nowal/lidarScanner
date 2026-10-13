@@ -177,6 +177,9 @@ class FlowState(BaseModel):
     # a named room within it rather than "the room". The id is a key into
     # the home registry; the active room is the export's own room key.
     home_id: str | None = None
+    # Ready context used by the first opener. Event delivery has its own
+    # durable cursor; it never changes this state or the homeowner turn count.
+    opening_scan_revision: str | None = None
     active_room_key: str | None = None
     # A room the homeowner named that the index could not resolve: the agent
     # must say it cannot see that room rather than describe a different one.
