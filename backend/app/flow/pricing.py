@@ -168,6 +168,47 @@ _SIZE_SQFT = re.compile(
 _SIZE_ROOMS = re.compile(
     r"(?i)\b(\d{1,2})\s*(?:-|\s)?\s*(?:bed|bedroom|br|bdrm|room)s?\b"
 )
+# "20 by 40 feet", "20 x 40 ft", "20' x 40'": an area the homeowner gave.
+_SIZE_DIMS = re.compile(
+    r"(?i)\b(\d{1,4}(?:\.\d+)?)\s*(?:ft|feet|foot|')?\s*(?:x|by|×)\s*(\d{1,4}(?:\.\d+)?)\s*(?:ft|feet|foot|')"
+)
+# Single sizes worth keeping even when they do not make an area on their own.
+_MEASUREMENT_PHRASES = (
+    re.compile(r"(?i)\b(?:about|around|roughly|approximately|~)?\s*\d{1,4}(?:\.\d+)?\s*(?:ft|feet|foot|')\s*(?:wide|long|deep|high|tall|across)\b"),
+    re.compile(r"(?i)\b\d{1,4}(?:\.\d+)?\s*(?:ft|feet|foot|')?\s*(?:x|by|×)\s*\d{1,4}(?:\.\d+)?\s*(?:ft|feet|foot|')(?!\w)"),
+    re.compile(r"(?i)\b\d[\d,]*(?:\.\d+)?\s*(?:sq\.?\s*(?:ft|feet)|square\s+(?:ft|feet)|sf)\b"),
+)
+
+
+def parse_measurements(message: str | None) -> list[str]:
+    """The sizes a homeowner typed, as they typed them."""
+    out: list[str] = []
+    for pattern in _MEASUREMENT_PHRASES:
+        for m in pattern.finditer(message or ""):
+            text = " ".join(m.group(0).split())
+            if text and text.lower() not in {o.lower() for o in out}:
+                out.append(text[:60])
+    return out[:8]
+
+
+def area_from_measurements(phrases: list[str]) -> float | None:
+    """Square feet from the phrases, when two dimensions or an area are there."""
+    for phrase in phrases:
+        m = _SIZE_DIMS.search(phrase)
+        if m:
+            try:
+                area = float(m.group(1)) * float(m.group(2))
+            except ValueError:
+                continue
+            if 20 <= area <= 20000:
+                return area
+    for phrase in phrases:
+        hinted = parse_size_hint(phrase)
+        if hinted:
+            return hinted
+    return None
+
+
 _SIZE_WORDS: tuple[tuple[re.Pattern[str], float], ...] = (
     (re.compile(r"(?i)\b(whole|entire|full)\s+(house|home)\b"), 1800.0),
     (re.compile(r"(?i)\b(single|one|1)\s+room\b"), _SQFT_PER_ROOM),
@@ -190,6 +231,13 @@ def parse_size_hint(message: str | None) -> float | None:
             return None
         # Bound it: a typo'd "18000000 sq ft" must not drive a price.
         return value if 50 <= value <= 20000 else None
+    m = _SIZE_DIMS.search(message)
+    if m:
+        try:
+            area = float(m.group(1)) * float(m.group(2))
+        except ValueError:
+            return None
+        return area if 50 <= area <= 20000 else None
     m = _SIZE_ROOMS.search(message)
     if m:
         rooms = int(m.group(1))
@@ -226,6 +274,13 @@ def compute_price_guidance(
     so nobody reads a measured number into it.
     """
     if not service_type:
+        return None
+    from ..home_guide_tools import KNOWN_SERVICE_TYPES
+
+    if service_type not in KNOWN_SERVICE_TYPES:
+        # A trade we have no table for ("concrete replacement", Quintin, Oct
+        # 8) gets no band at all: a number from the default table reads as
+        # a made-up range, which is exactly what he called it.
         return None
     if service_type in _PER_SURFACE and surface_sqft and surface_sqft > 0:
         # The scan measured the thing being washed. "Nothing measured yet"

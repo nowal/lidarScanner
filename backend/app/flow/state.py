@@ -82,6 +82,10 @@ class Slots(BaseModel):
     address: str | None = None  # never sent to the client (client_view + token both exclude it)
     contact_email: str | None = None
     contact_phone: str | None = None
+    # Sizes the homeowner typed ("my driveway is about 15 feet wide", "20 by
+    # 40"). They count as measured for the conversation and go on the
+    # request (Quintin, Oct 9: giving the width did not help).
+    homeowner_measurements: list[str] = Field(default_factory=list)
     # Set by the token codec when it strips a sensitive value from the
     # client-held token: the flow still knows the value WAS captured (so it
     # never re-asks), while the value itself lives only in the durable store
@@ -177,6 +181,17 @@ class FlowState(BaseModel):
     # A room the homeowner named that the index could not resolve: the agent
     # must say it cannot see that room rather than describe a different one.
     unresolved_room_phrase: str | None = None
+    # A room they named that is not in the index by that name, while the
+    # index holds areas the photos could not name: it is one of those, not
+    # a room that was never scanned (Quintin, Oct 5: "you never scanned the
+    # front porch", about the porch he had just scanned).
+    unnamed_room_phrase: str | None = None
+    # Which area that phrase must mean, when only one could be it. Their
+    # word names it for this thread and the agent uses it, but nothing is
+    # written to the index: "did you get the attic?" is a question, and a
+    # persisted rename off an inference is not something they can undo.
+    # An explicit naming ("that space is the mudroom") still persists.
+    unnamed_room_key: str | None = None
 
     # --- Single captures (no whole-home index) -----------------------------
     # What the capture's own photos show, from one vision pass on the first

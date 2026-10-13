@@ -760,6 +760,51 @@ class HomeIndex:
         pairs.sort()
         return "; ".join(text for _gap, text in pairs[:limit])
 
+    # How much larger than the floor's own area the rectangle may be before
+    # a width x length stops being an honest answer.
+    FOOTPRINT_SLACK = 1.25
+
+    @staticmethod
+    def footprint_feet(room: "Room") -> tuple[float, float] | None:
+        """Width x length of the floor polygon in feet, as the smallest
+        rectangle enclosing it at any angle.
+
+        A world-axis bounding box reports a rotated room wrong and
+        contradicts the area quoted beside it: a 194 sq ft room at 30
+        degrees came out "about 22 x 18 ft" (403 sq ft) on the ACTIVE ROOM
+        line, under "These ARE measurements from the scan". Rotating to each
+        polygon edge in turn is exact for a convex floor.
+
+        Returns None when the rectangle still overstates the floor by more
+        than ``FOOTPRINT_SLACK`` -- an L-shaped or open-plan room has no
+        honest width x length, and both callers drop the dimensions rather
+        than quote a pair the area contradicts.
+        """
+        if not room.polygon or len(room.polygon) < 3:
+            return None
+        points = room.polygon
+        best: tuple[float, float] | None = None
+        best_area = float("inf")
+        for i in range(len(points)):
+            (x0, z0), (x1, z1) = points[i], points[(i + 1) % len(points)]
+            edge = math.hypot(x1 - x0, z1 - z0)
+            if edge < 1e-9:
+                continue
+            cos_t, sin_t = (x1 - x0) / edge, (z1 - z0) / edge
+            us = [p[0] * cos_t + p[1] * sin_t for p in points]
+            vs = [p[1] * cos_t - p[0] * sin_t for p in points]
+            side_u, side_v = max(us) - min(us), max(vs) - min(vs)
+            if side_u * side_v < best_area:
+                best_area, best = side_u * side_v, (side_u, side_v)
+        if best is None:
+            return None
+        w, l = best[0] * 3.28084, best[1] * 3.28084
+        if w <= 0 or l <= 0:
+            return None
+        if room.area_sqft > 0 and w * l > room.area_sqft * HomeIndex.FOOTPRINT_SLACK:
+            return None
+        return (max(w, l), min(w, l))
+
     def as_text(self, exterior_keys: set[str] | None = None) -> str:
         """Compact home description for the agent's context: one line per
         room, cheap in tokens, no coordinates, uncertainty marked.
@@ -788,7 +833,15 @@ class HomeIndex:
                 # RoomPlan found nothing here. "~0 sq ft" reads as a tiny room.
                 lines.append(f"- {r.display_name}: no room structure found in this area")
                 continue
-            line = f"- {r.display_name}{hedge}: ~{round(r.area_sqft)} sq ft, {r.window_count} window opening(s)"
+            # Doors and the footprint were only on the ACTIVE ROOM line, so a
+            # home with no room in focus had no door count anywhere (Quintin,
+            # Oct 5: "doesn't know ... how many doors there are in the scan").
+            size = self.footprint_feet(r)
+            dims = f" (about {size[0]:.0f} x {size[1]:.0f} ft)" if size else ""
+            line = (
+                f"- {r.display_name}{hedge}: ~{round(r.area_sqft)} sq ft{dims}, "
+                f"{r.window_count} window opening(s), {r.door_count} door(s)"
+            )
             lines.append(line + (f", {fixtures}" if fixtures else ""))
         return "\n".join(lines)
 

@@ -59,8 +59,10 @@ from .flow.capture import geometry_less as _geometry_less
 from .flow.capture import is_exterior as _is_exterior
 from .flow.capture import surfaces_feet as _surfaces_feet
 from .flow.proofread import proofread as _proofread
+from .flow import service_rubrics
 from .flow.state import ScopeIntent
 from .flow.pricing import (
+    area_from_measurements,
     compute_price_guidance,
     parse_size_hint,
     priced_per_window,
@@ -313,6 +315,22 @@ def _gives_own_details(message: str) -> bool:
     return len(message.split()) <= 6 or bool(_OWN_CONTACT.search(message))
 
 
+def _precapture_measurements(state: FlowState, message: str) -> None:
+    """Sizes they typed, kept on the thread. "My driveway is about 15 feet
+    wide" after a scan that could not size it must land somewhere the agent
+    and the request can see (Quintin, Oct 9: it did not help)."""
+    from .flow.pricing import parse_measurements
+
+    found = parse_measurements(message)
+    if not found:
+        return
+    kept = list(state.slots.homeowner_measurements)
+    for phrase in found:
+        if phrase.lower() not in {k.lower() for k in kept}:
+            kept.append(phrase)
+    state.slots.homeowner_measurements = kept[-8:]
+
+
 def _precapture_from_message(state: FlowState, message: str) -> dict[str, str]:
     """Take contact details straight out of the homeowner's message, BEFORE
     the turn is planned.
@@ -370,7 +388,7 @@ _SAFE_TIMEOUT_COPY = (
 )
 
 _SAFE_NO_PRICE_COPY = (
-    "A real number has to come from a provider who's seen your actual space, "
+    "A real number has to come from a provider pricing it from your scan, "
     "so I won't guess at one. If you'd like, I'll package what we've "
     "discussed as a quote request and bring their figures back to you here."
 )
@@ -717,6 +735,34 @@ def _detect_room_naming(state: FlowState, index, message: str, target=None):
     return room.key, name
 
 
+_ROOM_MODIFIERS = (
+    "front", "back", "rear", "side", "screened", "screened-in", "screen", "upstairs",
+    "downstairs", "main", "guest", "primary", "master", "half", "spare", "covered",
+)
+
+
+def _room_phrase(message: str, word: str) -> str:
+    """"front porch", not just "porch", when that is what they said."""
+    m = re.search(rf"(?i)\b((?:[a-z-]+\s+)?{re.escape(word)})\b", message)
+    if not m:
+        return word
+    phrase = m.group(1).lower()
+    lead = phrase.split()[0] if " " in phrase else ""
+    return phrase if lead in _ROOM_MODIFIERS else word
+
+
+# Telling us what a space is, as opposed to asking about it. "I scanned my
+# front porch" names the area; "did you get the attic?" does not, and only
+# the first may write a name into the index.
+# ponytail: a word list, not intent parsing. Anything it misses is still
+# handled for the thread, just not persisted -- the safe direction.
+_ROOM_NAMING = re.compile(
+    r"(?i)\b(?:i|we)\s+(?:just\s+|already\s+)?"
+    r"(?:scanned|scan|walked|captured|recorded|did|got|have|added)\b"
+    r"|\b(?:it|that|this)(?:'s|s| is| was)\s+(?:the|my|our)\b"
+)
+
+
 def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
     """Attach the whole-home index and track which room is being discussed.
 
@@ -739,10 +785,10 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
     if index is None:
         return None
 
-    # A staged context ZIP also creates an index for a single exterior
-    # capture. Keep that capture in focus so its appearance reaches the
-    # opener and later quote measurements without requiring a room name.
-    if not state.active_room_key and len(index.rooms) == 1 and _is_exterior(state, index.rooms[0]):
+    # One area is the subject whether or not they name it: a lone porch
+    # with no room in focus had no door count, no sizes and no wall area in
+    # front of the agent (Quintin, Oct 5).
+    if not state.active_room_key and len(index.rooms) == 1:
         state.active_room_key = index.rooms[0].key
 
     # "that little room" is how a homeowner points at the space the scan
@@ -750,6 +796,52 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
     room, unresolved = index.mentioned_room(request.message or "")
     if room is None and not unresolved:
         room = index.small_unnamed_room(request.message or "")
+    state.unnamed_room_phrase = None
+    state.unnamed_room_key = None
+    if room is None and unresolved:
+        # "I scanned my front porch": the index holds areas the photos could
+        # not name, and their word is the name. Telling them the porch they
+        # just scanned is "not in the scan" was the Oct 5 report.
+        phrase = _room_phrase(request.message or "", unresolved)
+        candidates = [
+            r for r in index.rooms
+            if not r.named_by_homeowner and (not r.confident or _is_exterior(state, r))
+        ]
+        if candidates:
+            state.unnamed_room_phrase = phrase
+            unresolved = None
+            if len(candidates) == 1:
+                # Only one area can be the space they mean, so it is the
+                # subject either way: its footprint and door count go in
+                # front of the model instead of nothing (Oct 5).
+                state.unnamed_room_key = candidates[0].key
+                state.active_room_key = candidates[0].key
+                if _ROOM_NAMING.search(request.message or ""):
+                    # "I scanned my front porch", "it's the exterior of the
+                    # garage": they are telling us what the space is. Their
+                    # word is the name and it keeps.
+                    outside = _is_exterior(state, candidates[0])
+                    renamed = index.rename_room(candidates[0].key, phrase)
+                    if renamed is not None:
+                        if outside:
+                            # "the exterior of the garage": their word names
+                            # it AND it stays the outside of a building.
+                            renamed.role = "exterior"
+                        from .flow.home_registry import save_index
+
+                        save_index(state.home_id, index)
+                        logger.info("Homeowner's word names the one unnamed area %s '%s' (home=%s)",
+                                    candidates[0].key, phrase, state.home_id)
+                        room, unresolved = renamed, None
+                        state.unnamed_room_phrase = None
+                        state.unnamed_room_key = None
+                else:
+                    # "did you get the attic?" asks a question, it does not
+                    # give a name. Their word is used for this thread and
+                    # the index is left alone: a rename written off an
+                    # inference is not something the homeowner can undo.
+                    logger.info("Homeowner's word '%s' must mean the one unnamed area %s, "
+                                "thread-scoped (home=%s)", phrase, candidates[0].key, state.home_id)
 
     # "that space you called unnamed area 1 is the mudroom": the room the
     # message names is the one being named, not whichever was in focus.
@@ -779,6 +871,13 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
             else 1
         )
         state.unresolved_room_phrase = unresolved
+    elif state.unnamed_room_phrase:
+        # It IS in the scan, as one of the areas the photos could not name.
+        # Leaving a stale phrase here put both directives in one prompt:
+        # "NEVER say it is not in the scan" next to "which is NOT in the
+        # scan", about the same space.
+        state.unresolved_room_phrase = None
+        state.unresolved_room_turns = 0
     elif state.unresolved_room_phrase:
         # Still stuck on it. The follow-ups in a dead end ("ok how?",
         # "which room is closest?") rarely repeat the room's name, and
@@ -1242,6 +1341,33 @@ def _home_directives(state: FlowState, index) -> list[str]:
         "fixtures. Use the name naturally, but if the conversation turns on "
         "which room it is, ask rather than asserting.",
     ]
+    if state.unnamed_room_phrase:
+        named = index.by_key(state.unnamed_room_key) if state.unnamed_room_key else None
+        if named is not None:
+            # Only one area could be the space they mean, so say which, and
+            # use their word for it from here. Still a thread-scoped name:
+            # if they correct it, take the correction, nothing was written.
+            lines.append(
+                f"- They call a space the {state.unnamed_room_phrase}, and it is "
+                f"the area listed above as '{named.display_name}' — the only one "
+                "it can be. NEVER say it is not in the scan or was not scanned. "
+                f"Call it the {state.unnamed_room_phrase} from here, and use its "
+                "measurements as that space's. If they say it is somewhere else, "
+                "accept that immediately."
+            )
+        else:
+            count = sum(
+                1 for r in index.rooms
+                if not r.named_by_homeowner and (not r.confident or r.key in exterior_keys)
+            )
+            lines.append(
+                f"- They call a space the {state.unnamed_room_phrase}. It is not listed "
+                f"under that name because the photos could not name {count} of the "
+                "areas above (marked exterior, name uncertain, or no room structure); "
+                "it is one of those. NEVER say it is not in the scan or was not "
+                "scanned. Use their name for it, and if it matters which area it is, "
+                "ask them which."
+            )
     room = index.by_key(state.active_room_key) if state.active_room_key else None
     if room is not None:
         fixtures = ", ".join(f"{n} {c}" for c, n in room.objects.most_common(6))
@@ -1259,12 +1385,27 @@ def _home_directives(state: FlowState, index) -> list[str]:
                 )
             if room.window_count:
                 detail += f", {room.window_count} window opening(s)"
+        elif _geometry_less(room):
+            detail = (
+                f"- ACTIVE AREA: the {room.display_name} — the scan found no room "
+                "structure here (no walls or floor plan; often outdoors or one open "
+                "space). Never call it a room or give it a size; ask what it is if "
+                "that matters"
+            )
         else:
+            size = index.footprint_feet(room)
+            dims = f" (about {size[0]:.0f} x {size[1]:.0f} ft)" if size else ""
             detail = (
                 f"- ACTIVE ROOM: the {room.display_name} — about "
-                f"{round(room.area_sqft)} sq ft, {room.window_count} window opening(s), "
+                f"{round(room.area_sqft)} sq ft{dims}, {room.window_count} window opening(s), "
                 f"{room.door_count} door(s)"
             )
+            geometry = room.measurements or {}
+            if geometry.get("mean_wall_height_m"):
+                detail += f"; walls about {float(geometry['mean_wall_height_m']) * 3.28084:.0f} ft high"
+            if geometry.get("paintable_sqft"):
+                detail += f", about {float(geometry['paintable_sqft']):,.0f} sq ft of paintable wall"
+            detail += ". These ARE measurements from the scan: use them"
         if room.window_openings:
             sizes = ", ".join(
                 f"{w * 3.28084:.1f} x {h * 3.28084:.1f} ft" for w, h in room.window_openings[:8]
@@ -1292,10 +1433,15 @@ def _home_directives(state: FlowState, index) -> list[str]:
                 "another. If they ask what is next to it, say so plainly, ask "
                 "them which room it is, and use their answer from then on."
             )
-        appearance_lines = _appearance_directives(state.home_id, room)
-        if room.key in exterior_keys and room.role != "exterior":
-            # Exterior on the homeowner's word: there is no photo pass to quote.
+        from .flow import home_registry
+
+        if room.key in exterior_keys and not home_registry.room_context_for(state.home_id, room.key):
+            # Exterior with no photo pass to quote (the homeowner's word, or
+            # a pass that never ran): "this room's SHAPE ONLY" is the wrong
+            # line for the outside of a building.
             appearance_lines = _photo_lines({"setting": "exterior", "structure": ""}, "this capture")
+        else:
+            appearance_lines = _appearance_directives(state.home_id, room)
         lines.extend(appearance_lines)
         if room.key in exterior_keys and (surface := _surface_line(state)):
             lines.append(surface)
@@ -1492,11 +1638,37 @@ def _build_directives(
         # Quintin, Oct 1: "A provider will measure on site for the real
         # number" -- to someone using the app to avoid exactly that.
         "- NEVER tell the homeowner that a provider will have to measure, "
-        "visit, or estimate on site or in person: pricing from the scan, "
-        "without a site visit, is the reason they are here. If something was "
-        "not measured, say what the scan did capture and that providers price "
-        "from the scan, its photos and what they have told you.",
+        "visit, or estimate on site or in person, or that a provider needs "
+        "to see something before pricing it: pricing from the scan, without "
+        "a site visit, is the reason they are here. The request carries the "
+        "3D model, the photos and the measurements, and providers price from "
+        "those plus what they have told you. If something was not measured, "
+        "say what the scan did capture; never that someone has to come and "
+        "look.",
+        # The handoff agreed on the Oct 9 call: a rough range and "this gets
+        # done for you" beat another question.
+        "- WHEN A MEASUREMENT OR DETAIL IS MISSING: say so in a clause, give "
+        "the rough range you have, and tell them the providers take their "
+        "measurements from the 3D scan they already made, so there is no "
+        "tape measure and no walkthrough for them. Prefer that to asking "
+        "another question; ask only when the answer would change the price "
+        "band materially, and never more than one question per reply."
+        + (
+            " If they really want more accuracy, they are welcome to measure "
+            "the 3D model themselves; mention it once, as an option, never as "
+            "something they must do."
+            if settings.model_measure_tool_available else ""
+        ),
     ]
+    if state.slots.homeowner_measurements:
+        lines.append(
+            "- MEASUREMENTS THEY GAVE YOU, in their words: "
+            + "; ".join(state.slots.homeowner_measurements)
+            + ". These count as measured for this conversation: use them, thank "
+            "them once, never say you cannot size it, and they go on the "
+            "request. If one dimension is still missing for an area, say which "
+            "one, or simply let the providers take it from the scan."
+        )
     if home_index is not None:
         lines.extend(_home_directives(state, home_index))
         # Their word for a room beats the scan's label, and which words are
@@ -1616,6 +1788,23 @@ def _build_directives(
             + "and ask for their first name only. "
             f"{FIRST_NAME_WORDING.guidance} Keep it under 80 words."
         )
+
+    # The service rubric: what a provider needs, what the scan supplies, what
+    # to ask (Quintin's rubric document, Oct 6; flow/service_rubrics.py).
+    rubric = service_rubrics.rubric_for(state.slots.project_type, list(state.slots.scope_options))
+    if rubric is not None and settings.rubric_directive_enabled:
+        exterior_capture = (state.scan_appearance or {}).get("setting") == "exterior" or bool(
+            home_index is not None and any(_is_exterior(state, r) for r in home_index.rooms)
+        )
+        room_measured = bool(home_index is not None and home_index.rooms) or bool(
+            (state.scan_mesh_bounds or {}).get("roomCount")
+        )
+        lines.append(service_rubrics.directive(
+            rubric,
+            room_measured=room_measured,
+            surfaces_measured=_surfaces_feet(state) is not None,
+            exterior_capture=exterior_capture,
+        ))
 
     # SOW §3 hard constraint, then the stated scope narrows an open gate.
     continuity = (
@@ -1798,8 +1987,8 @@ def _build_directives(
                 "their area that you looked up just now, and you may say so "
                 "plainly. Do NOT tell them you cannot look prices up or "
                 "search the web. What you cannot do is produce a real QUOTE "
-                "that way: a quote is priced by a provider who has seen the "
-                "space, and it comes back through the request."
+                "that way: a quote is priced by a provider working from their "
+                "scan, and it comes back through the request."
             )
         # Not when real quotes are also going out this turn: those ARE quotes,
         # and telling the model to call them a ballpark undersells them.
@@ -1825,7 +2014,7 @@ def _build_directives(
                 "screen. Never answer a cost question with a flat refusal: you "
                 "CAN give a rough range, and a wide honest one is the answer. "
                 "Stress it is wide on purpose and that a real local provider "
-                "has to see the space for a true price. Call it a rough "
+                "prices it from their scan for a true price. Call it a rough "
                 "ballpark and never a quote -- a quote is a real price for "
                 "their home and only comes back after you send their request "
                 "out and a provider prices it. If they are NOT asking about "
@@ -1851,16 +2040,33 @@ def _build_directives(
                 "is shown on their screen alongside this message, so do not "
                 "mention a card or tell them to look at one — if you do not say "
                 "the numbers, they never see them. Stress the range is wide on "
-                "purpose and that a real local provider has to look at the space "
-                "for a true price. State no other numbers."
+                "purpose and that a real local provider prices it from their "
+                "scan for a true price. State no other numbers."
             )
-            if "nothing measured yet" in price_guidance.basis:
-                lines.append(
-                    "- That range is wide because nothing about their home has been "
-                    "measured yet. Say so plainly, then offer ONE way to narrow it — "
-                    "either they tell you the rough size (square footage or number of "
-                    "rooms) or they scan the space. Offer, do not insist."
+        if not price_guidance.options and "nothing measured yet" in price_guidance.basis:
+            # Whichever way the question arrived (regex or the model's own
+            # judgement), an unmeasured band gets the handoff clause, not a
+            # size question (Oct 9 call).
+            lines.append(
+                "- That range is wide because this was not measured. Say so in "
+                "a clause, then say the providers take their measurements from "
+                "the 3D scan, so it gets done for them: no tape measure, no "
+                "walkthrough. If they volunteer a rough size, use it; do not "
+                "ask for one."
+                + (
+                    " If they really want more accuracy, they are welcome to "
+                    "measure the 3D model themselves; the providers will do it "
+                    "from the model either way."
+                    if settings.model_measure_tool_available else ""
                 )
+            )
+    elif state.slots.project_type and not service_rubrics.in_catalog(state.slots.project_type):
+        lines.append(
+            f"- You have NO pricing data for {state.slots.project_type}: give no "
+            "figure and no range, say so plainly, and say local providers can "
+            "price it from the scan and the request. Never borrow a range from "
+            "another trade."
+        )
     else:
         lines.append(
             "- Never state prices, cost ranges, or estimates yourself. If cost "
@@ -1906,6 +2112,11 @@ def _build_directives(
             "where their address goes; the provider they pick gets what they "
             "did share."
         )
+        lines.append(
+            "- Once, when you present these, say what a quote does and does not "
+            "cover, in your own words and in a sentence or two: "
+            + service_rubrics.HOMEOWNER_CONCEALED_WORDING
+        )
         if 0 < new_quote_count < len(quotes_to_present):
             lines.append(
                 f"- {new_quote_count} new quote(s) just arrived — the LAST "
@@ -1920,7 +2131,7 @@ def _build_directives(
                 "them exactly that way: 'here's roughly what this runs in your "
                 "area, and a couple of real local painters you could go "
                 "through.' Do not say a business 'quoted' a price. Remind them "
-                "a real quote comes once a provider sees the space."
+                "a real quote comes once a provider prices it from their scan."
                 + address_line
                 + " Data: "
                 + json.dumps(quotes_to_present, ensure_ascii=True)
@@ -1985,8 +2196,9 @@ def _build_directives(
             "NOT make the people working behind you the story (no 'a person "
             "on my team reviews every request'). You never claim to have "
             "done the pricing yourself. NEVER promise a specific turnaround "
-            "time (no hour or day figures). Final prices land within about "
-            "10% of the quote once a provider has seen the space. Don't "
+            "time (no hour or day figures). The providers take their "
+            "measurements from the scan, so there is nothing more for them to "
+            "measure; final prices land within about 10% of the quote. Don't "
             "re-collect project details unless they want to change "
             "something."
         )
@@ -2115,7 +2327,9 @@ def _build_directives(
                 "so YOU can get real pricing from local companies for them, "
                 "and then wait for their answer. Say it as something you do "
                 "for them ('I'll get pricing from local companies'), never as "
-                "a hand-off to a team. Do NOT present, describe, or promise a "
+                "a hand-off to a team. Say in a clause that the providers take "
+                "their measurements from the 3D scan, so there is nothing more "
+                "for them to measure. Do NOT present, describe, or promise a "
                 "request card this turn: nothing goes anywhere until they say "
                 "yes."
             )
@@ -2133,7 +2347,9 @@ def _build_directives(
                 "a quoteDraft in your reply, the app displays it as a card "
                 "IMMEDIATELY in this same message with a Confirm button — so "
                 "present it ('here is the request, look it over and confirm when "
-                "ready'), never ask whether you should draft it."
+                "ready'), never ask whether you should draft it. Say once that "
+                "the providers take their measurements from the 3D scan, so "
+                "there is nothing more for them to measure."
             )
         else:
             lines.append(
@@ -2829,7 +3045,11 @@ async def _maybe_price_guidance(
     # a reason to refuse a ballpark.
     area, area_label = _active_room_area_sqft(state, home_index)
     if area is None:
-        area = _total_floor_area_sqft(request.homeContext) or parse_size_hint(request.message)
+        area = (
+            _total_floor_area_sqft(request.homeContext)
+            or parse_size_hint(request.message)
+            or area_from_measurements(state.slots.homeowner_measurements)
+        )
     windows = _window_count(state, home_index, request.homeContext)
 
     # A trade priced by the surface being worked, on a capture whose
@@ -2838,6 +3058,11 @@ async def _maybe_price_guidance(
     from .flow.pricing import priced_by_surface
 
     surfaces = _surfaces_feet(state) if priced_by_surface(service) else None
+    if surfaces is None and priced_by_surface(service):
+        # No mesh number, but they told us a size: that is the surface.
+        given = area_from_measurements(state.slots.homeowner_measurements)
+        if given:
+            surfaces = {"ground": given, "given": True}
     if surfaces:
         total = round(surfaces.get("upright", 0.0) + surfaces.get("ground", 0.0))
         pinned = state.price_guidance_snapshot
@@ -2848,6 +3073,8 @@ async def _maybe_price_guidance(
             for key, label in (("upright", "upright"), ("ground", "level ground"))
             if surfaces.get(key)
         )
+        if surfaces.get("given"):
+            note = f"≈{total:,.0f} sq ft, the size they gave you"
         measured = compute_price_guidance(service, None, surface_sqft=total, surface_note=note)
         if measured is not None:
             state.price_guidance_snapshot = {
@@ -3229,6 +3456,7 @@ async def _run_flow_turn_locked(
             state.request_accepted = True
         # Same reason, for the other half of the card's preconditions.
         precapture = _precapture_from_message(state, request.message)
+        _precapture_measurements(state, request.message)
         # And for scope: "just the porch" has to reach THIS reply's
         # directives, or the reply asks the question it was just answered
         # (Quintin, Oct 1: asked twice back to back).

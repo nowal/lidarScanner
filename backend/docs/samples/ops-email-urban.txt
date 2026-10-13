@@ -24,6 +24,24 @@ MEASUREMENTS
   wallCount: 4
   windowCount: 2
 
+PROVIDER FIELDS (Painting)
+  What a quote needs, when applicable:
+  - Scope and surfaces: interior or exterior; rooms or elevations; walls, ceilings, doors, cabinets, trim; exclusions
+  - Measurements: wall length x height by room or elevation; ceiling area; linear feet and profile of baseboards, crown, casings, railings
+  - Openings and details: doors, windows, built-ins, stairwells, accent walls, high or vaulted ceilings, complex cut-in edges
+  - Existing condition: peeling, holes, cracks, water stains, grease, mildew, wallpaper, texture, bare or previously coated surfaces
+  - Preparation: cleaning, scraping, sanding, patching, caulking, priming, wallpaper removal; whether repairs are included
+  - Finish: colour changes, number of colours and coats, sheen, product grade, stain versus paint, customer-supplied materials
+  - Protection and access: furniture, decor, fixtures, landscaping, flooring, occupied rooms, ladders or lifts, who moves items
+  - Exterior specifics: siding material, height, exposure, shutters, fascia and soffits, substrate repairs
+  - Execution: work hours, drying and curing, cleanup, waste, schedule, touch-up boundaries
+  From the scan: floor area ~214 sq ft; 2 window opening(s).
+  From the homeowner: walls + trim; ceiling; low-VOC eggshell (and the synopsis above).
+  Anything not covered above is UNKNOWN: ask through the app rather than assume.
+  Quote rule: Request a virtual quote once scope, usable dimensions, preparation and finish are resolved or priced as named options. Possible hidden substrate or moisture issues are disclosed under the change process; a visible active problem or an uncertain specialty coating needs provider review rather than a caveat.
+  Concealed conditions: This scope uses the attached scan measurements, key frames and homeowner answers, with their sources and limitations identified. Concealed conditions have not been verified. Please state what the base price includes, any allowances or unit rates, required checks and exclusions. Document newly discovered issues and obtain homeowner approval of price or schedule changes before additional work.
+  In your quote, please state: your business name and confirmation that you serve this area; the quote request ID; price and its basis; included work and options; taxes or fees, deposit and payment terms, validity, warranty, estimated duration and available appointment windows; assumptions and exclusions; and whether you accept the supplied measurements or need a specific verification (say which).
+
 3D MODEL · ORIGINAL USDZ DOWNLOAD
   https://storage.example.com/home-assets/flow-models/sample.usdz?token=sample
   (Signed link, valid ~30 days; no credentials needed.)
@@ -55,7 +73,7 @@ SUGGESTED PROVIDERS
   Ratings and review counts via Google Places. Yelp, Facebook, Instagram and Nextdoor are profile links only -- never scraped; a missing number is unknown, not zero.
 
 ENTER THE CHECKED QUOTE
-  https://ops.example.com/api/v1/ops/entry/qr_sample_urban/1792517357/ff626c16fd1b256602e6df2d6500a1d9ea208b659538ced80d455984fa3c3118
+  https://ops.example.com/api/v1/ops/entry/qr_sample_urban/1792778667/9d58c89555d7784094067e2fb4576c2d6e29881f208f000e6acb1c4aced30e06
   (link is signed for this request and expires in 14 days; the quote
   you enter is presented to the homeowner in the app automatically)
 
