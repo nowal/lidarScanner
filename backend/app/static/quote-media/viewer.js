@@ -11,6 +11,7 @@ const dialog = document.getElementById('photo-dialog');
 const photoImage = document.getElementById('photo-image');
 const form = document.getElementById('quote-form');
 const uploadStatus = document.getElementById('upload-status');
+const measurements = new ModelMeasurements(viewer);
 let snapshot, selected = 0, rendered = false, attempts = 0, activePhoto, photoOpener;
 let submissionId = crypto.randomUUID(), submitting = false;
 const vector = p => p.map(n => `${n}m`).join(' ');
@@ -46,7 +47,7 @@ dialog.addEventListener('keydown', e => {
 });
 photoImage.addEventListener('error', () => { document.getElementById('photo-error').hidden = false; });
 function renderPhotos() {
-  viewer.querySelectorAll('[slot^="hotspot"]').forEach(el => el.remove());
+  viewer.querySelectorAll('.camera-pin, .direction-point').forEach(el => el.remove());
   directions.querySelectorAll('line').forEach(el => el.remove());
   const gallery = document.getElementById('photos');
   gallery.replaceChildren();
@@ -91,14 +92,16 @@ function updateDirections() {
 }
 function toggleCameras() {
   viewer.classList.toggle('hide-cameras', !cameras.checked);
-  directions.toggleAttribute('hidden', !cameras.checked || viewer.hidden);
+  directions.toggleAttribute('hidden', !cameras.checked || viewer.hidden || measurements.enabled);
   updateDirections();
 }
 cameras.addEventListener('change', toggleCameras);
+viewer.addEventListener('measurement-mode-change', toggleCameras);
 viewer.addEventListener('camera-change', updateDirections);
 new ResizeObserver(updateDirections).observe(viewer);
 function showModel() {
   const model = snapshot.models[selected];
+  measurements.setModel(model?.key, model?.status === 'ready');
   if (!model) { statusText.textContent = 'No textured model was available for this scope. The saved scan photos are below.'; select.hidden = true; return; }
   original.hidden = false; original.href = `${base}/models/${selected}/usdz`;
   glb.hidden = model.status !== 'ready'; glb.href = `${base}/models/${selected}/glb`;

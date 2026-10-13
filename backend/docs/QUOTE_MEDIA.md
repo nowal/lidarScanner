@@ -126,8 +126,9 @@ Polling neither inserts a synthetic chat message nor changes scroll position.
    backend. It adds a service-role-only table with RLS and parent deletion cascade;
    no existing Storage policy/bucket change is needed. Reads fail explicitly if
    this table is unavailable rather than presenting an empty response list.
-2. Deploy this backend and install the updated iOS build. TestFlight build 13
-   predates these mobile changes.
+2. Deploy this backend and install the updated iOS build. TestFlight build 14 includes the homeowner UI; the backend deployment and
+   response-table migration are separate requirements. A TestFlight upload does
+   not publish this provider web viewer.
 3. Use a current quote-request viewer link. For existing emails the saved scan
    remains fixed; camera metadata can be recovered without resending the email.
 4. Check markers against recognizable features in the real scan, open a camera,
@@ -163,3 +164,45 @@ pass, including date persistence, invalid calendar dates, changed-date retries,
 and compatibility with existing quotes. Browser verification submits a dated PDF
 and confirms the same calendar date in the homeowner API. Both iOS calendar-date
 unit tests and the updated dashboard/PDF UI test pass.
+
+
+## Provider measurements and integrated rollout (October 13)
+
+The provider viewer's Measure button enables two-point surface measurements in
+feet and inches, rounded to the nearest inch. It uses model-space metres from the
+GLB, including the converter's USD stage-unit scaling. Providers can keep multiple
+measurements, drag either endpoint, select/delete one or clear all. Orbit/pan/zoom
+still work between picks; blank-space clicks and navigation drags do not add points.
+Camera markers are hidden while measuring and return on Done. Photo dialogs and
+camera toggles preserve the measurements. Each area keeps its own measurements
+for the lifetime of the page; refreshing clears them. There is no server write,
+measurement export, geometry modification, or new native dependency.
+
+Picking uses the pinned model-viewer 4.1.0 surface raycast and its visible mesh
+materials. The browser does not use the native SceneKit ceiling-clipping shader.
+Source/API reference: [model-viewer annotations](https://github.com/google/model-viewer/blob/v4.1.0/packages/model-viewer/src/features/annotation.ts).
+
+Integrated with backend main `fb2195c` (including PR #10's provider handoff and
+PR #11's assistant scan-update replies). The combined backend passes **1,278 tests,
+2 skipped**; the newer main also contains the clock fixes for the older ranking
+fixture failures recorded above.
+
+Applied the provider response migration to TakeShapeApp (`pxnbfdsyuzweevkvremi`)
+as remote version `20261013200344_provider_pdf_responses`. The live SQL check in
+`backend/tests/sql/provider_pdf_responses.sql` passed RLS/grants, calendar-date
+persistence, duplicate receipt rejection and cascade deletion, rolling back all
+synthetic rows.
+
+Browser verification uses a synthetic six-metre-wide room with known coordinates:
+
+```sh
+PYTHONPATH=backend .venv/bin/python backend/tests/browser/serve_quote_media_preview.py
+# In a second terminal with Playwright installed and Chrome available:
+node backend/tests/browser/quote_media_measurements.cjs
+```
+
+`PLAYWRIGHT_MODULE` can point to an existing Playwright package. The fixture binds
+to localhost and disables production credentials. Tests use real pointer input
+and check known metre distances, endpoint adjustments, multiple measurements,
+sky rejection, orbit gestures, camera/photo coexistence, per-area restoration,
+clear/cancel and a narrow viewport. `PROVIDER_SCREENSHOT` optionally saves a PNG.

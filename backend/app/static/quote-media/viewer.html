@@ -2,13 +2,17 @@
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>TakeShape · Provider workspace</title>
 <link rel="stylesheet" href="/api/v1/quote-media-assets/viewer.css">
 <script type="module" src="/api/v1/quote-media-assets/model-viewer.min.js"></script>
+<script defer src="/api/v1/quote-media-assets/measurements.js"></script>
 <script defer src="/api/v1/quote-media-assets/viewer.js"></script></head>
 <body><main><header><span class="brand">TakeShape</span><span>Provider workspace</span></header>
 <h1>Explore the scan</h1><p id="revision">Loading scan details…</p>
 <section aria-label="3D model"><div class="toolbar"><label for="models">Area</label><select id="models"></select><label class="camera-toggle"><input id="cameras" type="checkbox" checked> Show cameras</label><a id="usdz" hidden>Download original USDZ</a><a id="glb" hidden>Download GLB</a></div>
 <p id="status" role="status">Preparing the desktop viewer…</p>
+<div class="measurement-toolbar" role="group" aria-label="Model measurements"><button id="measure" type="button" aria-pressed="false" disabled>Measure</button><button id="cancel-point" type="button" hidden>Cancel point</button><button id="delete-measurement" type="button" disabled>Delete selected</button><button id="clear-measurements" type="button" disabled>Clear all</button></div>
+<p id="measurement-hint" class="hint" role="status"></p>
 <div class="model-stage"><model-viewer id="viewer" camera-controls touch-action="pan-y" interaction-prompt="auto" shadow-intensity="0" exposure="1" camera-orbit="35deg 65deg auto" alt="Textured scan of the requested area" hidden></model-viewer>
-<svg id="directions" aria-hidden="true" hidden><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#28704b"/></marker></defs></svg></div>
+<svg id="directions" aria-hidden="true" hidden><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#28704b"/></marker></defs></svg><svg id="measurement-lines" aria-hidden="true"></svg></div>
+<div id="measurement-list" role="group" aria-label="Saved measurements"></div>
 <p id="camera-hint" class="hint"></p><p class="hint">Drag to orbit · scroll to zoom · right-drag to pan.</p></section>
 <section aria-label="Scan photos"><h2>Scan photos</h2><p>Selected views from this area of the saved scan.</p><div id="photos" class="gallery"></div></section>
 <section aria-label="Send your quote"><h2>Send your quote</h2><p>Upload your estimate as a PDF. The homeowner can open it directly from their dashboard.</p>

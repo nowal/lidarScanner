@@ -22,7 +22,7 @@ STATIC = Path(__file__).parent / 'static' / 'quote-media'
 
 @router.get('/quote-media-assets/{filename}')
 async def asset(filename: str):
-    if filename not in ('viewer.js', 'viewer.css', 'model-viewer.min.js'):
+    if filename not in ('viewer.js', 'viewer.css', 'measurements.js', 'model-viewer.min.js'):
         raise HTTPException(404)
     return FileResponse(STATIC / filename, headers={'X-Content-Type-Options': 'nosniff'})
 
