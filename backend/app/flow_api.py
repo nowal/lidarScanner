@@ -44,6 +44,7 @@ from .flow_runtime import (
 )
 from .home_ai import HomeAIChatResponse, HomeAIContextPacket
 from .models import SCHEMA_VERSION, now_utc
+from .flow.scan_updates import ScanUpdateRequest
 
 logger = logging.getLogger("lidarai.flow.api")
 
@@ -111,6 +112,15 @@ async def home_ai_opening(
     return await run_opening_turn(
         request_body, homeowner_id=await homeowner_id_from_header(x_homeowner_token)
     )
+
+
+@router.post('/ai/home-chat/scan-update', dependencies=[Depends(require_token)])
+async def home_ai_scan_update(
+    body: ScanUpdateRequest, x_homeowner_token: Optional[str] = Header(default=None),
+) -> dict:
+    from .flow import scan_updates
+    owner = await _scan_upload_owner(str(body.homeId), x_homeowner_token)
+    return await scan_updates.run(body, owner)
 
 
 # --------------------------------------------------------------------------

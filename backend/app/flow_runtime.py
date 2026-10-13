@@ -3885,6 +3885,8 @@ async def _run_opening_turn_locked(
             home_index = _reconcile_home(state, request)
     scan_visible = _scan_visible(state, request, home_index)
     state.opened_blind = not scan_visible
+    if home_index is not None and home_index.upload.get("contextReady"):
+        state.opening_scan_revision = home_index.upload.get("revision")
     plan = _engine.plan_turn(state, None)
     directives = _build_directives(
         state, plan, opening=True, price_guidance=None, quotes_to_present=None,
