@@ -93,7 +93,11 @@ assert.equal(new URL(url).hostname, '127.0.0.1');
     });
     const ta = await screen([-1, 1, -2]), tb = await screen([1, 1, -2]);
     await page.touchscreen.tap(ta.x, ta.y); await page.touchscreen.tap(tb.x, tb.y);
-    assert.match(await page.locator('#measurement-list').textContent(), /6 ft 7 in/);
+    assert.equal(await page.locator('.measurement-endpoint').count(), 2);
+    const touchPoints = await page.locator('.measurement-endpoint').evaluateAll(nodes => nodes.map(n => n.dataset.position.split(' ').map(parseFloat)));
+    // Touch client coordinates are rounded to pixels. At this narrow viewport,
+    // each pixel covers several centimetres of the six-metre room.
+    assert.ok(Math.abs(Math.hypot(...touchPoints[0].map((v, i) => v - touchPoints[1][i])) - 2) < 0.08);
     assert.deepEqual(errors, []);
     console.log('PASS: metre-based distances, endpoint drag, multiple measurements, sky rejection, orbit gestures, selection/delete, camera photos, area restoration, clear/cancel, narrow layout and touch input.');
   } finally { await browser.close(); }
