@@ -344,7 +344,8 @@ async def get_quote_request(
     if record is None:
         raise HTTPException(status_code=404, detail="Quote request not found")
     await _require_homeowner_access(record, x_homeowner_token)
-    return JSONResponse(record.homeowner_view())
+    from .flow.provider_responses import homeowner_view
+    return JSONResponse(await homeowner_view(record), headers={'Cache-Control': 'private, no-store'})
 
 
 class QuoteSelection(BaseModel):
@@ -522,6 +523,7 @@ async def ops_delete_quote(request_id: str, quote_id: str) -> JSONResponse:
     remaining = [q for q in record.quotes if q.id != quote_id]
     if len(remaining) == len(record.quotes):
         raise HTTPException(status_code=404, detail="Quote not found on this request")
+    record.removedProviderQuoteIds.append(quote_id)
     record.quotes = remaining
     if record.selectedQuoteId == quote_id:
         record.selectedQuoteId = None

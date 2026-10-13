@@ -86,6 +86,8 @@ class QuoteDocument(BaseModel):
     byteCount: int = Field(ge=0)
     contentType: str = "application/pdf"
     url: Optional[str] = None
+    storageBucket: Optional[str] = None
+    storagePath: Optional[str] = None
     uploadedAt: str = Field(default_factory=lambda: now_utc().isoformat())
 
 
@@ -117,8 +119,8 @@ class ReturnedQuote(BaseModel):
     def _sane_prices(self) -> "ReturnedQuote":
         has_fixed = self.priceUsd is not None
         has_range = self.priceLowUsd is not None and self.priceHighUsd is not None
-        if not (has_fixed or has_range):
-            raise ValueError("a quote needs priceUsd, or both priceLowUsd and priceHighUsd")
+        if not (has_fixed or has_range or self.document):
+            raise ValueError("a quote needs a PDF document, priceUsd, or both priceLowUsd and priceHighUsd")
         for value in (self.priceUsd, self.priceLowUsd, self.priceHighUsd):
             if value is not None and value < 0:
                 raise ValueError("quote prices cannot be negative")
@@ -137,7 +139,7 @@ class ReturnedQuote(BaseModel):
             "notes": self.notes,
             "validUntil": self.validUntil,
             "isEstimate": self.isEstimate,
-            "document": self.document.model_dump() if self.document else None,
+            "document": self.document.model_dump(exclude={'storageBucket', 'storagePath'}) if self.document else None,
             "decision": self.decision,
             "decisionNote": self.decisionNote,
             "decidedAt": self.decidedAt,
@@ -180,6 +182,7 @@ class QuoteRequestRecord(BaseModel):
     opsEmailPayload: dict[str, Any] = Field(default_factory=dict)
     quoteDraft: dict[str, Any] = Field(default_factory=dict)
     quotes: list[ReturnedQuote] = Field(default_factory=list)
+    removedProviderQuoteIds: list[str] = Field(default_factory=list)
     selectedQuoteId: Optional[str] = None
     # Lead-email delivery, durable with the record: a package queued but not
     # yet sent when the process restarts is re-queued at the next startup
@@ -318,24 +321,43 @@ class QuoteRequestStore:
             logger.warning("Could not read quote request %s: %s", request_id, exc)
             return None
 
-    async def get(self, request_id: str) -> QuoteRequestRecord | None:
+    async def get(self, request_id: str, *, include_provider_responses: bool = True) -> QuoteRequestRecord | None:
         durable = await supabase_store.get_quote_request(request_id)
         if durable is not None:
             try:
-                return QuoteRequestRecord.model_validate(durable)
+                record = QuoteRequestRecord.model_validate(durable)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Bad durable quote request %s: %s", request_id, exc)
-        return self._get_local(request_id)
+            else:
+                return await self._with_provider_responses(record) if include_provider_responses else record
+        record = self._get_local(request_id)
+        return await self._with_provider_responses(record) if record and include_provider_responses else record
+
+    async def _with_provider_responses(self, record: QuoteRequestRecord) -> QuoteRequestRecord:
+        from .flow.provider_responses import responses
+        # Independent immutable rows survive stale saves of the parent request.
+        # A decision saved on the parent takes precedence for that quote ID.
+        known = {q.id for q in record.quotes} | set(record.removedProviderQuoteIds)
+        for quote in await responses(record.id):
+            if quote.id not in known:
+                record.quotes.append(quote)
+                known.add(quote.id)
+                if record.status != 'closed':
+                    record.status = 'quotes_ready'
+        return record
 
     async def list(self, status: str | None = None) -> list[QuoteRequestRecord]:
-        durable = await supabase_store.list_quote_requests(status)
+        durable = await supabase_store.list_quote_requests()
         if durable is not None:
             records = []
             for raw in durable:
                 try:
-                    records.append(QuoteRequestRecord.model_validate(raw))
+                    record = QuoteRequestRecord.model_validate(raw)
                 except Exception:  # noqa: BLE001
                     continue
+                record = await self._with_provider_responses(record)
+                if status is None or record.status == status:
+                    records.append(record)
             return records
         records = []
         for path in sorted(self._dir().glob("*.json")):
@@ -345,6 +367,7 @@ class QuoteRequestStore:
                 )
             except Exception:  # noqa: BLE001
                 continue
+            record = await self._with_provider_responses(record)
             if status is None or record.status == status:
                 records.append(record)
         return records

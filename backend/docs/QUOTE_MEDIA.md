@@ -15,12 +15,13 @@ removes those files. Up to six representative images appear in the HTML email,
 with readable area captions. The browser gallery includes up to four views per
 area. Missing images do not prevent delivery. The street address remains withheld.
 
-The 30-day media capability is separate from quote-entry authorization. It is
-bound to one request and snapshot, permits read-only media access, and never
+The 30-day media capability is separate from operations quote-entry authorization. It is
+bound to one request and snapshot, permits scan access and PDF response submission, and never
 contains a service credential. Each asset request checks the capability and home
 existence and redirects to a private Storage URL lasting at most five minutes.
 A resend renews access for the same snapshot and invalidates the previous media
-capability. Storage buckets and policies are unchanged; no migration is needed.
+capability. Storage buckets and policies are unchanged. PDF responses require the migration
+listed in the rollout steps below.
 
 ## Desktop conversion
 
@@ -72,3 +73,80 @@ conversion results and external/missing-reference rejection.
 
 Production verification must use one clearly labeled email to Noah only. Never
 bulk resend historical requests or send development previews to providers.
+
+## Provider camera markers and PDF responses (October 13)
+
+The viewer now places numbered camera buttons at the selected photos' recorded
+ARKit camera positions. The arrows use camera forward (-Z); positions remain in
+Y-up metres, the same coordinates retained by area/home exports and the GLB.
+Only photos belonging to the selected area are shown (the whole-home view shows
+all). Closing the photo dialog, including Escape, leaves the model orbit intact.
+The dialog supports previous/next and keyboard arrows. A toggle hides markers.
+These are the existing selected context photos (up to four per area), not every
+frame from the scan. Markers are annotations drawn above geometry, not occluded
+3D camera meshes. Older snapshots backfill poses from their original immutable
+context archive; absent/invalid poses retain the gallery without guessed pins.
+
+The same private emailed capability now permits **adding a PDF response to that
+request**. It still cannot read other providers' responses, operate the ops API,
+change decisions, or reveal the homeowner's street address. The provider enters
+a business name (self-reported, not an authenticated provider identity), optionally
+a USD total, and uploads a PDF up to 10 MiB. File header/trailer and byte limits
+are checked, but this is not antivirus scanning. Closed/expired links cannot
+add responses. Same-origin intent headers and the existing address rate limiter
+protect submission. No email is sent by this upload endpoint.
+
+Each submission has a stable UUID and a content fingerprint. Retrying unchanged
+input returns its existing receipt; reusing a UUID with changed content returns
+409. Storage objects are immutable and live under the original scan's private
+owner/home prefix, so normal home deletion removes them. A separate
+`flow_provider_responses` row holds the document reference. Parent-request saves
+cannot overwrite concurrent responses. The backend overlays these rows when
+reading requests and preserves saved homeowner decisions. Operations deletion
+records a tombstone on the parent to keep a removed response hidden. Different
+submissions are separate quotes, even if their entered business names match.
+
+Homeowner request reads authorize as before and generate fresh five-minute
+Storage URLs, without exposing storage-path fields. The mobile dashboard polls
+every 30 seconds while active, immediately checks on resume/request changes,
+and renders all responses together with provider names and PDF buttons. Opening
+a PDF refreshes its URL and uses a full-screen PDFKit reader with Done/retry.
+Polling neither inserts a synthetic chat message nor changes scroll position.
+
+### Rollout and manual check
+
+1. Apply `20261013180250_provider_pdf_responses.sql` **before** deploying the
+   backend. It adds a service-role-only table with RLS and parent deletion cascade;
+   no existing Storage policy/bucket change is needed. Reads fail explicitly if
+   this table is unavailable rather than presenting an empty response list.
+2. Deploy this backend and install the updated iOS build. TestFlight build 13
+   predates these mobile changes.
+3. Use a current quote-request viewer link. For existing emails the saved scan
+   remains fixed; camera metadata can be recovered without resending the email.
+4. Check markers against recognizable features in the real scan, open a camera,
+   navigate photos, close it, and switch areas. Model/photo fidelity still needs
+   a real-device scan check; automated browser checks used a synthetic room.
+5. Submit a clearly labeled PDF with one provider name and another with a second
+   name. Leave the homeowner dashboard open (up to 30 seconds), or background and
+   return. Open each PDF, dismiss, and open the other. Reload the web page and app
+   to check persistence. Avoid approving test quotes: existing approval actions
+   notify operations and release the address.
+
+### Validation for this change
+
+- 63 focused backend tests pass (responses, media, documents, decisions, request
+  guards, and USDZ conversion). The new response tests exercise PDF-only quotes,
+  simultaneous providers/stale parent saves, duplicate retry, failure responses,
+  authorization, validation, closed requests, decision retention, and deletion.
+- Full backend run: 1,150 passed, 2 skipped, 8 failed. All eight are existing
+  date-sensitive ranking/email-fixture failures reproduced on unchanged
+  `08f21e2`; they are unrelated to these changes.
+- Migration executed in local embedded Postgres (PGlite): RLS/grants, duplicate
+  primary-key rejection, and cascade deletion verified. No production migration
+  has been applied by this development run.
+- Desktop/mobile Chromium checks pass for model load, pins and direction arrows,
+  photo navigation, returning with an unchanged orbit, area filtering, camera
+  toggle, PDF upload through the API, and absence of horizontal overflow.
+- iOS simulator build, two-provider full-screen PDF UI test, and both keyboard/
+  dashboard-drag regression UI tests pass. Live email,
+  production Storage, and TestFlight end-to-end validation remain rollout checks.

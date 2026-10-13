@@ -1,8 +1,8 @@
 """Revision-pinned quote media and private, restart-safe derivative storage.
 
 The quote JSON is the durable snapshot; all paths come from the published index,
-never from URL parameters. Viewer capabilities cannot enter quotes or issue ops
-commands. The existing private scan folder/deletion lifecycle owns derivatives.
+never from URL parameters. Viewer capabilities can submit PDF responses for
+their request, but cannot issue ops commands. The existing private scan folder/deletion lifecycle owns derivatives.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import hmac
 import io
 import json
 import logging
+import math
 import re
 import tempfile
 import time
@@ -102,7 +103,7 @@ def link(record) -> str | None:
 async def authorized(request_id: str, exp: int, sig: str):
     from ..flow_quotes import quote_store
     if exp <= int(time.time()): raise HTTPException(410, 'This scan link has expired. Request a new email from TakeShape.')
-    record = await quote_store.get(request_id)
+    record = await quote_store.get(request_id, include_provider_responses=False)
     if not record or not record.scanMedia.get('snapshotId'): raise HTTPException(404, 'Scan media not found')
     if exp != record.scanMedia.get('expiresAt') or not hmac.compare_digest(signature(record, exp), sig):
         raise HTTPException(403, 'Invalid scan link')
@@ -147,6 +148,24 @@ async def get_json(path: str) -> dict:
         return response.json()
 
 
+def camera_pose(frame: dict) -> dict | None:
+    """ARKit column-major camera-to-world; metres, Y up, forward = -Z.
+
+    Both the area exports and assembled home retain this world space.
+    Portrait rotation affects the photo pixels, not this viewing direction.
+    """
+    pose = frame.get('cameraTransform')
+    if not isinstance(pose, list) or len(pose) != 16:
+        return None
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in pose):
+        return None
+    direction = [-pose[8], -pose[9], -pose[10]]
+    length = math.sqrt(sum(v * v for v in direction))
+    if length < 0.001:
+        return None
+    return {'position': pose[12:15], 'direction': [v / length for v in direction]}
+
+
 def photo_bytes(archive: Path, media: dict) -> list[tuple[dict, bytes, bytes]]:
     """Read selected JPEGs from durable context ZIP, rotate using camera gravity."""
     from PIL import Image
@@ -185,7 +204,8 @@ def photo_bytes(archive: Path, media: dict) -> list[tuple[dict, bytes, bytes]]:
                         canvas = Image.new('RGB', (360, 270), '#edf0f3')
                         canvas.paste(image, ((360 - image.width) // 2, (270 - image.height) // 2))
                         thumb = io.BytesIO(); canvas.save(thumb, format='JPEG', quality=82)
-                    result.append(({'roomKey': room['key'], 'label': f"{room['label']} · view {n + 1}", 'frameId': ids[n]}, full.getvalue(), thumb.getvalue()))
+                    result.append(({'roomKey': room['key'], 'label': f"{room['label']} · view {n + 1}",
+                                    'frameId': ids[n], 'camera': camera_pose(frame)}, full.getvalue(), thumb.getvalue()))
                 except (OSError, ValueError):
                     continue
     return result
@@ -224,6 +244,30 @@ async def prepare_email(record):
                             'note': 'Private scan gallery and desktop viewer; link expires in 30 days.'}
         await quote_store.save(record)
     if media['models']: queue_conversion(media, media['models'][0])
+
+
+async def photos_with_camera(media: dict) -> list[dict]:
+    """Backfill poses for existing emails from their original saved ZIP only."""
+    photos = media.get('photos', [])
+    if all('camera' in p for p in photos) or not supabase_store.enabled():
+        return photos
+    context = media.get('context', {})
+    if not context.get('object'): return photos
+    try:
+        path = prefix(media) + f"quote-cameras-{media['snapshotId']}.json"
+        poses = await get_json(path)
+        if not poses:
+            with tempfile.TemporaryDirectory(prefix='quote-cameras-') as tmp:
+                archive = Path(tmp) / 'context.zip'
+                if not await supabase_store.download_object(context['bucket'], context['object'], archive, max_bytes=32 * 1024 * 1024):
+                    return photos
+                extracted = await asyncio.to_thread(photo_bytes, archive, media)
+            poses = {'frames': {info['frameId']: info.get('camera') for info, _, _ in extracted}}
+            await put_bytes(path, json.dumps(poses).encode(), 'application/json')
+        return [dict(p, camera=poses['frames'].get(p.get('frameId'))) for p in photos]
+    except Exception as exc:
+        logger.warning('Quote camera positions unavailable (%s)', type(exc).__name__)
+        return photos
 
 
 def derivative_path(media, model) -> str:
