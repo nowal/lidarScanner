@@ -239,3 +239,41 @@ async def test_durable_rest_receipts_use_insert_only_and_reconcile_duplicates(mo
         with pytest.raises(Exception) as error:
             await provider_responses.save('qr1', uid, 'b' * 64, quote)
         assert error.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_earliest_available_date_reaches_homeowner_and_is_part_of_retry(monkeypatch, pdf):
+    from datetime import date
+    rec, client, path, params, headers, uploaded = await setup(monkeypatch)
+    params['earliest_available_date'] = '2026-11-02'
+    async with client:
+        result = await client.post(path + '/responses', params=params, headers=headers, content=pdf)
+        assert result.status_code == 201, result.text
+        view = (await client.get(f'/api/v1/ai/quote-requests/{rec.id}')).json()
+        assert view['quotes'][0]['earliestAvailableDate'] == '2026-11-02'
+        assert (await client.post(path + '/responses', params=params, headers=headers, content=pdf)).status_code == 200
+        assert len(uploaded) == 1
+        changed = dict(params, earliest_available_date='2026-11-03')
+        assert (await client.post(path + '/responses', params=changed, headers=headers, content=pdf)).status_code == 409
+    cold = await QuoteRequestStore().get(rec.id)
+    assert cold.quotes[0].earliestAvailableDate == date(2026, 11, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('invalid_date', ['not-a-date', '2026-02-30', '2026-13-01'])
+async def test_invalid_availability_is_rejected_before_upload(monkeypatch, pdf, invalid_date):
+    _, client, path, params, headers, uploaded = await setup(monkeypatch)
+    async with client:
+        response = await client.post(path + '/responses', params=dict(params, earliest_available_date=invalid_date), headers=headers, content=pdf)
+        assert response.status_code == 422
+        assert not uploaded
+
+
+def test_older_quotes_and_retry_fingerprints_remain_compatible():
+    import hashlib
+    from app.flow_quotes import ReturnedQuote
+    quote = ReturnedQuote(providerName='Existing provider', priceUsd=100)
+    assert quote.earliestAvailableDate is None
+    assert quote.homeowner_view()['earliestAvailableDate'] is None
+    assert provider_responses.fingerprint(b'pdf', 'Existing provider', None) == hashlib.sha256(
+        b'pdf["Existing provider",null]').hexdigest()

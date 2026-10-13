@@ -11,6 +11,7 @@ import json
 import os
 import re
 import tempfile
+from datetime import date
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -48,7 +49,7 @@ async def responses(request_id: str) -> list[ReturnedQuote]:
 async def existing(request_id: str, submission_id: str, fingerprint: str) -> dict | None:
     row = next((r for r in await _rows(request_id) if r['id'] == submission_id), None)
     if row and row['fingerprint'] != fingerprint:
-        raise HTTPException(409, 'This submission was already used for a different PDF. Reload to submit a new quote.')
+        raise HTTPException(409, 'This submission was already used for a different quote. Reload to submit a new quote.')
     return row
 
 
@@ -92,5 +93,9 @@ async def homeowner_view(record) -> dict:
     return result
 
 
-def fingerprint(data: bytes, provider: str, price: float | None) -> str:
-    return hashlib.sha256(data + json.dumps([provider, price], separators=(',', ':')).encode()).hexdigest()
+def fingerprint(data: bytes, provider: str, price: float | None, earliest_available_date: date | None = None) -> str:
+    details = [provider, price]
+    # Preserve retry compatibility with submissions made before the date field.
+    if earliest_available_date is not None:
+        details.append(earliest_available_date.isoformat())
+    return hashlib.sha256(data + json.dumps(details, separators=(',', ':')).encode()).hexdigest()

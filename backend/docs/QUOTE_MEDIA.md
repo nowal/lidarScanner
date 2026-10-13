@@ -91,7 +91,14 @@ The same private emailed capability now permits **adding a PDF response to that
 request**. It still cannot read other providers' responses, operate the ops API,
 change decisions, or reveal the homeowner's street address. The provider enters
 a business name (self-reported, not an authenticated provider identity), optionally
-a USD total, and uploads a PDF up to 10 MiB. File header/trailer and byte limits
+a USD total and earliest available date, and uploads a PDF up to 10 MiB.
+Availability is stored as a calendar date (`YYYY-MM-DD`) and appears beneath
+the provider name and price on the homeowner quote card. It indicates the
+provider’s earliest start, not a confirmed booking. Omitting the date preserves
+the existing quote layout. Invalid dates are rejected before the file is uploaded;
+changing the date counts as changing the submission for retry protection.
+This optional value is part of the existing quote JSON and needs no additional
+schema migration. File header/trailer and byte limits
 are checked, but this is not antivirus scanning. Closed/expired links cannot
 add responses. Same-origin intent headers and the existing address rate limiter
 protect submission. No email is sent by this upload endpoint.
@@ -150,3 +157,9 @@ Polling neither inserts a synthetic chat message nor changes scroll position.
 - iOS simulator build, two-provider full-screen PDF UI test, and both keyboard/
   dashboard-drag regression UI tests pass. Live email,
   production Storage, and TestFlight end-to-end validation remain rollout checks.
+
+Availability follow-up validation: 42 focused response/document/decision tests
+pass, including date persistence, invalid calendar dates, changed-date retries,
+and compatibility with existing quotes. Browser verification submits a dated PDF
+and confirms the same calendar date in the homeowner API. Both iOS calendar-date
+unit tests and the updated dashboard/PDF UI test pass.

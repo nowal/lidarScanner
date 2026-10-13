@@ -2,6 +2,7 @@
 import hmac
 import math
 import re
+from datetime import date
 from uuid import UUID
 from pathlib import Path
 
@@ -61,6 +62,7 @@ async def upload_response(request_id: str, exp: int, sig: str, request: Request,
                           submission_id: UUID, provider_name: str = Query(min_length=1, max_length=200),
                           file_name: str = Query(min_length=1, max_length=200),
                           price_usd: float | None = Query(default=None, ge=0),
+                          earliest_available_date: date | None = Query(default=None),
                           x_upload_token: str | None = Header(default=None)):
     record = await media.authorized(request_id, exp, sig)
     if not hmac.compare_digest(x_upload_token or '', upload_token(sig)):
@@ -79,7 +81,7 @@ async def upload_response(request_id: str, exp: int, sig: str, request: Request,
     if not data.startswith(b'%PDF-') or b'%%EOF' not in data[-1024:]:
         raise HTTPException(422, 'This file does not appear to be a complete PDF. Export it as a PDF and retry.')
     receipt_id = str(submission_id)
-    fingerprint = provider_responses.fingerprint(data, provider_name, price_usd)
+    fingerprint = provider_responses.fingerprint(data, provider_name, price_usd, earliest_available_date)
     existing = await provider_responses.existing(request_id, receipt_id, fingerprint)
     if existing:
         return JSONResponse({'quoteId': receipt_id, 'status': 'received'}, headers=HEADERS)
@@ -93,6 +95,7 @@ async def upload_response(request_id: str, exp: int, sig: str, request: Request,
     except Exception as exc:
         raise HTTPException(503, 'The PDF could not be uploaded. Please retry.') from exc
     quote = ReturnedQuote(id=receipt_id, providerName=provider_name, priceUsd=price_usd,
+        earliestAvailableDate=earliest_available_date,
         document=QuoteDocument(fileName=name, byteCount=len(data), storageBucket=media.BUCKET, storagePath=path))
     await provider_responses.save(request_id, receipt_id, fingerprint, quote)
     return JSONResponse({'quoteId': receipt_id, 'status': 'received'}, status_code=201, headers=HEADERS)

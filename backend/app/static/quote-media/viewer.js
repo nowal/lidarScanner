@@ -131,6 +131,8 @@ form.addEventListener('submit', async e => {
   const params = new URLSearchParams({submission_id: submissionId, provider_name: name, file_name: file.name});
   const price = document.getElementById('quote-price').value;
   if (price) params.set('price_usd', price);
+  const earliestDate = document.getElementById('quote-date').value;
+  if (earliestDate) params.set('earliest_available_date', earliestDate);
   submitting = true; document.getElementById('quote-fields').disabled = true;
   uploadStatus.textContent = 'Uploading your quote…';
   try {

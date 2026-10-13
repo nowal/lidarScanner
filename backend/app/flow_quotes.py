@@ -23,6 +23,7 @@ import json
 import logging
 import re
 import uuid
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -94,6 +95,7 @@ class QuoteDocument(BaseModel):
 class ReturnedQuote(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     providerName: str = Field(max_length=200)
+    earliestAvailableDate: Optional[date] = None
     providerId: Optional[str] = None
     priceUsd: Optional[float] = None
     priceLowUsd: Optional[float] = None
@@ -132,6 +134,7 @@ class ReturnedQuote(BaseModel):
         return {
             "id": self.id,
             "providerName": self.providerName,
+            "earliestAvailableDate": self.earliestAvailableDate.isoformat() if self.earliestAvailableDate else None,
             "priceUsd": self.priceUsd,
             "priceLowUsd": self.priceLowUsd,
             "priceHighUsd": self.priceHighUsd,

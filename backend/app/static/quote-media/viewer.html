@@ -14,6 +14,7 @@
 <section aria-label="Send your quote"><h2>Send your quote</h2><p>Upload your estimate as a PDF. The homeowner can open it directly from their dashboard.</p>
 <form id="quote-form"><fieldset id="quote-fields" disabled><label for="provider-name">Business name</label><input id="provider-name" name="provider" autocomplete="organization" maxlength="200" required>
 <label for="quote-price">Total price in USD <span class="hint">(optional)</span></label><input id="quote-price" name="price" type="number" min="0" step="0.01" inputmode="decimal" placeholder="See PDF for pricing">
+<label for="quote-date">Earliest available date <span class="hint">(optional)</span></label><input id="quote-date" name="earliest_available_date" type="date" aria-describedby="quote-date-hint"><span id="quote-date-hint" class="hint">The first date you could start the work.</span>
 <label for="quote-pdf">Quote PDF <span class="hint">(up to 10 MB)</span></label><input id="quote-pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
 <button class="primary" type="submit">Send quote to homeowner</button></fieldset><p id="upload-status" role="status" aria-live="polite"></p></form></section>
 <footer>This private link expires after 30 days. Keep it with the quote request.</footer></main>
