@@ -21,6 +21,7 @@ from ..config import settings
 from ..home_index import HomeIndex, load_bundle
 from .. import room_context
 from . import supabase_store
+from .scan_update_context import digest, source_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +123,7 @@ async def ingest(home_id: str, bucket: str, object_path: str, revision: str,
         for n, room in enumerate(index.rooms):
             if lost.is_set():
                 return
+            room.context_fingerprint = await asyncio.to_thread(source_fingerprint, bundle, room.key)
             document = await asyncio.to_thread(room_context.geometry_context, bundle, room.key)
             room.measurements = dict(document.get('measurements') or {})
             if enrich and settings.anthropic_api_key:
@@ -147,6 +149,7 @@ async def ingest(home_id: str, bucket: str, object_path: str, revision: str,
             index.home_model = dict(previous.home_model)
         index.upload = {'revision': revision, 'ownerId': owner, 'contextObject': object_path,
                         'contextBucket': bucket, 'contextReady': True, 'modelsReady': False, 'durableV2': True}
+        index.upload['captureFingerprint'] = digest({r.key: r.context_fingerprint for r in index.rooms})
         await transition(home_id, 'context_complete', revision=revision, owner=owner,
                          payload={'token': token, 'index': index.to_json()})
         logger.info('Completed durable context %s revision=%s rooms=%s', home_id, revision, len(index.rooms))

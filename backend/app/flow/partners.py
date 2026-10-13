@@ -479,6 +479,16 @@ PRESENCE_FIELDS = ("platform", "profileUrl", "rating", "reviewCount", "followerC
 EXPIRING_SOURCES = ("google_places_api",)
 
 
+def utcnow() -> "datetime":
+    """The clock presence expiry reads. tests/conftest.py and the sample
+    script pin it: the provider fixture carries September 2026 Places
+    timestamps, and the suite went red on Oct 8 when they fell out of
+    the thirty-day window by the calendar."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc)
+
+
 def presence_expired(presence: dict[str, Any], *, ttl_days: int | None = None, now: str | None = None) -> bool:
     """True when a presence from an expiring source is older than the TTL
     (or carries no timestamp at all)."""
@@ -494,7 +504,7 @@ def presence_expired(presence: dict[str, Any], *, ttl_days: int | None = None, n
             verified = verified.replace(tzinfo=timezone.utc)
     except ValueError:
         return True
-    current = datetime.fromisoformat(now) if now else datetime.now(timezone.utc)
+    current = datetime.fromisoformat(now) if now else utcnow()
     return current - verified > timedelta(days=max(ttl, 1))
 
 

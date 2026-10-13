@@ -128,8 +128,8 @@ async def test_device_bake_gate_does_not_fake_a_processor_model(monkeypatch):
 # 5. Places numbers expire at read time
 def test_expired_places_numbers_are_not_ranked_or_shown(monkeypatch):
     monkeypatch.setattr(settings, "provider_discovery_ttl_days", 30)
-    old = (datetime.now(timezone.utc) - timedelta(days=45)).isoformat(timespec="seconds")
-    fresh = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(timespec="seconds")
+    old = (partners.utcnow() - timedelta(days=45)).isoformat(timespec="seconds")
+    fresh = (partners.utcnow() - timedelta(days=2)).isoformat(timespec="seconds")
     row = {"name": "Old Numbers Co.", "presences": [
         {"platform": "google", "profileUrl": "https://maps.google.com/?cid=1", "rating": 4.9, "reviewCount": 300,
          "source": "google_places_api", "lastVerifiedAt": old, "placeId": "ChIJa"},

@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field, model_validator
 from .config import settings
 from .flow import supabase_store
 from .flow.journal import read_thread_journal
+from .flow import service_rubrics
 from .flow.state import FlowState, FlowStep, QuoteRequestRef
 from .models import SCHEMA_VERSION, now_utc
 
@@ -56,7 +57,9 @@ EXPECTATIONS = {
     # (it reaches operations first) and by promising no turnaround.
     "copy": (
         "Sounds good — I'm getting your request in front of local providers "
-        "now. As soon as their quotes come back, I'll bring them to you here."
+        "now. They take their measurements from your scan, so there's nothing "
+        "more for you to measure. As soon as their quotes come back, I'll "
+        "bring them to you here."
     ),
     "accuracyCaveatPct": 10,
 }
@@ -184,6 +187,8 @@ class QuoteRequestRecord(BaseModel):
     opsEmailDeliveryId: str = "initial"
     opsEmailPayload: dict[str, Any] = Field(default_factory=dict)
     quoteDraft: dict[str, Any] = Field(default_factory=dict)
+    # The service rubric section of the lead package (flow/service_rubrics).
+    rubric: dict[str, Any] = Field(default_factory=dict)
     quotes: list[ReturnedQuote] = Field(default_factory=list)
     removedProviderQuoteIds: list[str] = Field(default_factory=list)
     selectedQuoteId: Optional[str] = None
@@ -590,6 +595,9 @@ async def create_quote_request(
     room_measurements, room_key, room_name = _room_measurements(state)
     if room_measurements is not None:
         measurements = room_measurements
+    if state.slots.homeowner_measurements:
+        measurements = dict(measurements)
+        measurements["homeownerSupplied"] = list(state.slots.homeowner_measurements)
     record = QuoteRequestRecord(
         id=f"qr_{uuid.uuid4().hex[:12]}",
         createdAt=now_utc().isoformat(),
@@ -612,6 +620,10 @@ async def create_quote_request(
         measurements=measurements,
         modelLink=await build_model_link(state),
         quoteDraft=quote_draft or {},
+        rubric=service_rubrics.package(
+            state.slots.project_type, list(state.slots.scope_options),
+            list(state.slots.materials), measurements,
+        ),
     )
     from .flow import quote_media
     record.scanMedia = await quote_media.capture(record)

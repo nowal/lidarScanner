@@ -18,6 +18,23 @@ PROJECT
 MEASUREMENTS
   No measurements attached.
 
+PROVIDER FIELDS (Power washing)
+  What a quote needs, when applicable:
+  - Surface and method: concrete, pavers, deck, fence, siding, roof or other; pressure washing versus soft washing
+  - Measurements: cleanable square footage or linear feet by surface, building height, treatment boundaries
+  - Material sensitivity: substrate, coatings, paint age and condition, loose mortar, soft wood, oxidation
+  - Soiling: dirt, algae or mildew, grease, rust, efflorescence, gum, graffiti; stain removal may be separate
+  - Preparation: vehicles and furniture moved, plants and electrical fixtures covered, openings closed, fragile items
+  - Utilities and access: water source and flow, power, runoff route, hose length, gates, parking, ladder or lift
+  - Treatment and finish: detergent, pretreatment, hot water, sealing as an add-on, rinse and cleanup, wastewater handling
+  - Scheduling: occupancy, weather, drying time, nearby work, exclusions
+  From the scan: nothing measured for this trade. the upright surface (walls, siding, fences) and the level ground (drive, walks, patio, any lawn) an exterior walk covered, from the mesh. Interior floor area is never converted into house-wash area; fence sides, rails, stairs and paver joints need separate quantities.
+  From the homeowner: siding; front porch; driveway (and the synopsis above).
+  Anything not covered above is UNKNOWN: ask through the app rather than assume.
+  Quote rule: Quote routine, defined washing virtually. For uncertain coatings, oxidation or stubborn stains, ask the provider for test-patch or limited-outcome terms. A missing exterior size or a method-changing condition needs follow-up; a generic damage caveat cannot define the work.
+  Concealed conditions: This scope uses the attached scan measurements, key frames and homeowner answers, with their sources and limitations identified. Concealed conditions have not been verified. Please state what the base price includes, any allowances or unit rates, required checks and exclusions. Document newly discovered issues and obtain homeowner approval of price or schedule changes before additional work.
+  In your quote, please state: your business name and confirmation that you serve this area; the quote request ID; price and its basis; included work and options; taxes or fees, deposit and payment terms, validity, warranty, estimated duration and available appointment windows; assumptions and exclusions; and whether you accept the supplied measurements or need a specific verification (say which).
+
 3D MODEL · ORIGINAL USDZ DOWNLOAD
   https://storage.example.com/home-assets/flow-models/sample.usdz?token=sample
   (Signed link, valid ~30 days; no credentials needed.)

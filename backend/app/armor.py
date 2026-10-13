@@ -148,7 +148,7 @@ _identity_window = SlidingWindow()
 _address_window = SlidingWindow()
 
 # Endpoints worth protecting: they cost a model call or a durable write.
-_LIMITED_SUFFIXES = ("/ai/home-chat", "/ai/home-chat/opening", "/ai/quote-requests")
+_LIMITED_SUFFIXES = ("/ai/home-chat", "/ai/home-chat/opening", "/ai/home-chat/scan-update", "/ai/quote-requests")
 
 
 def _identity_key(request: Request) -> str | None:
