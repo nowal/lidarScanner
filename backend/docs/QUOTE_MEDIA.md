@@ -1,7 +1,7 @@
 # Quote submission media
 
 
-## October 14 cleanup — implemented locally, not deployed
+## October 14 cleanup — deployed
 
 The provider email now keeps only TakeShape text branding, service/ZIP title,
 submission date, homeowner name and ZIP, the withheld-address/contact note,
@@ -36,7 +36,17 @@ checks also passed after the final scan-fact cleanup. Isolated browser fixtures
 verify model measurements, photo navigation, required price, PDF receipt, and
 mobile layout. No provider emails or production writes were performed. The
 private storage bucket was inspected read-only and has no bucket-specific size
-or MIME restriction. Deployment and an iOS release are separate pending steps.
+or MIME restriction.
+
+Backend [PR #13](https://github.com/nowal/lidarScanner/pull/13) merged as
+`1b6339dec3b99c2463370c286e56930a401881b2`. Render deployment
+`dep-db7q05qvcj2c73eeq5i0` completed on October 14, 2026. Read-only production
+checks confirmed healthy service, the new approval route, and exact deployed
+hashes for the viewer JavaScript, CSS, and measurement JavaScript. A synthetic
+unauthenticated approval was rejected with HTTP 401 before any write. No test
+email was sent. The matching mobile changes are in
+[PR #10](https://github.com/nowal/takeshape-mobile/pull/10); its release document
+records the separate TestFlight upload result.
 
 The sections below describe the October 13 release and its rollout history.
 
