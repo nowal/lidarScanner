@@ -444,11 +444,11 @@ def test_the_email_says_one_room_or_whole_home_and_still_withholds_the_address()
         record = _record(scopeIntent=intent, scopeRooms=rooms)
         subject, body = build_ops_email(record, [], None, [])
         html = build_ops_email_html(record, [], None, [])
-        assert expect_subject in subject, (intent, subject)
+        assert "Painting in 37203" in subject, (intent, subject)
         assert expect_line in body, (intent, body)
         assert "Scope of work" in html and expect_line.split(": ", 1)[1].split(" (")[0] in html
         assert "Secret Lane" not in body and "Secret Lane" not in html and "Secret Lane" not in subject
-        assert "withheld until the homeowner selects a quote" in body
+        assert "withheld until homeowner selects a quote" in body
 
 
 @pytest.mark.asyncio

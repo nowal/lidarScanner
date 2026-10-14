@@ -1,25 +1,24 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>TakeShape · Provider workspace</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>TakeShape · Explore the scan</title>
 <link rel="stylesheet" href="/api/v1/quote-media-assets/viewer.css">
 <script type="module" src="/api/v1/quote-media-assets/model-viewer.min.js"></script>
 <script defer src="/api/v1/quote-media-assets/measurements.js"></script>
 <script defer src="/api/v1/quote-media-assets/viewer.js"></script></head>
-<body><main><header><span class="brand">TakeShape</span><span>Provider workspace</span></header>
+<body><main><header><span class="brand">TakeShape</span></header>
 <h1>Explore the scan</h1><p id="revision">Loading scan details…</p>
-<section aria-label="3D model"><div class="toolbar"><label for="models">Area</label><select id="models"></select><label class="camera-toggle"><input id="cameras" type="checkbox" checked> Show cameras</label><a id="usdz" hidden>Download original USDZ</a><a id="glb" hidden>Download GLB</a></div>
+<section aria-label="3D model"><div class="toolbar"><label for="models">Area</label><select id="models"></select><label class="camera-toggle"><input id="cameras" type="checkbox" checked> Show cameras</label></div>
 <p id="status" role="status">Preparing the desktop viewer…</p>
 <div class="measurement-toolbar" role="group" aria-label="Model measurements"><button id="measure" type="button" aria-pressed="false" disabled>Measure</button><button id="cancel-point" type="button" hidden>Cancel point</button><button id="delete-measurement" type="button" disabled>Delete selected</button><button id="clear-measurements" type="button" disabled>Clear all</button></div>
 <p id="measurement-hint" class="hint" role="status"></p>
-<div class="model-stage"><model-viewer id="viewer" camera-controls touch-action="pan-y" interaction-prompt="auto" shadow-intensity="0" exposure="1" camera-orbit="35deg 65deg auto" alt="Textured scan of the requested area" hidden></model-viewer>
+<div class="model-stage"><model-viewer id="viewer" camera-controls touch-action="pan-y" interaction-prompt="none" shadow-intensity="0" exposure="1" camera-orbit="35deg 65deg auto" alt="Textured scan of the requested area" hidden></model-viewer>
 <svg id="directions" aria-hidden="true" hidden><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0,0 L7,3.5 L0,7 Z" fill="#28704b"/></marker></defs></svg><svg id="measurement-lines" aria-hidden="true"></svg></div>
 <div id="measurement-list" role="group" aria-label="Saved measurements"></div>
-<p id="camera-hint" class="hint"></p><p class="hint">Drag to orbit · scroll to zoom · right-drag to pan.</p></section>
+</section>
 <section aria-label="Scan photos"><h2>Scan photos</h2><p>Selected views from this area of the saved scan.</p><div id="photos" class="gallery"></div></section>
 <section aria-label="Send your quote"><h2>Send your quote</h2><p>Upload your estimate as a PDF. The homeowner can open it directly from their dashboard.</p>
 <form id="quote-form"><fieldset id="quote-fields" disabled><label for="provider-name">Business name</label><input id="provider-name" name="provider" autocomplete="organization" maxlength="200" required>
-<label for="quote-price">Total price in USD <span class="hint">(optional)</span></label><input id="quote-price" name="price" type="number" min="0" step="0.01" inputmode="decimal" placeholder="See PDF for pricing">
-<label for="quote-date">Earliest available date <span class="hint">(optional)</span></label><input id="quote-date" name="earliest_available_date" type="date" aria-describedby="quote-date-hint"><span id="quote-date-hint" class="hint">The first date you could start the work.</span>
-<label for="quote-pdf">Quote PDF <span class="hint">(up to 10 MB)</span></label><input id="quote-pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
+<label for="quote-price">Total price in USD</label><input id="quote-price" name="price" type="number" min="0" step="0.01" inputmode="decimal" placeholder="See PDF for pricing" required>
+<label for="quote-pdf">Quote PDF <span class="hint">(up to 25 MB)</span></label><input id="quote-pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
 <button class="primary" type="submit">Send quote to homeowner</button></fieldset><p id="upload-status" role="status" aria-live="polite"></p></form></section>
 <footer>This private link expires after 30 days. Keep it with the quote request.</footer></main>
 <dialog id="photo-dialog" aria-labelledby="photo-title"><div class="photo-header"><h2 id="photo-title"></h2><button id="close-photo" type="button">Back to model ✕</button></div><div class="photo-content"><img id="photo-image" alt=""><p id="photo-error" role="alert" hidden>This photo could not be loaded. Close it and try again, or request a fresh link.</p></div><div class="photo-nav"><button id="previous-photo" type="button">← Previous photo</button><button id="next-photo" type="button">Next photo →</button></div></dialog>

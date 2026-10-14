@@ -92,7 +92,8 @@ class ModelMeasurements {
     this.hint.textContent = message || (this.enabled
       ? (this.items.some(m => !m.b) ? 'Select the second point on the model. Drag to orbit between points.'
         : 'Select two points on the model. Drag endpoints to adjust; drag elsewhere to orbit. Cameras are hidden while measuring.')
-      : 'Measure distances in feet and inches. Measurements stay in this tab, separately for each area.');
+      : '');
+    this.hint.hidden = !this.hint.textContent;
   }
 
   pick(e) {

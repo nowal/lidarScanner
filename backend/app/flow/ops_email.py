@@ -334,6 +334,19 @@ def coverage_gap_note(record: Any) -> str:
     )
 
 
+def _scan_facts(record: Any) -> list[str]:
+    rubric = getattr(record, "rubric", None) or {}
+    facts = rubric.get("fromScan") or []
+    if facts:
+        return facts
+    measured = {k: v for k, v in (record.measurements or {}).items() if k != "homeownerSupplied"}
+    facts = [line.replace("wallCount:", "Walls:").replace("openingCount:", "Openings:")
+             for line in _fmt_measurements(measured) if not line.startswith("windowCount:")]
+    if measured.get("paintableWallSquareFeet"):
+        facts.insert(0, f"Paintable wall area: ~{float(measured['paintableWallSquareFeet']):,.0f} sq ft")
+    return facts
+
+
 def build_ops_email(
     record: Any,
     partners: list[dict],
@@ -341,121 +354,34 @@ def build_ops_email(
     prospects: list[dict] | None = None,
     ranked: list[dict] | None = None,
 ) -> tuple[str, str]:
-    """Returns (subject, plain-text body). Text-only on purpose: it reads the
-    same everywhere, and ops actions happen through the entry link."""
+    """The provider-facing lead, with the same content in both MIME parts."""
+    from ..flow_quotes import scope_label
+    from .quote_media import link as media_link
+
     service = record.serviceType or "Home project"
     where = record.zip or "zip unknown"
-    who = record.firstName or "homeowner"
-    room = getattr(record, "roomName", None)
-    from .partners import coverage_gap
-    from ..flow_quotes import scope_label
-
-    scope = scope_label(record)
-    intent = str(getattr(record, "scopeIntent", None) or "undecided")
-    if intent == "whole_home":
-        subject = f"New quote request: {service} — whole home in {where} ({who}) — {record.id}"
-    elif intent == "selected_rooms" and getattr(record, "scopeRooms", None):
-        subject = (
-            f"New quote request: {service} — {' + '.join(record.scopeRooms)} in {where} "
-            f"({who}) — {record.id}"
-        )
-    elif room:
-        subject = f"New quote request: {service} — {room} in {where} ({who}) — {record.id}"
-    else:
-        subject = f"New quote request: {service} in {where} ({who}) — {record.id}"
-
-    gap = coverage_gap(partners, prospects, researched)
-    if gap:
-        subject = "[NO PROVIDER COVERAGE] " + subject
-
-    lines: list[str] = []
-    lines.append(f"Quote request {record.id} · submitted {record.createdAt}")
-    lines.append("")
-    lines.append("HOMEOWNER")
-    lines.append(f"  Name: {record.firstName or '—'}")
-    lines.append(f"  Email: {record.contactEmail or '—'}")
-    lines.append(f"  Phone: {record.contactPhone or '—'}")
-    lines.append(f"  Zip: {record.zip or '—'}")
-    lines.append("  Address: withheld until the homeowner selects a quote (release policy)")
-    lines.append("")
-    lines.append("PROJECT")
-    lines.append(f"  Service: {service}")
-    lines.append(f"  Scope of work: {scope}")
-    if room:
-        lines.append(f"  Room: {room}"
-                     + (" (whole-home scan)" if getattr(record, "homeId", None) else ""))
+    title = f"{service} in {where}"
+    lines = ["TakeShape", title, f"Submitted {record.createdAt}", "", "HOMEOWNER",
+             f"  Name: {record.firstName or '—'}", f"  ZIP code: {record.zip or '—'}",
+             "  Address and contact details: withheld until homeowner selects a quote.",
+             "", "PROJECT", f"  Scope of work: {scope_label(record)}"]
+    if getattr(record, "roomName", None):
+        lines.append(f"  Room: {record.roomName}")
     if record.scopeOptions:
         lines.append("  Scope: " + "; ".join(record.scopeOptions))
     if record.materials:
         lines.append("  Materials: " + ", ".join(record.materials))
-    lines.append(f"  Synopsis: {record.synopsis}")
-    lines.append("")
-    lines.append("MEASUREMENTS")
-    lines.extend("  " + l for l in _fmt_measurements(record.measurements))
-    caveat = (record.measurements or {}).get("nameCaveat")
-    if caveat:
-        lines.append(f"  NOTE: {caveat}")
-    rubric = getattr(record, "rubric", None) or {}
-    if rubric:
-        from .service_rubrics import package_lines
-
-        lines.append("")
-        lines.extend(package_lines(rubric))
-    lines.append("")
-    from .quote_media import link as media_link
+    lines.extend(["", record.synopsis, "", "FROM THE SCAN"])
+    lines.extend("  " + fact for fact in _scan_facts(record))
     media_url = media_link(record)
     if media_url:
-        lines.append("SCAN PHOTOS AND DESKTOP VIEWER")
-        lines.append(f"  {media_url}")
-        for n, photo in enumerate(record.scanMedia.get('photos', [])[:6]):
-            lines.append(f"  {photo['label']}: {media_url}/photos/{n}/full")
-        if not record.scanMedia.get('photos'):
-            lines.append("  No scan photos are available for this scope.")
-        lines.append("  Private scan links expire in 30 days. The viewer opens in a browser.")
-        lines.append("")
-    lines.append("3D MODEL · ORIGINAL USDZ DOWNLOAD")
-    model = record.modelLink or {}
-    if model.get("url"):
-        lines.append(f"  {model['url']}")
-        if model.get("note"):
-            lines.append(f"  ({model['note']})")
-    else:
-        lines.append(f"  Not available: {model.get('reason') or model.get('note') or 'no completed scan'}")
-    lines.append("")
-    lines.append("SUGGESTED PROVIDERS")
-    lines.extend("  " + l for l in _provider_section(
-        partners, researched, prospects, coverage_gap_note(record) if gap else None, ranked
-    ))
-    lines.append("")
-    link = entry_link(record.id)
-    lines.append("ENTER THE CHECKED QUOTE")
-    if link:
-        lines.append(f"  {link}")
-        lines.append("  (link is signed for this request and expires in 14 days; the quote")
-        lines.append("  you enter is presented to the homeowner in the app automatically)")
-    else:
-        lines.append("  Set LIDARAI_PUBLIC_BASE_URL to include a one-click entry link here;")
-        lines.append("  until then, upload via the ops API (OPS_GUIDE.md).")
-    if settings.ops_reply_enabled:
-        lines.append("")
-        lines.append("OR JUST REPLY TO THIS EMAIL")
-        lines.append("  Write the quote in your own words - it is read automatically and")
-        lines.append("  sent to the homeowner, and you get a confirmation of what went out.")
-        lines.append("  Attach the provider's estimate as a PDF and it goes to the")
-        lines.append("  homeowner with the quote.")
-    lines.append("")
-    lines.append(
-        "The homeowner has been told their request is going out to local "
-        "providers and that quotes come back in the app — no exact "
-        "turnaround promised, and the people doing the checking are not "
-        "named to them. The app shows no price until this quote is entered."
-    )
-    return subject, "\n".join(lines)
+        lines.extend(["", "Open scan gallery & 3D viewer", media_url,
+                      "Private link expires in 30 days."])
+    return f"New quote request: {title}", "\n".join(lines)
 
 
 def _esc(value) -> str:
     import html as html_mod
-
     return html_mod.escape(str(value if value is not None else "—"))
 
 
@@ -466,255 +392,41 @@ def build_ops_email_html(
     prospects: list[dict] | None = None,
     ranked: list[dict] | None = None,
 ) -> str:
-    """Email-client-safe HTML alternative (600px card, table layout, inline
-    styles). The plain-text part stays canonical; this is presentation."""
-    e = _esc
-    base = settings.public_base_url.rstrip("/")
-    logo = f"{base}{settings.api_prefix}/assets/takeshape-logo.png" if base else ""
-    link = entry_link(record.id)
-    model_url = (record.modelLink or {}).get("url")
-
-    def row(label: str, value: str) -> str:
-        return (
-            f'<tr><td style="padding:4px 14px 4px 0;color:#5A6772;font-size:13px;'
-            f'white-space:nowrap;vertical-align:top">{e(label)}</td>'
-            f'<td style="padding:4px 0;color:#17212B;font-size:14px">{value}</td></tr>'
-        )
-
-    partner_rows = ""
-    for p in partners:
-        contact_bits = " · ".join(
-            e(b) for b in (p.get("contactName"), p.get("phone"), p.get("email")) if b
-        )
-        note = (
-            '<div style="color:#8A6D1F;font-size:12px;margin-top:2px">Sample row — the real '
-            "partner table lands with TakeShape Supabase access</div>"
-            if p.get("sample")
-            else ""
-        )
-        partner_rows += (
-            f'<div style="padding:10px 14px;background:#EFF7F1;border-radius:8px;margin:0 0 8px">'
-            f'<div style="font-weight:600;color:#17212B;font-size:14px">{e(p.get("name"))}</div>'
-            f'<div style="color:#5A6772;font-size:13px">{contact_bits}</div>{note}</div>'
-        )
-
-    prospect_rows = ""
-    for p in prospects or []:
-        tag = (
-            f"quoted {int(p.get('quotedCount') or 1)}x through TakeShape"
-            if p.get("relationship") == "quoted" or p.get("quotedCount")
-            else f"prospect from {p.get('source') or 'the provider list'}"
-        )
-        contact_bits = " · ".join(
-            e(b) for b in (p.get("contactName"), p.get("phone"), p.get("email"), p.get("website")) if b
-        )
-        prospect_rows += (
-            f'<div style="padding:9px 14px;border:1px solid #E4E9ED;border-radius:8px;margin:0 0 8px">'
-            f'<div style="font-size:14px;color:#17212B"><span style="font-weight:600">{e(p.get("name"))}</span>'
-            f'<span style="color:#8A6D1F"> · {e(tag)} · not a partner</span></div>'
-            f'<div style="color:#5A6772;font-size:13px">{contact_bits}</div></div>'
-        )
-
-    researched_rows = ""
-    for p in researched or []:
-        rating = (
-            f'<span style="color:#2E7D53;font-weight:600"> · {e(p["ratingLabel"])}</span>'
-            if p.get("ratingLabel")
-            else ""
-        )
-        contact_bits = " · ".join(e(b) for b in (p.get("phone"), p.get("website")) if b)
-        note = (
-            f'<div style="color:#5A6772;font-size:12.5px;margin-top:1px">{e(p["note"])}</div>'
-            if p.get("note")
-            else ""
-        )
-        researched_rows += (
-            f'<div style="padding:9px 14px;border:1px solid #E4E9ED;border-radius:8px;margin:0 0 8px">'
-            f'<div style="font-size:14px;color:#17212B"><span style="font-weight:600">{e(p.get("name"))}</span>{rating}</div>'
-            f'<div style="color:#5A6772;font-size:13px">{contact_bits}</div>{note}</div>'
-        )
-    ranked = _ranked_or_none(ranked)
-    if ranked:
-        ranked_rows = ""
-        for entry in ranked:
-            v = provider_row_view(entry)
-            tag_color = "#2E7D53" if v["relationship"] == "partner" else "#8A6D1F"
-            badge = (
-                f'<span style="display:inline-block;background:#2E7D53;color:#FFFFFF;border-radius:4px;'
-                f'padding:1px 7px;font-size:11px;font-weight:700;letter-spacing:.04em;margin-right:6px;'
-                f'vertical-align:middle">{e(PAST_QUOTER_MARK)} &times;{v["quotedCount"]}</span>'
-                if v["pastQuoter"] else ""
-            )
-            contact_bits = " · ".join(e(b) for b in v["contact"])
-            if v["website"]:
-                contact_bits += (" · " if contact_bits else "") + (
-                    f'<a href="{e(v["website"])}" style="color:#2E7D53">{e(v["website"])}</a>'
-                )
-            presence_lines = ""
-            for p in v["presences"]:
-                label = (
-                    f'<a href="{e(p["url"])}" style="color:#2E7D53;font-weight:600">{e(p["label"])}</a>'
-                    if p["url"] else f'<span style="font-weight:600">{e(p["label"])}</span>'
-                )
-                detail = e(p["metric"]) if p["metric"] else '<span style="color:#8A939B">profile link only</span>'
-                if p["verified"]:
-                    detail += f' <span style="color:#8A939B">(verified {e(p["verified"])})</span>'
-                url_text = (
-                    f' <span style="color:#8A939B;font-size:11.5px;word-break:break-all">{e(p["url"])}</span>'
-                    if p["url"] else ""
-                )
-                presence_lines += (
-                    f'<div style="color:#3D4852;font-size:12.5px;margin-top:2px">{label}: {detail}{url_text}</div>'
-                )
-            notes = (
-                f'<div style="color:#8A939B;font-size:12px;margin-top:3px">{e("; ".join(v["notes"]))}</div>'
-                if v["notes"] else ""
-            )
-            sample = (
-                '<div style="color:#8A6D1F;font-size:12px;margin-top:2px">Sample row — replace with the real partner table</div>'
-                if v["sample"] else ""
-            )
-            score_span = (
-                f'<span style="color:#5A6772"> · score {v["score"]:.2f}</span>'
-                if v["scored"] else ""
-            )
-            ranked_rows += (
-                f'<div style="padding:9px 14px;border:1px solid #E4E9ED;border-radius:8px;margin:0 0 8px'
-                f'{";background:#EFF7F1" if v["pastQuoter"] else ""}">'
-                f'<div style="font-size:14px;color:#17212B">{badge}<span style="font-weight:600">'
-                f'{e(v["rank"])}. {e(v["name"])}</span>'
-                f'<span style="color:{tag_color}"> · {e(v["tag"])}</span>'
-                f'{score_span}</div>'
-                f'<div style="color:#5A6772;font-size:13px">{contact_bits}</div>'
-                f'{presence_lines}{notes}{sample}</div>'
-            )
-        ranked_rows += (
-            f'<div style="color:#8A939B;font-size:11.5px;margin-top:4px">{e(RANKED_ATTRIBUTION)}</div>'
-        )
-        partner_rows, prospect_rows, researched_rows = "", "", ranked_rows
-    if not partner_rows and not prospect_rows and not researched_rows:
-        researched_rows = (
-            '<div style="color:#AE432A;font-size:13px;font-weight:600">'
-            f"{e(coverage_gap_note(record))}</div>"
-        )
-
-    model_block = (
-        f'<a href="{e(model_url)}" style="display:inline-block;background:#FFFFFF;color:#2E7D53;'
-        f'border:1.5px solid #2E7D53;border-radius:8px;padding:9px 18px;font-size:14px;'
-        f'font-weight:600;text-decoration:none">View the 3D model</a>'
-        if model_url
-        else '<span style="color:#5A6772;font-size:13px">3D model link not available for this request.</span>'
-    )
-    from .quote_media import link as media_link
-    media_url = media_link(record)
-    gallery = ""
-    if media_url:
-        model_block = (f'<a href="{e(media_url)}" style="display:inline-block;background:#2E7D53;color:white;'
-            'border-radius:8px;padding:11px 18px;font-size:14px;font-weight:600;text-decoration:none">'
-            'Open scan gallery &amp; 3D viewer</a>')
-        if model_url:
-            model_block += f'<div style="margin-top:10px;font-size:13px"><a href="{e(model_url)}" style="color:#2E7D53">Download original USDZ</a></div>'
-        photos = record.scanMedia.get('photos', [])
-        cells = []
-        for n, photo in enumerate(photos[:6]):
-            cells.append(f'<td width="50%" valign="top" style="padding:6px"><a href="{e(media_url)}/photos/{n}/full" '
-                f'style="color:#2E7D53;text-decoration:none"><img src="{e(media_url)}/photos/{n}/thumb" '
-                f'width="248" alt="{e(photo["label"])}" style="display:block;width:100%;max-width:248px;height:auto;border:0;border-radius:6px">'
-                f'<div style="padding:6px 0;font-size:12px">{e(photo["label"])}</div></a></td>')
-        rows = ''.join('<tr>' + ''.join(cells[n:n+2]) + ('<td></td>' if len(cells[n:n+2]) == 1 else '') + '</tr>' for n in range(0, len(cells), 2))
-        gallery = ('<div style="margin-top:18px;font-size:14px;font-weight:600;color:#17212B">Scan photos</div>'
-            + (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table>' if photos else '<p style="font-size:13px;color:#5A6772">No scan photos are available for this scope.</p>')
-            + f'<div style="font-size:12px;color:#5A6772">Saved scan {e(record.scanMedia["revision"][:8])} · '
-            + (f'Showing {min(6, len(photos))} of {len(photos)} photos. ' if photos else '')
-            + f'<a href="{e(media_url)}" style="color:#2E7D53">Open the full gallery</a>. Private links expire in 30 days.</div>')
-    reply_note = (
-        '<p style="color:#5A6772;font-size:13.5px;line-height:1.5;margin:14px 0 0">'
-        "Prefer email? <strong>Just reply to this message</strong> with the provider's "
-        "quote in your own words — it's read automatically and sent to the homeowner, "
-        "and you'll get a confirmation of exactly what went out. "
-        "<strong>Attach the provider's estimate as a PDF</strong> and it goes to the "
-        "homeowner with the quote.</p>"
-        if settings.ops_reply_enabled
-        else ""
-    )
-    logo_img = (
-        f'<img src="{e(logo)}" width="36" height="36" alt="TakeShape" '
-        f'style="border-radius:8px;vertical-align:middle;margin-right:12px">'
-        if logo
-        else ""
-    )
+    """Compact, email-client-safe provider brief. No external logo or previews."""
     from ..flow_quotes import scope_label
+    from .quote_media import link as media_link
+    e = _esc
 
-    scope = "; ".join(record.scopeOptions) or "—"
-    scope_of_work = scope_label(record)
-    materials = ", ".join(record.materials) or "—"
-    area = (record.measurements or {}).get("floorAreaSquareFeet")
-    area_str = f"~{float(area):,.0f} sq ft" if area else "—"
-    rubric = getattr(record, "rubric", None) or {}
-    rubric_block = ""
-    if rubric:
-        items = "".join(f"<li style=\"margin:2px 0\">{e(item)}</li>" for item in rubric.get("providerFields", []))
-        from_scan = "; ".join(rubric.get("fromScan") or []) or ("nothing measured for this trade. " + rubric.get("scanNote", ""))
-        told = "; ".join(rubric.get("fromHomeowner") or []) or "see the synopsis above"
-        rubric_block = (
-            '<div style="margin-top:12px;padding:12px 14px;border:1px solid #E3E8EC;border-radius:8px;color:#3D4852;font-size:13px;line-height:1.5">'
-            f'<div style="font-weight:700;color:#17212B;margin-bottom:4px">Provider fields ({e(rubric.get("label", ""))})</div>'
-            f'<div>What a quote needs, when applicable:</div><ul style="margin:4px 0 8px 18px;padding:0">{items}</ul>'
-            f'<div><b>From the scan:</b> {e(from_scan)}</div>'
-            f'<div><b>From the homeowner:</b> {e(told)} (and the synopsis above). Anything not covered is unknown: ask through the app rather than assume.</div>'
-            f'<div style="margin-top:6px"><b>Quote rule:</b> {e(rubric.get("quoteRule", ""))}</div>'
-            f'<div style="margin-top:6px"><b>Concealed conditions:</b> {e(rubric.get("concealedConditions", ""))}</div>'
-            f'<div style="margin-top:6px"><b>In your quote, please state:</b> {e(rubric.get("responseFields", ""))}.</div>'
-            '</div>'
-        )
+    def row(label: str, value: Any) -> str:
+        return (f'<tr><td style="padding:4px 14px 4px 0;color:#5A6772;font-size:13px;vertical-align:top">{e(label)}</td>'
+                f'<td style="padding:4px 0;color:#17212B;font-size:14px">{e(value)}</td></tr>')
 
+    homeowner = row("Name", record.firstName) + row("ZIP code", record.zip)
+    homeowner += row("Address & contact", "Withheld until homeowner selects a quote")
+    project = row("Scope of work", scope_label(record))
+    if getattr(record, "roomName", None):
+        project += row("Room", record.roomName)
+    if record.scopeOptions:
+        project += row("Scope", "; ".join(record.scopeOptions))
+    if record.materials:
+        project += row("Materials", ", ".join(record.materials))
+    facts = "".join(f'<li style="margin:4px 0">{e(fact)}</li>' for fact in _scan_facts(record))
+    media_url = media_link(record)
+    viewer = (f'<a href="{e(media_url)}" style="display:inline-block;background:#2E7D53;color:#FFFFFF;'
+              'border-radius:8px;padding:12px 18px;font-size:14px;font-weight:600;text-decoration:none">'
+              'Open scan gallery &amp; 3D viewer</a>'
+              '<p style="font-size:12px;color:#8794A0;margin:12px 0 0">Private link expires in 30 days.</p>') if media_url else ""
     return f"""<!doctype html><html><body style="margin:0;padding:0;background:#F2F4F6">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F2F4F6;padding:28px 12px">
-<tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F2F4F6;padding:28px 12px"><tr><td align="center">
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#FFFFFF;border-radius:14px;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-system,sans-serif">
-<tr><td style="padding:22px 28px;border-bottom:1px solid #EDF0F3">
-  {logo_img}<span style="font-size:17px;font-weight:700;color:#17212B;vertical-align:middle">TakeShape</span>
-  <span style="font-size:13px;color:#5A6772;vertical-align:middle"> · new quote request</span>
-</td></tr>
-<tr><td style="padding:24px 28px 8px">
-  <div style="font-size:19px;font-weight:700;color:#17212B;margin-bottom:2px">{e(record.serviceType or "Home project")} in {e(record.zip or "—")}</div>
-  <div style="font-size:13px;color:#5A6772">Request {e(record.id)} · submitted {e(str(record.createdAt)[:16].replace("T", " at "))}</div>
-</td></tr>
-<tr><td style="padding:14px 28px 0">
-  <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:6px">Homeowner</div>
-  <table role="presentation" cellpadding="0" cellspacing="0">
-    {row("Name", e(record.firstName))}
-    {row("Email", e(record.contactEmail))}
-    {row("Phone", e(record.contactPhone))}
-    {row("Address", '<span style="color:#8A6D1F">Withheld until the homeowner selects a quote</span>')}
-  </table>
-</td></tr>
-<tr><td style="padding:16px 28px 0">
-  <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:6px">Project</div>
-  <table role="presentation" cellpadding="0" cellspacing="0">
-    {row("Scope of work", f'<span style="font-weight:600">{e(scope_of_work)}</span>')}
-    {row("Room", e(record.roomName) if getattr(record, "roomName", None) else "&mdash;")}
-    {row("Scope", e(scope))}
-    {row("Materials", e(materials))}
-    {row("Floor area", e(area_str))}
-  </table>
-  <div style="margin-top:10px;padding:12px 14px;background:#F7F9FA;border-radius:8px;color:#3D4852;font-size:13.5px;line-height:1.55">{e(record.synopsis)}</div>
-  {rubric_block}
-  <div style="margin-top:12px">{model_block}</div>
-{gallery}
-</td></tr>
-<tr><td style="padding:20px 28px 0">
-  <div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:8px">Suggested providers</div>
-  {partner_rows}{prospect_rows}{researched_rows}
-</td></tr>
-<tr><td style="padding:22px 28px 26px" align="center">
-  {"".join([f'<a href="{e(link)}" style="display:inline-block;background:#2E7D53;color:#FFFFFF;border-radius:9px;padding:13px 30px;font-size:15px;font-weight:700;text-decoration:none">Enter the checked quote</a>']) if link else ""}
-  {reply_note}
-  <p style="color:#8794A0;font-size:12px;line-height:1.5;margin:16px 0 0">The homeowner has been told their request is going out to local providers and that quotes come back in the app — no exact turnaround promised, and the people doing the checking are not named to them. The app shows no price until a quote is entered. Entry link is signed for this request and expires in 14 days.</p>
-</td></tr>
-</table>
-</td></tr></table>
-</body></html>"""
+<tr><td style="padding:22px 28px;border-bottom:1px solid #EDF0F3"><span style="font-size:17px;font-weight:700;color:#17212B">TakeShape</span></td></tr>
+<tr><td style="padding:24px 28px 8px"><div style="font-size:21px;font-weight:700;color:#17212B;margin-bottom:6px">{e(record.serviceType or "Home project")} in {e(record.zip or "—")}</div>
+<div style="font-size:13px;color:#5A6772">Submitted {e(str(record.createdAt)[:16].replace("T", " at "))}</div></td></tr>
+<tr><td style="padding:14px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:6px">Homeowner</div><table role="presentation" cellpadding="0" cellspacing="0">{homeowner}</table></td></tr>
+<tr><td style="padding:18px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:6px">Project</div><table role="presentation" cellpadding="0" cellspacing="0">{project}</table>
+<div style="margin-top:12px;padding:14px;background:#F7F9FA;border-radius:8px;color:#3D4852;font-size:13.5px;line-height:1.55;white-space:pre-line">{e(record.synopsis)}</div>
+<div style="margin-top:18px;color:#17212B;font-size:14px;font-weight:600">From the scan</div><ul style="padding-left:18px;color:#5A6772;font-size:13px;line-height:1.5">{facts}</ul></td></tr>
+<tr><td style="padding:18px 28px 28px">{viewer}</td></tr></table></td></tr></table></body></html>"""
 
 
 # --------------------------------------------------------------------------
@@ -859,11 +571,18 @@ async def send_decision_email(record: Any, quote: Any) -> str:
         )
         lines.append(f"  Address: {record.address or 'not captured in the walk'}")
         lines.append("")
-        lines.append(
-            "The homeowner has been told the company will reach out directly to "
-            "schedule and that nothing is owed before they agree a start date and "
-            "a written quote."
-        )
+        if quote.approvalMethod == "callback":
+            lines.append(f"  Callback phone: {quote.callbackPhone}")
+            lines.append("The homeowner chose a phone call. Share this number only with the selected provider and ask them to call.")
+        elif quote.approvalMethod == "signature":
+            from .quote_approvals import document_link
+            lines.append("The homeowner signed the provider's PDF. Share the signed copy only with this provider.")
+            signed_link = document_link(record, quote)
+            if signed_link:
+                lines.append(f"  Signed quote PDF: {signed_link}")
+                lines.append("  Private signed-copy link expires in 30 days.")
+        else:
+            lines.append("The homeowner selected this provider. Arrange the next step with them.")
     else:
         other = [q for q in record.quotes if q.id != quote.id and q.decision != "declined"]
         lines.append(

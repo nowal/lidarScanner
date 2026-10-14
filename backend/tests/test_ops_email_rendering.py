@@ -1,11 +1,6 @@
-"""The finished operations lead email: per-platform links and numbers on
-every ranked provider row, the past-quoter mark, plain-text parity with the
-HTML part, the identifiers that must not leave the system, and golden files
-for both parts.
+"""Provider email privacy, plain-text parity, and exact HTML/text fixtures.
 
-Composition only. Delivery in the deployed environment (transport, public
-base URL, the in-memory send queue) is tracked separately and is NOT proven
-here.
+Composition is isolated from real delivery and provider sourcing remains internal.
 """
 
 from __future__ import annotations
@@ -67,74 +62,32 @@ def _row_block(text: str, name: str) -> str:
     return "\n".join(block)
 
 
-# ------------------------------------------------------------ per-row content
-def test_every_platform_presence_renders_as_a_link_with_only_recorded_numbers(tmp_path):
-    subject, text, html = _compose("urban", tmp_path)
-    belmont = _row_block(text, "Belmont Brush Co.")
-    assert "Google: 4.5 stars, 95 reviews (verified 2026-09-08) https://maps.google.com/?cid=1002" in belmont
-    assert "Yelp: 4.0 stars, 22 reviews (verified 2026-09-01) https://www.yelp.com/biz/belmont-brush-co-nashville" in belmont
-    assert "Facebook: 1200 followers (verified 2026-09-01) https://www.facebook.com/belmontbrushco" in belmont
-    assert "Instagram: 800 followers (verified 2026-09-01) https://www.instagram.com/belmontbrushco/" in belmont
-    # A link-only presence says so; nothing is invented for it.
-    nolensville = _row_block(text, "Nolensville Wall Works")
-    assert "Yelp: profile link only (verified 2026-09-08) https://www.yelp.com/biz/nolensville-wall-works" in nolensville
-    assert "stars" not in nolensville and "reviews" not in nolensville
-    # HTML carries the same links as anchors.
-    for url in ("https://maps.google.com/?cid=1002", "https://www.yelp.com/biz/belmont-brush-co-nashville",
-                "https://www.facebook.com/belmontbrushco", "https://www.instagram.com/belmontbrushco/",
-                "https://www.yelp.com/biz/nolensville-wall-works"):
-        assert f'href="{url}"' in html and url in text
+# The lead now contains only the project, scan facts, and private viewer link.
+def test_provider_brief_omits_internal_details_and_contact_information(tmp_path):
+    for name in ("urban", "rural", "conflicting"):
+        subject, text, html = _compose(name, tmp_path)
+        record = samples.sample_record(name)
+        for content in (text, html):
+            for removed in (record.id, record.contactEmail, record.contactPhone,
+                            "PAST QUOTER", "Suggested providers", "Provider fields", "Enter the checked quote",
+                            "Download original USDZ", "takeshape-logo", "<img", "Ranked by review"):
+                if removed:
+                    assert removed not in content
+            assert record.firstName in content and record.zip in content
+            assert "Submitted" in content
+        assert record.id not in subject
 
 
-def test_a_null_is_never_rendered_as_zero():
+def test_provider_metrics_still_distinguish_missing_numbers_from_zero():
     entry = rank_candidates([{"name": "Quiet Brush LLC", "relationship": "prospect", "presences": [
         {"platform": "google", "profileUrl": "https://maps.google.com/?cid=9", "rating": None,
-         "reviewCount": None, "followerCount": None, "source": "google_places_api",
-         "lastVerifiedAt": "2026-09-09T10:00:00+00:00"},
+         "reviewCount": None, "source": "google_places_api", "lastVerifiedAt": "2026-09-09T10:00:00+00:00"},
         {"platform": "yelp", "profileUrl": "https://www.yelp.com/biz/quiet-brush", "rating": 4.1,
-         "reviewCount": 0, "followerCount": None, "source": "ops_entry",
-         "lastVerifiedAt": "2026-09-09T10:00:00+00:00"},
-        {"platform": "facebook", "profileUrl": "https://www.facebook.com/quietbrush", "rating": 4.8,
-         "reviewCount": None, "followerCount": None, "source": "",   # no recorded source: no numbers
-         "lastVerifiedAt": "2026-09-09T10:00:00+00:00"},
+         "reviewCount": 0, "source": "ops_entry", "lastVerifiedAt": "2026-09-09T10:00:00+00:00"},
     ]}])[0]
-    view = provider_row_view(entry)
-    by_platform = {p["platform"]: p for p in view["presences"]}
-    assert by_platform["google"]["metric"] is None           # nulls: nothing, not "0 reviews"
-    assert by_platform["yelp"]["metric"] == "4.1 stars, 0 reviews"   # a recorded zero is a real number
-    assert by_platform["facebook"]["metric"] is None        # a number without a source is not shown
-    record = samples.sample_record("urban")
-    _, text = build_ops_email(record, [], None, [], [entry])
-    html = build_ops_email_html(record, [], None, [], [entry])
-    google_line = [l for l in text.splitlines() if l.strip().startswith("Google:")][0]
-    assert google_line.strip() == "Google: profile link only (verified 2026-09-09) https://maps.google.com/?cid=9"
-    assert "0 stars" not in text and "0 followers" not in text and "None" not in text
-    assert "0 stars" not in html and "0 followers" not in html and "None" not in html
-
-
-def test_past_quoters_are_marked_at_a_glance(tmp_path):
-    _, text, html = _compose("conflicting", tmp_path)
-    marked = [l for l in text.splitlines() if PAST_QUOTER_MARK in l]
-    assert len(marked) == 1 and "Shine Squad Nashville" in marked[0]
-    assert f"[{PAST_QUOTER_MARK} x4] Shine Squad Nashville | quoted 4x through TakeShape" in marked[0]
-    assert html.count(PAST_QUOTER_MARK) == 1
-    assert "&times;4" in html
-    # Not a past quoter: no mark, even for the partner.
-    assert "Cumberland Glass Care" not in marked[0]
-    assert "PAST QUOTER x0" not in text
-
-
-def test_a_provider_with_no_presences_at_all_renders_cleanly(tmp_path):
-    _, text, html = _compose("urban", tmp_path)
-    block = _row_block(text, "Riverbend Interiors")
-    assert "TakeShape partner | contact Jordan | (615) 555-0146 | hello@riverbend.example" in block
-    # No platform scored this row, so no score is printed: a "0.00" next to
-    # a real partner read as a verdict on them (Sep 13).
-    assert "score" not in block.split("\n")[0].lower()
-    assert "no review or social data on file" in block
-    assert not re.search(r"(Google|Yelp|Facebook|Instagram|Nextdoor):", block)
-    assert "None" not in text and "None" not in html
-    assert "no review or social data on file" in html
+    by_platform = {p["platform"]: p for p in provider_row_view(entry)["presences"]}
+    assert by_platform["google"]["metric"] is None
+    assert by_platform["yelp"]["metric"] == "4.1 stars, 0 reviews"
 
 
 def test_plain_text_carries_the_same_content_as_html(tmp_path):
@@ -206,10 +159,10 @@ async def test_the_composition_path_never_includes_the_address(monkeypatch, tmp_
     captured = json.loads((tmp_path / "ops_outbox" / "qr_sample_urban.json").read_text(encoding="utf-8"))
     for part in (captured["body"], captured["html"], captured["subject"]):
         assert ADDRESS not in part and "Withheld Street" not in part
-    assert "withheld until the homeowner selects a quote" in captured["body"]
-    assert "Withheld until the homeowner selects a quote" in captured["html"]
-    assert "dana@example.com" in captured["body"]         # contact is for ops
-    assert "Ranked by review and social presence" in captured["body"]
+    assert "withheld until homeowner selects a quote" in captured["body"]
+    assert "Withheld until homeowner selects a quote" in captured["html"]
+    assert "dana@example.com" not in captured["body"]
+    assert "Ranked by review and social presence" not in captured["body"]
 
 
 # ------------------------------------------------------------ golden files

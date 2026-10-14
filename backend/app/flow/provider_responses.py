@@ -20,7 +20,7 @@ from ..config import settings
 from ..flow_quotes import ReturnedQuote
 from . import supabase_store
 
-MAX_PDF_BYTES = 10 * 1024 * 1024
+MAX_PDF_BYTES = 25 * 1024 * 1024
 
 
 def _directory(request_id: str) -> Path:
@@ -86,10 +86,11 @@ async def save(request_id: str, submission_id: str, fingerprint: str, quote: Ret
 async def homeowner_view(record) -> dict:
     result = record.homeowner_view()
     for quote, view in zip(record.quotes, result['quotes']):
-        doc = quote.document
-        if doc and doc.storageBucket and doc.storagePath:
-            view['document']['url'] = await supabase_store._signed_storage_url(
-                doc.storageBucket, doc.storagePath, expires_in=300)
+        for key in ('document', 'signedDocument'):
+            doc = getattr(quote, key)
+            if doc and doc.storageBucket and doc.storagePath:
+                view[key]['url'] = await supabase_store._signed_storage_url(
+                    doc.storageBucket, doc.storagePath, expires_in=300)
     return result
 
 

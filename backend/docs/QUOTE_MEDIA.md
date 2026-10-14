@@ -1,5 +1,45 @@
 # Quote submission media
 
+
+## October 14 cleanup — implemented locally, not deployed
+
+The provider email now keeps only TakeShape text branding, service/ZIP title,
+submission date, homeowner name and ZIP, the withheld-address/contact note,
+project/synopsis, scan facts, and one private scan-viewer link. Both HTML and
+plain text omit the request number, contact values, logo, provider sourcing
+fields, thumbnails, downloads, and legacy quote-entry/reply instructions.
+
+The viewer keeps models, measurements, photo navigation, and Send your quote.
+It removes the workspace/revision labels, download links, passive navigation
+instructions, and available-date field. A finite nonnegative USD total is
+required on the form and API; the PDF limit is 25 MiB. Old stored availability
+values remain readable internally but are omitted from the homeowner response.
+
+Homeowner approval uses `POST /ai/quote-requests/{request_id}/quotes/{quote_id}/approve`:
+JSON `{ "phone": "…" }` approves a callback; `application/pdf` uploads the signed
+copy and approves it. Both require the existing homeowner authorization. The
+signed copy is stored separately from the provider's original, under the private
+scan folder when available. Approval metadata lives in the existing request JSON,
+so there is no new migration. Failed durable writes do not report success.
+Unchanged retries do not upload another copy or send another notification.
+
+The existing operations email handoff receives the callback number or a signed
+PDF link for the selected provider only. It remains an operations-mediated
+handoff; provider submissions still collect a business name rather than an
+email address or authenticated provider account. The signed-copy capability
+expires after 30 days, mints storage URLs for at most five minutes, and stops
+working when the quote is no longer selected. The general scan-viewer link
+never exposes approval documents or homeowner contact information.
+
+Validation: full backend suite 1,279 passed / 2 skipped; targeted email rendering
+checks also passed after the final scan-fact cleanup. Isolated browser fixtures
+verify model measurements, photo navigation, required price, PDF receipt, and
+mobile layout. No provider emails or production writes were performed. The
+private storage bucket was inspected read-only and has no bucket-specific size
+or MIME restriction. Deployment and an iOS release are separate pending steps.
+
+The sections below describe the October 13 release and its rollout history.
+
 Quote submission now captures the single published HomeIndex in the durable quote
 record. Its immutable context ZIP, selected room keys/names, frame IDs, model
 object paths and revision remain fixed when the homeowner scans again. Whole-home

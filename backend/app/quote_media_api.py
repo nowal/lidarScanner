@@ -2,7 +2,6 @@
 import hmac
 import math
 import re
-from datetime import date
 from uuid import UUID
 from pathlib import Path
 
@@ -61,27 +60,26 @@ def upload_token(signature: str) -> str:
 async def upload_response(request_id: str, exp: int, sig: str, request: Request,
                           submission_id: UUID, provider_name: str = Query(min_length=1, max_length=200),
                           file_name: str = Query(min_length=1, max_length=200),
-                          price_usd: float | None = Query(default=None, ge=0),
-                          earliest_available_date: date | None = Query(default=None),
+                          price_usd: float = Query(ge=0),
                           x_upload_token: str | None = Header(default=None)):
     record = await media.authorized(request_id, exp, sig)
     if not hmac.compare_digest(x_upload_token or '', upload_token(sig)):
         raise HTTPException(403, 'Reload the viewer before submitting your quote.')
     provider_name = ' '.join(provider_name.split())
-    if not provider_name or (price_usd is not None and not math.isfinite(price_usd)):
-        raise HTTPException(422, 'Enter your business name and a valid optional price.')
+    if not provider_name or not math.isfinite(price_usd):
+        raise HTTPException(422, 'Enter your business name and a valid total price.')
     if request.headers.get('content-type', '').split(';')[0].lower() != 'application/pdf':
         raise HTTPException(415, 'Choose a PDF quote.')
     data = bytearray()
     async for chunk in request.stream():
         if len(data) + len(chunk) > provider_responses.MAX_PDF_BYTES:
-            raise HTTPException(413, 'The PDF must be 10 MB or smaller.')
+            raise HTTPException(413, 'The PDF must be 25 MB or smaller.')
         data.extend(chunk)
     data = bytes(data)
     if not data.startswith(b'%PDF-') or b'%%EOF' not in data[-1024:]:
         raise HTTPException(422, 'This file does not appear to be a complete PDF. Export it as a PDF and retry.')
     receipt_id = str(submission_id)
-    fingerprint = provider_responses.fingerprint(data, provider_name, price_usd, earliest_available_date)
+    fingerprint = provider_responses.fingerprint(data, provider_name, price_usd)
     existing = await provider_responses.existing(request_id, receipt_id, fingerprint)
     if existing:
         return JSONResponse({'quoteId': receipt_id, 'status': 'received'}, headers=HEADERS)
@@ -95,7 +93,6 @@ async def upload_response(request_id: str, exp: int, sig: str, request: Request,
     except Exception as exc:
         raise HTTPException(503, 'The PDF could not be uploaded. Please retry.') from exc
     quote = ReturnedQuote(id=receipt_id, providerName=provider_name, priceUsd=price_usd,
-        earliestAvailableDate=earliest_available_date,
         document=QuoteDocument(fileName=name, byteCount=len(data), storageBucket=media.BUCKET, storagePath=path))
     await provider_responses.save(request_id, receipt_id, fingerprint, quote)
     return JSONResponse({'quoteId': receipt_id, 'status': 'received'}, status_code=201, headers=HEADERS)
