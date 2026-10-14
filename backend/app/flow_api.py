@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from .config import settings
@@ -411,9 +411,11 @@ async def _record_decision(
         record.selectedQuoteId = quote_id
     elif record.selectedQuoteId == quote_id:
         record.selectedQuoteId = None
-    await quote_store.save(record)
-    # Operations hears about it on the same durable path as a lead, so a
-    # decision is never lost to a mail outage.
+    try:
+        await quote_store.save(record, require_durable=True)
+    except RuntimeError as exc:
+        raise HTTPException(503, "Your decision could not be saved. Please try again.") from exc
+    # Notify the existing operations handoff after the decision is durable.
     try:
         await ops_email.send_decision_email(record, quote)
     except Exception as exc:  # noqa: BLE001
@@ -435,6 +437,78 @@ async def decide_quote(
         raise HTTPException(status_code=404, detail="Quote not found on this request")
     await _record_decision(record, body.quoteId, body.decision, body.note)
     return JSONResponse(record.homeowner_view())
+
+
+_approval_locks: dict[str, asyncio.Lock] = {}
+
+
+class CallbackApproval(BaseModel):
+    phone: str = Field(min_length=7, max_length=40)
+
+
+@router.post("/ai/quote-requests/{request_id}/quotes/{quote_id}/approve", dependencies=[Depends(require_token)])
+async def approve_quote(request_id: str, quote_id: str, request: Request,
+                        x_homeowner_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    from .flow import quote_approvals, provider_responses
+    # Serialize approval attempts in this worker, including upload retries.
+    async with _approval_locks.setdefault(request_id, asyncio.Lock()):
+        record = await quote_store.get(request_id)
+        if record is None:
+            raise HTTPException(404, "Quote request not found")
+        await _require_homeowner_access(record, x_homeowner_token)
+        quote = record.quote_by_id(quote_id)
+        if quote is None:
+            raise HTTPException(404, "Quote not found on this request")
+        if record.selectedQuoteId == quote_id and quote.approvalMethod:
+            return JSONResponse(await provider_responses.homeowner_view(record), headers={'Cache-Control': 'private, no-store'})
+        if record.status == 'closed' or record.selectedQuoteId not in (None, quote_id):
+            raise HTTPException(409, "This request is closed or another quote has already been selected.")
+        content_type = request.headers.get('content-type', '').split(';')[0].lower()
+        if content_type == 'application/pdf':
+            quote.signedDocument = await quote_approvals.save_signed_pdf(record, quote, request)
+            quote.approvalMethod = 'signature'
+            quote.callbackPhone = None
+        elif content_type == 'application/json':
+            try:
+                # Bound this small form independently of the PDF upload limit.
+                raw = bytearray()
+                async for chunk in request.stream():
+                    if len(raw) + len(chunk) > 4096:
+                        raise HTTPException(413, "The callback form is too large.")
+                    raw.extend(chunk)
+                body = CallbackApproval.model_validate_json(raw)
+            except ValueError as exc:
+                raise HTTPException(422, "Enter a phone number the provider can call.") from exc
+            phone = body.phone.strip()
+            digits = re.sub(r'\D', '', phone)
+            if not 7 <= len(digits) <= 15 or not re.fullmatch(r'\+?[0-9(). \-]+', phone):
+                raise HTTPException(422, "Enter a valid phone number the provider can call.")
+            quote.approvalMethod = 'callback'
+            quote.callbackPhone = phone
+            quote.signedDocument = None
+        else:
+            raise HTTPException(415, "Choose a signed PDF or a callback phone number.")
+        await _record_decision(record, quote_id, 'approved', None)
+        return JSONResponse(await provider_responses.homeowner_view(record), headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get("/quote-approvals/{request_id}/{quote_id}/{exp}/{sig}")
+async def signed_quote_document(request_id: str, quote_id: str, exp: int, sig: str):
+    import time
+    from .flow import quote_approvals, supabase_store
+    if exp <= int(time.time()):
+        raise HTTPException(410, 'This signed quote link has expired.')
+    record = await quote_store.get(request_id)
+    quote = record.quote_by_id(quote_id) if record else None
+    if not quote or not quote.signedDocument or record.selectedQuoteId != quote_id or quote.decision != 'approved':
+        raise HTTPException(404, 'Signed quote unavailable')
+    if not hmac.compare_digest(sig, quote_approvals.signature(record, quote, exp)):
+        raise HTTPException(403, 'Invalid signed quote link')
+    doc = quote.signedDocument
+    url = await supabase_store._signed_storage_url(doc.storageBucket, doc.storagePath, expires_in=min(300, exp - int(time.time())))
+    if not url:
+        raise HTTPException(503, 'The signed quote is temporarily unavailable.')
+    return RedirectResponse(url, headers={'Cache-Control': 'private, no-store', 'Referrer-Policy': 'no-referrer', 'X-Robots-Tag': 'noindex, nofollow'})
 
 
 # --------------------------------------------------------------------------

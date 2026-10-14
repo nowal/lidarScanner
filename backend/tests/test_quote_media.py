@@ -138,13 +138,17 @@ async def test_email_html_escapes_media_and_handles_missing(monkeypatch):
     rec.modelLink = {'url': media.link(rec) + '/models/0/usdz'}
     html = ops_email.build_ops_email_html(rec, [], None)
     _, text = ops_email.build_ops_email(rec, [], None)
-    assert '<script>Kitchen' not in html and '&lt;script&gt;Kitchen &amp;' in html
-    assert '/photos/0/thumb' in html and '/photos/0/full' in html
-    assert '/photos/0/full' in text and 'desktop' in text.lower()
+    assert '<script>Kitchen' not in html
+    assert '<img' not in html and '/photos/0/' not in html + text
+    assert media.link(rec) in html and media.link(rec) in text
     assert '123 Hidden Street' not in html + text
-    assert 'Download original USDZ' in html
+    assert 'Download original USDZ' not in html
+    assert 'Private link expires in 30 days.' in html
     rec.scanMedia['photos'] = []
-    assert 'No scan photos' in ops_email.build_ops_email_html(rec, [], None)
+    assert 'Open scan gallery' in ops_email.build_ops_email_html(rec, [], None)
+    rec.synopsis = '<script>alert("x")</script>'
+    assert '&lt;script&gt;' in ops_email.build_ops_email_html(rec, [], None)
+
 
 
 @pytest.mark.asyncio

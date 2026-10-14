@@ -114,15 +114,12 @@ def test_the_lead_package_carries_the_fields_the_scan_and_the_unknowns():
                                 scopeOptions=["walls and trim"], materials=["eggshell"],
                                 measurements={"paintableWallSquareFeet": 410.0}, rubric=section)
     _, body = ops_email.build_ops_email(record, [], None, None, None)
-    assert "PROVIDER FIELDS (Painting)" in body
-    assert "  - Scope and surfaces: interior or exterior" in body
-    assert "From the scan: floor area ~180 sq ft" in body
-    assert "From the homeowner: walls and trim; eggshell (and the synopsis above)." in body
-    assert "Anything not covered above is UNKNOWN: ask through the app rather than assume." in body
-    assert "Concealed conditions: This scope uses the attached scan measurements" in body
-    assert "In your quote, please state: your business name" in body
+    assert "FROM THE SCAN" in body
+    assert "floor area ~180 sq ft" in body and "paintable wall ~410 sq ft" in body
     html = ops_email.build_ops_email_html(record, [], None, None, None)
-    assert "Provider fields (Painting)" in html and "Concealed conditions:" in html
+    assert "floor area ~180 sq ft" in html
+    for removed in ("Provider fields", "Concealed conditions:", "In your quote, please state"):
+        assert removed not in html
 
     bare = QuoteRequestRecord(id="qr_2", createdAt="2026-10-06T00:00:00+00:00", threadId="t", serviceType="Decking")
     _, body = ops_email.build_ops_email(bare, [], None, None, None)

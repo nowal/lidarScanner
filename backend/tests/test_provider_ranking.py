@@ -229,7 +229,7 @@ def test_the_deprecated_partner_first_ordering_still_works_behind_its_flag(monke
 
 
 # ----------------------------------------------------------- the ops email
-def test_the_email_renders_the_ranked_list_and_keeps_the_word_partner_reserved(tmp_path):
+def test_the_email_keeps_internal_rankings_out_of_the_provider_brief(tmp_path):
     _install_table(tmp_path)
     ranked = partners.rank_for_lead("Painting", "37203", researched=[{"name": "Found Online LLC", "phone": "(615) 555-0199"}])
     assert [e["relationship"] for e in ranked if e["name"] == "Found Online LLC"] == ["researched"]
@@ -237,28 +237,20 @@ def test_the_email_renders_the_ranked_list_and_keeps_the_word_partner_reserved(t
     subject, body = build_ops_email(_record(), partners.find_partners("Painting", "37203"), None,
                                     partners.find_prospects("Painting", "37203"), ranked)
     assert "NO PROVIDER COVERAGE" not in subject
-    section = body.split("SUGGESTED PROVIDERS")[1].split("ENTER THE CHECKED QUOTE")[0]
-    assert "Ranked by review and social presence" in section
-    assert section.count("TakeShape partner") == 1 and "Riverbend Interiors | TakeShape partner" in section
-    assert "[PAST QUOTER x3] Music City Paint Pros | quoted 3x through TakeShape" in section
-    assert "Found Online LLC | found online, unvetted" in section
-    assert "1. Cumberland Coatings" in section and "score" in section
-    assert "Google: 4.8 stars, 412 reviews (verified 2026-09-08) https://maps.google.com/?cid=1001" in section
-    assert "quoted boost" in section
-    assert "via Google Places" in section and "never scraped" in section
-    assert "contact first" not in section, "the partner-first wording belongs to the deprecated path"
-
     html = build_ops_email_html(_record(), [], None, [], ranked)
-    assert "Cumberland Coatings" in html and "TakeShape partner" in html and "score 0." in html
+    for content in (body, html):
+        assert "Cumberland Coatings" not in content
+        assert "SUGGESTED PROVIDERS" not in content
+        assert "Ranked by review" not in content
 
 
-def test_the_legacy_flag_restores_the_grouped_section(monkeypatch, tmp_path):
+def test_the_legacy_ranking_flag_does_not_expand_the_provider_email(monkeypatch, tmp_path):
     _install_table(tmp_path)
     monkeypatch.setattr(settings, "preferred_partner_ordering_enabled", True)
     ranked = partners.rank_for_lead("Painting", "37203")
     _, body = build_ops_email(_record(), partners.find_partners("Painting", "37203"), None,
                               partners.find_prospects("Painting", "37203"), ranked)
-    assert "TakeShape partners for this area (contact first):" in body
+    assert "TakeShape partners for this area (contact first):" not in body
     assert "Ranked by review" not in body
 
 
@@ -568,7 +560,8 @@ async def test_send_ops_email_rehydrates_discovers_and_ranks(monkeypatch, tmp_pa
     assert discovered["called"] == 1
     outbox = json.loads((tmp_path / "ops_outbox" / "qr_rank01.json").read_text(encoding="utf-8"))
     body = outbox["body"]
-    assert "Ranked by review and social presence" in body
-    assert body.index("1. Cumberland Coatings") < body.index("2. [PAST QUOTER x2] Harpeth Finishes")
-    assert "Harpeth Finishes | quoted 2x through TakeShape" in body
+    assert "Ranked by review and social presence" not in body
+    ranked = partners.rank_for_lead("Painting", "37203")
+    assert [row["name"] for row in ranked] == ["Cumberland Coatings", "Harpeth Finishes"]
+    assert next(row for row in ranked if row["name"] == "Harpeth Finishes")["relationship"] == "quoted"
     assert "[NO PROVIDER COVERAGE]" not in outbox["subject"]

@@ -72,17 +72,17 @@ def test_the_seed_is_never_surfaced_as_a_partner():
 def test_ops_email_never_contains_the_address():
     subject, body = build_ops_email(_record(), find_partners("Painting", "37203"), None)
     assert ADDRESS not in body and "Hidden Lane" not in body
-    assert "withheld until the homeowner selects a quote" in body
-    assert "dana@example.com" in body           # contact IS for ops
-    assert "qr_testloop01" in subject
-    assert "https://signed.example/model.usdz" in body
+    assert "withheld until homeowner selects a quote" in body
+    assert "dana@example.com" not in body
+    assert "qr_testloop01" not in subject
+    assert "https://signed.example/model.usdz" not in body
 
 
 def test_ops_email_shows_no_entry_link_without_base_url(monkeypatch):
     monkeypatch.setattr(settings, "public_base_url", "")
     _, body = build_ops_email(_record(), [], None)
     assert "/ops/entry/" not in body
-    assert "LIDARAI_PUBLIC_BASE_URL" in body
+    assert "LIDARAI_PUBLIC_BASE_URL" not in body
 
 
 # ------------------------------------------------------------ signed links
@@ -116,8 +116,7 @@ async def test_outbox_capture_without_smtp(tmp_path, monkeypatch):
     assert captured["to"] == "ops-test@example.com"
     # exp/sig ride in the path — query-string "=" gets mangled by email
     # quoted-printable encoding (observed live).
-    assert "/api/v1/ops/entry/qr_testloop01/" in captured["body"]
-    assert "?" not in [l for l in captured["body"].splitlines() if "/ops/entry/" in l][0]
+    assert "/api/v1/ops/entry/" not in captured["body"]
     assert ADDRESS not in captured["body"]
     # The seed's placeholder used to be listed with a caption. It reached
     # Quintin's inbox as "TakeShape partner" (Sep 13); now nothing downstream

@@ -1,5 +1,5 @@
 """Isolated synthetic room for browser checks. Uses no production credentials."""
-import asyncio, io, json, time
+import asyncio, io, json, time, os
 from pathlib import Path
 from PIL import Image, ImageDraw
 from pxr import Usd, UsdGeom, Gf
@@ -8,16 +8,18 @@ from fastapi.responses import FileResponse
 import uvicorn
 from app.config import settings
 settings.supabase_url = settings.supabase_service_role_key = ''
-settings.storage_dir = '/tmp/takeshape-provider-preview/data'
+ROOT = Path(os.environ.get('PROVIDER_PREVIEW_DIR', '/tmp/takeshape-provider-preview'))
+PORT = int(os.environ.get('PROVIDER_PREVIEW_PORT', '8765'))
+settings.storage_dir = str(ROOT / 'data')
+settings.ops_email = settings.resend_api_key = settings.smtp_host = ''
 settings.flow_token_secret = 'local-preview-only'
 settings.auth_token = ''
-settings.public_base_url = 'http://127.0.0.1:8765'
+settings.public_base_url = f'http://127.0.0.1:{PORT}'
 from app.flow import quote_media as media
 from app.flow_quotes import quote_store, QuoteRequestRecord
 from app.flow.usdz_to_glb import convert
 from app.quote_media_api import router
 from app.flow_api import get_quote_request
-ROOT=Path('/tmp/takeshape-provider-preview')
 ROOT.mkdir(parents=True, exist_ok=True)
 stage=Usd.Stage.CreateNew(str(ROOT/'room.usda'))
 UsdGeom.SetStageMetersPerUnit(stage, 1)
@@ -53,12 +55,23 @@ async def put(key,data,content_type,**kw):(ROOT/key.rsplit('/',1)[-1]).write_byt
 media.conversion_status=status
 media.supabase_store._signed_storage_url=signed
 media.put_bytes=put
+# Render the actual email in the isolated fixture, without sending anything.
+rec.serviceType = 'Painting'
+rec.zip = '37129'
+rec.firstName = 'Quentin'
+rec.roomName = 'Bedroom'
+rec.scopeIntent = 'single_room'
+rec.synopsis = 'Quentin is interested in painting the bedroom. Walls and trim were discussed, with options for a fresh neutral finish.'
+rec.scopeOptions = ['Walls and trim']
+rec.measurements = {'floorAreaSquareFeet': 214, 'paintableWallSquareFeet': 410, 'windowCount': 2}
+from app.flow.ops_email import build_ops_email_html
+(ROOT / 'email.html').write_text(build_ops_email_html(rec, [], None))
 app=FastAPI()
 app.include_router(router,prefix='/api/v1')
 app.get('/api/v1/ai/quote-requests/{request_id}')(get_quote_request)
 @app.get('/fixtures/{name}')
 async def fixture(name:str):return FileResponse(ROOT/name)
-url=f'http://127.0.0.1:8765/api/v1/quote-media/{rec.id}/{exp}/{media.signature(rec,exp)}'
+url=f'http://127.0.0.1:{PORT}/api/v1/quote-media/{rec.id}/{exp}/{media.signature(rec,exp)}'
 (ROOT/'url.txt').write_text(url)
 print(url,flush=True)
-uvicorn.run(app,host='127.0.0.1',port=8765,log_level='warning')
+uvicorn.run(app,host='127.0.0.1',port=PORT,log_level='warning')

@@ -3,8 +3,6 @@ const base = location.pathname.replace(/\/$/, '');
 const viewer = document.getElementById('viewer');
 const select = document.getElementById('models');
 const statusText = document.getElementById('status');
-const original = document.getElementById('usdz');
-const glb = document.getElementById('glb');
 const cameras = document.getElementById('cameras');
 const directions = document.getElementById('directions');
 const dialog = document.getElementById('photo-dialog');
@@ -73,9 +71,6 @@ function renderPhotos() {
     line.setAttribute('marker-end', 'url(#arrow)'); directions.append(line);
   }
   cameras.disabled = count === 0;
-  document.getElementById('camera-hint').textContent = count
-    ? 'Select a camera to see its photo. Arrows show where it was pointing. Close the photo to return to this view.'
-    : 'Camera positions are unavailable for these saved photos. Select a photo below to inspect it.';
   if (!gallery.children.length) gallery.textContent = 'No scan photos were available for this area.';
   toggleCameras();
 }
@@ -103,8 +98,6 @@ function showModel() {
   const model = snapshot.models[selected];
   measurements.setModel(model?.key, model?.status === 'ready');
   if (!model) { statusText.textContent = 'No textured model was available for this scope. The saved scan photos are below.'; select.hidden = true; return; }
-  original.hidden = false; original.href = `${base}/models/${selected}/usdz`;
-  glb.hidden = model.status !== 'ready'; glb.href = `${base}/models/${selected}/glb`;
   if (model.status === 'ready') {
     const url = `${base}/models/${selected}/glb`;
     if (viewer.getAttribute('src') !== url) {
@@ -114,28 +107,27 @@ function showModel() {
   } else {
     viewer.hidden = true; viewer.removeAttribute('src');
     statusText.textContent = model.status === 'failed'
-      ? 'The desktop preview could not be prepared. The original USDZ and scan photos are still available. Try again later.'
-      : 'Preparing a desktop version of this scan. Large homes can take a few minutes. You can view photos or download the original USDZ now.';
+      ? 'The desktop preview could not be prepared. The scan photos are still available. Try again later.'
+      : 'Preparing a desktop version of this scan. Large homes can take a few minutes. You can view the photos below.';
   }
   toggleCameras();
 }
 select.addEventListener('change', () => { selected = Number(select.value); showModel(); renderPhotos(); });
-viewer.addEventListener('load', () => { statusText.textContent = 'Model ready. Orbit, zoom, or pan to inspect the scan.'; updateDirections(); });
-viewer.addEventListener('error', () => { statusText.textContent = 'This browser could not display the model. Try a current desktop browser, or download the GLB or original USDZ.'; });
+viewer.addEventListener('load', () => { statusText.textContent = 'Model ready.'; updateDirections(); });
+viewer.addEventListener('error', () => { statusText.textContent = 'This browser could not display the model. Try reloading in a current desktop browser.'; });
 form.addEventListener('input', () => { if (!submitting) submissionId = crypto.randomUUID(); });
 form.addEventListener('submit', async e => {
   e.preventDefault();
   if (submitting || !snapshot?.canRespond) return;
   const file = document.getElementById('quote-pdf').files[0];
   if (!file || !/\.pdf$/i.test(file.name)) { uploadStatus.textContent = 'Choose a PDF quote.'; return; }
-  if (file.size > snapshot.maxPdfBytes) { uploadStatus.textContent = 'The PDF must be 10 MB or smaller.'; return; }
+  if (file.size > snapshot.maxPdfBytes) { uploadStatus.textContent = 'The PDF must be 25 MB or smaller.'; return; }
   const name = document.getElementById('provider-name').value.trim();
   if (!name) { uploadStatus.textContent = 'Enter your business name.'; return; }
   const params = new URLSearchParams({submission_id: submissionId, provider_name: name, file_name: file.name});
   const price = document.getElementById('quote-price').value;
-  if (price) params.set('price_usd', price);
-  const earliestDate = document.getElementById('quote-date').value;
-  if (earliestDate) params.set('earliest_available_date', earliestDate);
+  if (!price.trim() || !Number.isFinite(Number(price)) || Number(price) < 0) { uploadStatus.textContent = 'Enter the total price in USD.'; return; }
+  params.set('price_usd', price);
   submitting = true; document.getElementById('quote-fields').disabled = true;
   uploadStatus.textContent = 'Uploading your quote…';
   try {
@@ -160,7 +152,7 @@ async function refresh() {
     if (!snapshot.canRespond) uploadStatus.textContent = 'This quote request is closed.';
     if (!rendered) {
       rendered = true;
-      document.getElementById('revision').textContent = `Saved scan ${snapshot.revision} · Link expires ${new Date(snapshot.expiresAt * 1000).toLocaleDateString()}`;
+      document.getElementById('revision').textContent = `Link expires ${new Date(snapshot.expiresAt * 1000).toLocaleDateString()}`;
       for (const m of snapshot.models) { const option = document.createElement('option'); option.value = m.index; option.textContent = m.label; select.appendChild(option); }
       renderPhotos();
     }

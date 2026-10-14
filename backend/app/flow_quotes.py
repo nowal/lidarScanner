@@ -119,6 +119,9 @@ class ReturnedQuote(BaseModel):
     decision: Optional[Literal["approved", "declined"]] = None
     decisionNote: Optional[str] = Field(default=None, max_length=2000)
     decidedAt: Optional[str] = None
+    approvalMethod: Optional[Literal["signature", "callback"]] = None
+    callbackPhone: Optional[str] = None
+    signedDocument: Optional[QuoteDocument] = None
 
     @model_validator(mode="after")
     def _sane_prices(self) -> "ReturnedQuote":
@@ -137,7 +140,6 @@ class ReturnedQuote(BaseModel):
         return {
             "id": self.id,
             "providerName": self.providerName,
-            "earliestAvailableDate": self.earliestAvailableDate.isoformat() if self.earliestAvailableDate else None,
             "priceUsd": self.priceUsd,
             "priceLowUsd": self.priceLowUsd,
             "priceHighUsd": self.priceHighUsd,
@@ -149,6 +151,9 @@ class ReturnedQuote(BaseModel):
             "decision": self.decision,
             "decisionNote": self.decisionNote,
             "decidedAt": self.decidedAt,
+            "approvalMethod": self.approvalMethod,
+            "callbackPhone": self.callbackPhone,
+            "signedDocument": self.signedDocument.model_dump(exclude={"storageBucket", "storagePath"}) if self.signedDocument else None,
             # What the partner table knows about the company (#98), so the
             # app and the agent can vouch for it with facts on file.
             "provider": _provider_profile(self.providerName),
@@ -304,20 +309,19 @@ class QuoteRequestStore:
         return self._dir() / f"{safe}.json"
 
     async def save(self, record: QuoteRequestRecord, *, require_durable: bool = False) -> None:
+        saved = await supabase_store.upsert_quote_request(
+            record.id, record.threadId, record.homeownerId, record.status,
+            record.model_dump(mode="json"),
+        )
+        # Do not publish a local success that could conceal a failed durable approval.
+        if require_durable and supabase_store.enabled() and not saved:
+            raise RuntimeError("Quote receipt could not be saved durably")
         try:
             self._path(record.id).write_text(record.model_dump_json(), encoding="utf-8")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not write quote request file %s: %s", record.id, exc)
-        saved = await supabase_store.upsert_quote_request(
-            record.id,
-            record.threadId,
-            record.homeownerId,
-            record.status,
-            record.model_dump(mode="json"),
-        )
-
-        if require_durable and supabase_store.enabled() and not saved:
-            raise RuntimeError("Quote receipt could not be saved durably")
+            if require_durable and not saved:
+                raise RuntimeError("Quote receipt could not be saved") from exc
 
     def _get_local(self, request_id: str) -> QuoteRequestRecord | None:
         path = self._path(request_id)

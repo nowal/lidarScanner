@@ -140,7 +140,7 @@ async def test_the_ops_upload_api_records_the_provider(tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------- the email
-def test_the_email_separates_partners_from_previous_quoters(tmp_path):
+def test_the_provider_email_omits_other_partners_and_previous_quoters(tmp_path):
     (tmp_path / "partners.json").write_text(json.dumps([
         {"name": "Partner Painting Co.", "serviceTypes": ["Painting"], "zips": ["37203"],
          "contactName": "Sam"},
@@ -156,27 +156,25 @@ def test_the_email_separates_partners_from_previous_quoters(tmp_path):
 
     subject, body = build_ops_email(_record(), partners, None, prospects)
     assert "NO PROVIDER COVERAGE" not in subject
-    partner_block = body.split("TakeShape partners for this area")[1].split("Not partners")[0]
-    assert "Partner Painting Co." in partner_block and "Nash Painting" not in partner_block
-    assert "Nash Painting | quoted 1x through TakeShape" in body
-    assert "Sheet Painters | prospect from sheet:providers" in body
-
     html = build_ops_email_html(_record(), partners, None, prospects)
-    assert "not a partner" in html and "Nash Painting" in html
+    for content in (body, html):
+        assert "Partner Painting Co." not in content
+        assert "Nash Painting" not in content
+        assert "Sheet Painters" not in content
 
 
-def test_an_empty_list_is_said_out_loud(tmp_path):
+def test_coverage_gaps_remain_internal(tmp_path):
     record = _record(serviceType="Roofing", zip="99999")
     partners = find_partners("Roofing", "99999")
     prospects = find_prospects("Roofing", "99999")
     assert coverage_gap(partners, prospects, None)
 
     subject, body = build_ops_email(record, partners, None, prospects)
-    assert subject.startswith("[NO PROVIDER COVERAGE]")
-    assert "NO PROVIDER COVERAGE for Roofing in 99999" in body
-    assert "manual sourcing" in body
+    assert "NO PROVIDER COVERAGE" not in subject
+    assert "NO PROVIDER COVERAGE" not in body
+    assert "manual sourcing" not in body
     html = build_ops_email_html(record, partners, None, prospects)
-    assert "NO PROVIDER COVERAGE for Roofing in 99999" in html
+    assert "NO PROVIDER COVERAGE" not in html
 
 
 def test_one_researched_company_is_enough_to_clear_the_gap():

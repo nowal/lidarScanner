@@ -166,18 +166,17 @@ def test_a_quote_with_no_document_says_so_explicitly():
 
 
 # --------------------------------------------------------- the lead email
-def test_the_lead_email_tells_operations_they_can_attach_a_pdf():
+def test_the_lead_email_no_longer_promotes_reply_based_quote_entry():
     """The sample is what Quintin reviews, and it is pinned to the code by
     test_ops_email_rendering, so asserting on it asserts on the email."""
     sample = (
         Path(__file__).resolve().parents[1] / "docs" / "samples" / "ops-email-urban.txt"
     ).read_text(encoding="utf-8")
-    assert "OR JUST REPLY TO THIS EMAIL" in sample
-    assert "Attach the provider's estimate as a PDF" in sample
+    assert "OR JUST REPLY TO THIS EMAIL" not in sample
+    assert "Attach the provider's estimate as a PDF" not in sample
 
     html = (
         Path(__file__).resolve().parents[1] / "docs" / "samples" / "ops-email-urban.html"
     ).read_text(encoding="utf-8")
-    assert "Attach the provider&#x27;s estimate as a PDF" in html or (
-        "Attach the provider's estimate as a PDF" in html
-    )
+    assert "Attach the provider&#x27;s estimate as a PDF" not in html
+    assert "Attach the provider's estimate as a PDF" not in html

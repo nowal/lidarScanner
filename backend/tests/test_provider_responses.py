@@ -44,13 +44,13 @@ async def setup(monkeypatch):
     monkeypatch.setattr(media, 'put_bytes', put)
     monkeypatch.setattr(media.supabase_store, '_signed_storage_url', signed)
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test')
-    params = {'submission_id': str(uuid4()), 'provider_name': 'Brightline Painting', 'file_name': 'estimate.pdf'}
+    params = {'submission_id': str(uuid4()), 'provider_name': 'Brightline Painting', 'file_name': 'estimate.pdf', 'price_usd': '2450'}
     headers = {'Content-Type': 'application/pdf', 'X-Upload-Token': upload_token(sig)}
     return record, client, path, params, headers, uploaded
 
 
 @pytest.mark.asyncio
-async def test_pdf_only_response_returns_to_homeowner_and_survives_restart(monkeypatch, pdf):
+async def test_priced_pdf_response_returns_to_homeowner_and_survives_restart(monkeypatch, pdf):
     rec, client, path, params, headers, uploaded = await setup(monkeypatch)
     async with client:
         response = await client.post(path + '/responses', params=params, headers=headers, content=pdf)
@@ -61,7 +61,7 @@ async def test_pdf_only_response_returns_to_homeowner_and_survives_restart(monke
         assert view.status_code == 200
         quote = view.json()['quotes'][0]
         assert quote['providerName'] == 'Brightline Painting'
-        assert quote['priceUsd'] is None
+        assert quote['priceUsd'] == 2450
         assert quote['document']['fileName'] == 'estimate.pdf'
         assert quote['document']['url'].endswith('?fresh=true')
         assert 'storagePath' not in view.text and 'storageBucket' not in view.text
@@ -242,31 +242,31 @@ async def test_durable_rest_receipts_use_insert_only_and_reconcile_duplicates(mo
 
 
 @pytest.mark.asyncio
-async def test_earliest_available_date_reaches_homeowner_and_is_part_of_retry(monkeypatch, pdf):
-    from datetime import date
+async def test_price_is_required_and_dates_are_not_collected(monkeypatch, pdf):
     rec, client, path, params, headers, uploaded = await setup(monkeypatch)
-    params['earliest_available_date'] = '2026-11-02'
     async with client:
+        missing = {k: v for k, v in params.items() if k != 'price_usd'}
+        assert (await client.post(path + '/responses', params=missing, headers=headers, content=pdf)).status_code == 422
+        assert not uploaded
+        params['earliest_available_date'] = '2026-11-02'  # Stale clients cannot restore the removed field.
         result = await client.post(path + '/responses', params=params, headers=headers, content=pdf)
         assert result.status_code == 201, result.text
         view = (await client.get(f'/api/v1/ai/quote-requests/{rec.id}')).json()
-        assert view['quotes'][0]['earliestAvailableDate'] == '2026-11-02'
-        assert (await client.post(path + '/responses', params=params, headers=headers, content=pdf)).status_code == 200
-        assert len(uploaded) == 1
-        changed = dict(params, earliest_available_date='2026-11-03')
-        assert (await client.post(path + '/responses', params=changed, headers=headers, content=pdf)).status_code == 409
+        assert 'earliestAvailableDate' not in view['quotes'][0]
     cold = await QuoteRequestStore().get(rec.id)
-    assert cold.quotes[0].earliestAvailableDate == date(2026, 11, 2)
+    assert cold.quotes[0].earliestAvailableDate is None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('invalid_date', ['not-a-date', '2026-02-30', '2026-13-01'])
-async def test_invalid_availability_is_rejected_before_upload(monkeypatch, pdf, invalid_date):
+async def test_larger_pdf_limit_accepts_over_10_mb_and_rejects_over_25(monkeypatch, pdf):
     _, client, path, params, headers, uploaded = await setup(monkeypatch)
     async with client:
-        response = await client.post(path + '/responses', params=dict(params, earliest_available_date=invalid_date), headers=headers, content=pdf)
-        assert response.status_code == 422
-        assert not uploaded
+        large = pdf[:-6] + b' ' * (11 * 1024 * 1024) + b'%%EOF'
+        assert (await client.post(path + '/responses', params=params, headers=headers, content=large)).status_code == 201
+        too_large = pdf[:-6] + b' ' * (25 * 1024 * 1024) + b'%%EOF'
+        result = await client.post(path + '/responses', params=dict(params, submission_id=str(uuid4())), headers=headers, content=too_large)
+        assert result.status_code == 413
+        assert len(uploaded) == 1
 
 
 def test_older_quotes_and_retry_fingerprints_remain_compatible():
@@ -274,6 +274,6 @@ def test_older_quotes_and_retry_fingerprints_remain_compatible():
     from app.flow_quotes import ReturnedQuote
     quote = ReturnedQuote(providerName='Existing provider', priceUsd=100)
     assert quote.earliestAvailableDate is None
-    assert quote.homeowner_view()['earliestAvailableDate'] is None
+    assert 'earliestAvailableDate' not in quote.homeowner_view()
     assert provider_responses.fingerprint(b'pdf', 'Existing provider', None) == hashlib.sha256(
         b'pdf["Existing provider",null]').hexdigest()
