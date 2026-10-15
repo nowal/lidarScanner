@@ -1,6 +1,18 @@
 # Quote submission media
 
-## October 15: direct requests and complete acceptance contacts (local, unreleased)
+## October 15: direct requests and complete acceptance contacts — backend deployed
+
+The hosted backend is deployed from `b8f2e14f3166ff7f410c2781c9cf5e6534507d32`.
+Render deployment `dep-db8h8uu0tbcc738db0cg` completed successfully at
+2:00:22 PM EDT on October 15. GitHub deployment `7100335333` confirms that SHA.
+The submission failure reported from the locally built app was a rollout
+mismatch: the previous hosted OpenAPI document lacked the direct POST route,
+and an empty request returned HTTP 405. After deployment, `/health` returns
+200/ok, OpenAPI exposes the complete direct contract, and the same unauthenticated
+empty request correctly returns 401. No synthetic lead or email was created.
+The app can retry its saved submission ID/body without rescanning or a new
+TestFlight build. Mobile's clearer temporary-unavailability message is committed
+on local `main` separately; TestFlight remains unchanged.
 
 The dashboard defaults to Request Quote, with AI Chat (Beta) beside it. Both
 modes retain returned quotes and private PDF/approval access. Direct requests use
@@ -52,11 +64,12 @@ always return 409 directing clients to the contact approval flow. `/decide`
 continues to support declines. Deploy this backend before distributing the new
 app; older installations with incomplete contact data must update to accept.
 
-Acceptance messages retain `settings.ops_email` and explicitly CC
+Initial quote-request and acceptance messages retain `settings.ops_email` and explicitly CC
 `noah@takeshapehome.com`. A read-only check of stored production email payloads
 on October 15 found `quintin@takeshapehome.com` as the existing recipient
-(spelled Quintin). The setting is not replaced. Initial-email CC and inbound
-command trust are unchanged. Accepted contact name, phone, email, full address,
+(spelled Quintin). The setting is not replaced. Initial emails preserve additional
+configured CC recipients and deduplicate Noah even when already configured.
+Inbound command trust is unchanged. Accepted contact name, phone, email, full address,
 provider/price, decision method, and private signed-copy link (when applicable)
 go to operations for forwarding, never automatically to providers. Initial
 provider mail and the general scan viewer do not expose acceptance contacts.
@@ -73,7 +86,7 @@ extended outage; local capture is not mislabeled as live delivery.
 Read-only schema/storage inspection confirmed JSONB request records with a text
 thread ID, backend-only RLS, and a private `metashape-exports` bucket. No new
 migration is needed; do not reapply `20261013200344_provider_pdf_responses`.
-Validation: the full backend suite passes **1,304 tests, with 2 skipped**.
+Validation: the full backend suite passes **1,306 tests, with 2 skipped**.
 Direct-route tests cover exact text/ZIP preservation, immutable model/context/photo
 references, selected-area geometry and window dimensions, pending uploads,
 ownership, mismatched scan context, concurrent retries, and durable insert failure.
@@ -82,14 +95,17 @@ private prefill, signed-copy storage, cancellation/decline privacy, intended
 recipients, unchanged inbound trust, and notification recovery (including requests
 beyond the database's first result page). Both isolated
 browser scripts pass model measurements, camera photos, price/PDF submission,
-and responsive/touch behavior.
+and responsive/touch behavior. The new direct-submit-to-email tests use a mocked
+transport to verify Quintin and Noah, the exact narrative, a working private
+viewer/model redirect for the immutable scan, and identical retries followed by
+duplicate suppression. They cover both empty and already-configured CC settings.
 
-All verification uses isolated fixtures and mocked mail. These changes are
-integrated into local `main` for testing at
+Email verification uses isolated fixtures and mocked mail; live deployment
+checks only read health/schema and test rejection of an empty unauthenticated
+request. The deployed code is pushed to GitHub `main` and integrated locally at
 `/Users/noahwaldron/Documents/code/takeshape-backend-staged-upload`.
-No GitHub push, Render deployment, or TestFlight upload has been performed.
-End-to-end testing of the new mobile APIs requires this backend version; the
-hosted backend remains on the October 14 release until separately deployed.
+No TestFlight upload has been performed. The previous October 14 deployment
+remains documented below as release history.
 
 
 
