@@ -158,3 +158,52 @@ async def test_create_only_rest_conflict_restores_winner_without_overwrite(direc
     restored = await quote_store.create(losing)
     assert restored.synopsis == body['description']
     assert calls[0]['headers']['Prefer'] == 'resolution=ignore-duplicates,return=representation'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('configured_cc', ['', 'Noah <noah@takeshapehome.com>, noah@takeshapehome.com'])
+async def test_direct_email_reaches_both_ops_with_private_model_link_once(direct, monkeypatch, configured_cc):
+    from urllib.parse import urlsplit
+    from app.flow import quote_media
+    from app.flow.ops_reply import allowed_reply_senders
+    client, body, _, _ = direct
+    monkeypatch.setattr(settings, 'ops_email', 'Quintin <quintin@takeshapehome.com>')
+    monkeypatch.setattr(settings, 'ops_quote_cc', configured_cc)
+    monkeypatch.setattr(settings, 'resend_api_key', 'isolated-transport')
+    monkeypatch.setattr(quote_media, 'queue_conversion', lambda *args: None)
+    response = await client.post('/api/v1/ai/quote-requests/direct', json=body)
+    assert response.status_code == 201
+    saved = await quote_store.get(response.json()['quoteRequestId'])
+    # Photo extraction has separate archive tests; this fixture has no real ZIP.
+    saved.scanMedia['photosPrepared'] = True
+    await quote_store.save(saved)
+    attempts = []
+    async def transport(to, subject, text, html=None, **kwargs):
+        attempts.append((to, subject, text, html, kwargs))
+        if len(attempts) == 1:
+            raise RuntimeError('Temporary transport failure')
+    monkeypatch.setattr(ops_email, '_send_via_resend', transport)
+    assert await ops_email.send_ops_email(saved) == 'failed'
+    restored = await QuoteRequestStore().get(saved.id)
+    assert await ops_email.send_ops_email(restored) == 'sent'
+    assert attempts[0] == attempts[1]  # Same body and transport idempotency key.
+    to, subject, text, html, options = attempts[-1]
+    assert ops_email.recipient_list(to) == ['quintin@takeshapehome.com']
+    assert options['cc'] == ['noah@takeshapehome.com']
+    assert body['description'] in text and '01234' in subject
+    link = quote_media.link(restored)
+    assert link in text and link in html
+    assert '/api/v1/quote-media/' in link
+    assert (await client.get(urlsplit(link).path)).status_code == 200
+    signed_objects = []
+    async def sign(bucket, key, expires_in):
+        signed_objects.append((bucket, key, expires_in))
+        return 'https://storage.example/private-model'
+    monkeypatch.setattr(supabase_store, '_signed_storage_url', sign)
+    assert (await client.get(urlsplit(link).path + '/models/0/usdz')).status_code == 307
+    assert signed_objects[-1][1] == index()['homeModel']['object']
+    assert signed_objects[-1][2] <= 300
+    assert 'noah@takeshapehome.com' not in allowed_reply_senders()
+    assert (await client.post('/api/v1/ai/quote-requests/direct', json=body)).status_code == 200
+    assert await ops_email.send_ops_email(saved) == 'already_sent'
+    assert len(attempts) == 2

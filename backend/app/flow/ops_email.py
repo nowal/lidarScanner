@@ -830,7 +830,10 @@ async def _deliver_ops_email(record: Any) -> str:
         subject, body = build_ops_email(record, partners, researched, prospects, ranked)
         html = build_ops_email_html(record, partners, researched, prospects, ranked)
         record.opsEmailPayload = {'subject': subject, 'body': body, 'html': html,
-            'to': settings.ops_email, 'cc': recipient_list(settings.ops_quote_cc)}
+            'to': settings.ops_email,
+            # Every new lead reaches Noah as well as the configured operations
+            # recipient. Preserve additional configured copies and deduplicate.
+            'cc': recipient_list(recipient_list(settings.ops_quote_cc) + ['noah@takeshapehome.com'])}
         await quote_store.save(record, require_durable=True)
         return await _deliver_payload(record)
     except Exception as exc:  # noqa: BLE001
