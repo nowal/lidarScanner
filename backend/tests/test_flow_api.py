@@ -426,14 +426,15 @@ async def test_quote_lifecycle_end_to_end(monkeypatch):
         # Selection releases the address (§12).
         quote_id = polled["quotes"][0]["id"]
         await http.post(
-            f"/api/v1/ai/quote-requests/{qr_id}/select",
-            json={"quoteId": quote_id},
+            f"/api/v1/ai/quote-requests/{qr_id}/quotes/{quote_id}/approve",
+            json={"contact": {"fullName": "Dana Homeowner", "phone": "6155550199", "email": "dana@example.com",
+                              "address": "123 Maple Street, Nashville TN 37203"}},
             headers=auth_headers(),
         )
         released = (
             await http.get(f"/api/v1/ops/quote-requests/{qr_id}", headers=ops_headers)
         ).json()
-        assert released["address"] == "123 Maple Street, Nashville TN"
+        assert released["address"] == "123 Maple Street, Nashville TN 37203"
 
 
 @pytest.mark.asyncio

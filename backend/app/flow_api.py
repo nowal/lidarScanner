@@ -9,7 +9,11 @@ separate ``LIDARAI_OPS_TOKEN`` and refuse to exist until it is configured.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
+import hashlib
+import json
 import html as html_mod
 import logging
 import re
@@ -19,7 +23,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .config import settings
 from .flow import FlowEngine
@@ -28,6 +32,9 @@ from .flow_quotes import (
     EXPECTATIONS,
     VALID_STATUSES,
     ReturnedQuote,
+    ApprovalContact,
+    QuoteRequestRecord,
+    save_request_snapshot,
     create_quote_request,
     deliver_to_ops,
     quote_store,
@@ -132,6 +139,93 @@ class QuoteRequestSubmission(BaseModel):
     confirm: bool = False
     # Optional context snapshot so the lead package carries measurements.
     homeContext: Optional[HomeAIContextPacket] = None
+
+
+class DirectQuoteSubmission(BaseModel):
+    submissionId: UUID
+    homeId: UUID
+    revision: UUID
+    description: str = Field(min_length=1, max_length=10000)
+    zip: str = Field(pattern=r'^[0-9]{5}(?:-[0-9]{4})?$')
+    roomKeys: list[str] = Field(default_factory=list, max_length=100)
+    homeContext: Optional[HomeAIContextPacket] = None
+
+    @field_validator('description')
+    @classmethod
+    def nonblank(cls, value):
+        if not value.strip():
+            raise ValueError('Describe what you want done')
+        return value  # The homeowner's exact narrative, including paragraph breaks.
+
+
+_direct_submission_locks: dict[str, asyncio.Lock] = {}
+
+
+@router.post('/ai/quote-requests/direct', dependencies=[Depends(require_token)])
+async def submit_direct_quote_request(body: DirectQuoteSubmission,
+                                     x_homeowner_token: Optional[str] = Header(default=None)) -> JSONResponse:
+    from .flow import scan_uploads
+    from .home_index import HomeIndex
+    home_id = str(body.homeId)
+    owner = await _scan_upload_owner(home_id, x_homeowner_token)
+    if body.homeContext and body.homeContext.scanId and body.homeContext.scanId.lower() != home_id:
+        raise HTTPException(422, 'The measurement context must belong to the submitted scan.')
+    request_id = 'qr_' + hashlib.sha256(f'{owner}:{body.submissionId}'.encode()).hexdigest()[:32]
+    fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+    async with _direct_submission_locks.setdefault(request_id, asyncio.Lock()):
+        existing = await quote_store.get(request_id)
+        if existing:
+            await _require_homeowner_access(existing, x_homeowner_token)
+            if existing.submissionFingerprint != fingerprint:
+                raise HTTPException(409, 'This submission was already used for a different request.')
+            _schedule_ops_email(existing)
+            return JSONResponse(existing.homeowner_view())
+        upload = await scan_uploads.transition(home_id, 'read')
+        published = (upload or {}).get('publishedIndex') or {}
+        metadata = published.get('upload') or {}
+        if not upload or upload.get('ownerId') != owner:
+            raise HTTPException(403, 'This scan belongs to another homeowner')
+        if (upload.get('revision') != str(body.revision) or metadata.get('revision') != str(body.revision)
+                or not metadata.get('modelsReady')):
+            raise HTTPException(409, 'Your latest scan is still uploading. Please wait and try again.')
+        index = HomeIndex.from_json(published)
+        keys = set(body.roomKeys)
+        rooms = [r for r in index.rooms if not keys or r.key in keys]
+        if keys and keys != {r.key for r in rooms}:
+            raise HTTPException(422, 'An explicitly selected area is not in this scan.')
+        measurements = _measurements_from_context(body.homeContext) if not keys else {}
+        # Scope comes from this submission only, never a conversation's active room.
+        measurements['rooms'] = []
+        for room in rooms:
+            entry = dict(name=room.display_name, floorAreaSquareFeet=round(room.area_sqft, 1),
+                         windowCount=room.window_count, doorCount=room.door_count, wallCount=room.wall_count,
+                         windowOpenings=[dict(widthFeet=round(w * 3.28084, 1), heightFeet=round(h * 3.28084, 1))
+                                         for w, h in room.window_openings], geometry=room.measurements)
+            if room.measurements.get('paintable_sqft') is not None:
+                entry['paintableWallSquareFeet'] = round(float(room.measurements['paintable_sqft']), 1)
+            if room.measurements.get('perimeter_m') is not None:
+                entry['perimeterFeet'] = round(float(room.measurements['perimeter_m']) * 3.28084, 1)
+            measurements['rooms'].append(entry)
+        for key in ('floorAreaSquareFeet', 'windowCount', 'doorCount', 'wallCount', 'paintableWallSquareFeet'):
+            total = sum(r.get(key, 0) for r in measurements['rooms'])
+            if total or keys:
+                measurements[key] = round(total, 1)
+        measurements['windowOpenings'] = [opening for r in measurements['rooms'] for opening in r['windowOpenings']]
+        record = QuoteRequestRecord(id=request_id, createdAt=now_utc().isoformat(),
+            threadId=f'direct_{body.submissionId}', homeownerId=owner, homeId=home_id,
+            zip=body.zip, synopsis=body.description, submissionMode='direct',
+            submissionFingerprint=fingerprint, measurements=measurements,
+            scopeIntent='selected_rooms' if keys else 'whole_home', scopeRooms=sorted(keys),
+            opsEmailQueuedAt=now_utc().isoformat())
+        try:
+            record = await save_request_snapshot(record, require_model=True, expected_revision=str(body.revision), create_only=True)
+        except RuntimeError as exc:
+            raise HTTPException(503, 'Your request could not be saved. Retry the same submission.') from exc
+        if record.submissionFingerprint != fingerprint:
+            raise HTTPException(409, 'This submission was already used for a different request.')
+        await deliver_to_ops(record)
+        _schedule_ops_email(record)
+        return JSONResponse(record.homeowner_view(), status_code=201)
 
 
 @router.post("/ai/quote-requests", dependencies=[Depends(require_token)], status_code=201)
@@ -389,8 +483,7 @@ async def select_quote(
     await _require_homeowner_access(record, x_homeowner_token)
     if not any(q.id == body.quoteId for q in record.quotes):
         raise HTTPException(status_code=404, detail="Quote not found on this request")
-    await _record_decision(record, body.quoteId, "approved", None)
-    return JSONResponse(record.homeowner_view())
+    raise HTTPException(409, "Please update TakeShape and complete contact information through quote approval.")
 
 
 async def _record_decision(
@@ -404,11 +497,18 @@ async def _record_decision(
     agent the address is out when the homeowner has just changed their
     mind."""
     quote = record.quote_by_id(quote_id)
+    if record.status == "closed" or (decision == "approved" and record.selectedQuoteId not in (None, quote_id)):
+        raise HTTPException(409, "This request is closed or another quote has already been selected.")
+    if decision == "approved" and (not quote.approvalContact or not quote.approvalMethod):
+        raise HTTPException(409, "Complete contact information through quote approval.")
     quote.decision = decision
     quote.decisionNote = (note or "").strip() or None
     quote.decidedAt = now_utc().isoformat()
     if decision == "approved":
         record.selectedQuoteId = quote_id
+        quote.acceptanceNotificationQueuedAt = quote.decidedAt
+        quote.acceptanceNotificationDeliveredAt = None
+        quote.acceptanceNotificationCapturedAt = None
     elif record.selectedQuoteId == quote_id:
         record.selectedQuoteId = None
     try:
@@ -417,7 +517,10 @@ async def _record_decision(
         raise HTTPException(503, "Your decision could not be saved. Please try again.") from exc
     # Notify the existing operations handoff after the decision is durable.
     try:
-        await ops_email.send_decision_email(record, quote)
+        if decision == "approved":
+            await ops_email.deliver_acceptance(record.id, quote.id)
+        else:
+            await ops_email.send_decision_email(record, quote)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Decision email for %s failed: %s", record.id, exc)
 
@@ -435,22 +538,49 @@ async def decide_quote(
     await _require_homeowner_access(record, x_homeowner_token)
     if record.quote_by_id(body.quoteId) is None:
         raise HTTPException(status_code=404, detail="Quote not found on this request")
-    await _record_decision(record, body.quoteId, body.decision, body.note)
+    if body.decision == "approved":
+        raise HTTPException(409, "Please update TakeShape and complete contact information through quote approval.")
+    async with _approval_locks.setdefault(request_id, asyncio.Lock()):
+        record = await quote_store.get(request_id)
+        await _record_decision(record, body.quoteId, body.decision, body.note)
     return JSONResponse(record.homeowner_view())
 
 
 _approval_locks: dict[str, asyncio.Lock] = {}
 
 
-class CallbackApproval(BaseModel):
-    phone: str = Field(min_length=7, max_length=40)
+class ContactApproval(BaseModel):
+    contact: ApprovalContact
+    signedPDF: Optional[str] = None
+
+
+def _legacy_contact(record, phone=None) -> ApprovalContact:
+    # Build 16 can continue only when all required details already exist.
+    # Incomplete clients get an actionable upgrade error; no silent acceptance.
+    try:
+        if len((record.firstName or '').split()) < 2:
+            raise ValueError('Legacy first-name-only capture is not a complete name')
+        return ApprovalContact(fullName=record.firstName or '', phone=phone or record.contactPhone or '',
+                               email=record.contactEmail or '', address=record.address or '')
+    except ValueError as exc:
+        raise HTTPException(409, 'Please update TakeShape to complete your name, phone, email and full address before approval.') from exc
+
+
+@router.get('/ai/quote-requests/{request_id}/contact', dependencies=[Depends(require_token)])
+async def approval_contact_prefill(request_id: str, x_homeowner_token: Optional[str] = Header(default=None)):
+    record = await quote_store.get(request_id)
+    if not record:
+        raise HTTPException(404, 'Quote request not found')
+    await _require_homeowner_access(record, x_homeowner_token)
+    return JSONResponse(dict(fullName=record.firstName or '', phone=record.contactPhone or '',
+                             email=record.contactEmail or '', address=record.address or ''),
+                        headers={'Cache-Control': 'private, no-store'})
 
 
 @router.post("/ai/quote-requests/{request_id}/quotes/{quote_id}/approve", dependencies=[Depends(require_token)])
 async def approve_quote(request_id: str, quote_id: str, request: Request,
                         x_homeowner_token: Optional[str] = Header(default=None)) -> JSONResponse:
     from .flow import quote_approvals, provider_responses
-    # Serialize approval attempts in this worker, including upload retries.
     async with _approval_locks.setdefault(request_id, asyncio.Lock()):
         record = await quote_store.get(request_id)
         if record is None:
@@ -459,35 +589,50 @@ async def approve_quote(request_id: str, quote_id: str, request: Request,
         quote = record.quote_by_id(quote_id)
         if quote is None:
             raise HTTPException(404, "Quote not found on this request")
-        if record.selectedQuoteId == quote_id and quote.approvalMethod:
+        if record.selectedQuoteId == quote_id and quote.approvalMethod and quote.decision == 'approved':
+            await ops_email.deliver_acceptance(record.id, quote.id)
             return JSONResponse(await provider_responses.homeowner_view(record), headers={'Cache-Control': 'private, no-store'})
         if record.status == 'closed' or record.selectedQuoteId not in (None, quote_id):
             raise HTTPException(409, "This request is closed or another quote has already been selected.")
         content_type = request.headers.get('content-type', '').split(';')[0].lower()
+        signed_pdf = None
         if content_type == 'application/pdf':
-            quote.signedDocument = await quote_approvals.save_signed_pdf(record, quote, request)
+            contact = _legacy_contact(record)
+            signed_pdf = request
+        elif content_type == 'application/json':
+            raw = bytearray()
+            async for chunk in request.stream():
+                if len(raw) + len(chunk) > 35 * 1024 * 1024:
+                    raise HTTPException(413, 'The signed PDF must be 25 MB or smaller.')
+                raw.extend(chunk)
+            try:
+                payload = json.loads(raw)
+                if not isinstance(payload, dict):
+                    raise ValueError('Expected an approval form')
+                if 'contact' in payload:
+                    body = ContactApproval.model_validate(payload)
+                    contact = body.contact
+                    if body.signedPDF is not None:
+                        signed_pdf = base64.b64decode(body.signedPDF, validate=True)
+                else:
+                    phone = payload.get('phone', '')
+                    if not isinstance(phone, str) or not re.fullmatch(r'\+?[0-9(). \-]+', phone) or not 7 <= len(re.sub(r'\D', '', phone)) <= 15:
+                        raise ValueError('Invalid phone')
+                    contact = _legacy_contact(record, phone)
+            except (ValueError, binascii.Error) as exc:
+                raise HTTPException(422, 'Enter your full name, valid phone, email and full address including ZIP.') from exc
+        else:
+            raise HTTPException(415, 'Submit contact information and optionally a signed PDF.')
+        # Only the final approval writes contact data; viewing/prefilling never releases it.
+        quote.approvalContact = contact
+        if signed_pdf is not None:
+            quote.signedDocument = await quote_approvals.save_signed_pdf(record, quote, signed_pdf)
             quote.approvalMethod = 'signature'
             quote.callbackPhone = None
-        elif content_type == 'application/json':
-            try:
-                # Bound this small form independently of the PDF upload limit.
-                raw = bytearray()
-                async for chunk in request.stream():
-                    if len(raw) + len(chunk) > 4096:
-                        raise HTTPException(413, "The callback form is too large.")
-                    raw.extend(chunk)
-                body = CallbackApproval.model_validate_json(raw)
-            except ValueError as exc:
-                raise HTTPException(422, "Enter a phone number the provider can call.") from exc
-            phone = body.phone.strip()
-            digits = re.sub(r'\D', '', phone)
-            if not 7 <= len(digits) <= 15 or not re.fullmatch(r'\+?[0-9(). \-]+', phone):
-                raise HTTPException(422, "Enter a valid phone number the provider can call.")
-            quote.approvalMethod = 'callback'
-            quote.callbackPhone = phone
-            quote.signedDocument = None
         else:
-            raise HTTPException(415, "Choose a signed PDF or a callback phone number.")
+            quote.approvalMethod = 'callback'
+            quote.callbackPhone = contact.phone
+            quote.signedDocument = None
         await _record_decision(record, quote_id, 'approved', None)
         return JSONResponse(await provider_responses.homeowner_view(record), headers={'Cache-Control': 'private, no-store'})
 

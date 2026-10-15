@@ -546,12 +546,18 @@ async def list_quote_requests(status: str | None = None) -> list[dict[str, Any]]
     if not enabled():
         return None
     try:
-        params: dict[str, str] = {"select": "record", "order": "created_at.asc"}
+        params: dict[str, str] = {"select": "record", "order": "created_at.asc,id.asc", "limit": "1000"}
         if status:
             params["status"] = f"eq.{status}"
-        resp = await _rest().get("/flow_quote_requests", params=params)
-        resp.raise_for_status()
-        return [row["record"] for row in resp.json()]
+        records = []
+        while True:
+            params['offset'] = str(len(records))
+            resp = await _rest().get("/flow_quote_requests", params=params)
+            resp.raise_for_status()
+            rows = resp.json()
+            records.extend(row['record'] for row in rows)
+            if len(rows) < 1000:
+                return records
     except Exception as exc:  # noqa: BLE001
         logger.warning("Supabase quote_request list failed: %s", exc)
         return None

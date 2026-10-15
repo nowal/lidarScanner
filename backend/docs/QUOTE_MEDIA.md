@@ -1,5 +1,97 @@
 # Quote submission media
 
+## October 15: direct requests and complete acceptance contacts (local, unreleased)
+
+The dashboard defaults to Request Quote, with AI Chat (Beta) beside it. Both
+modes retain returned quotes and private PDF/approval access. Direct requests use
+`POST /api/v1/ai/quote-requests/direct` with `submissionId` (UUID), `homeId`,
+`revision`, `description`, string `zip`, optional `roomKeys`, and optional
+`homeContext`. Description is required (up to 10,000 characters), preserved
+verbatim in the synopsis, and never synthesized from conversation history. ZIP
+accepts five digits or ZIP+4, including leading zeroes. No contact, service,
+materials, opening turn, or conversation completion is required. The original
+AI endpoint retains its slot and identity gates.
+
+The direct route checks the current guest/signed-in homeowner and scan owner,
+requires a matching completed revision and immutable context/model snapshot,
+and takes scope only from this request. Omitted room keys mean the submitted
+whole scan. Explicit keys must exist. Deterministic owner/submission IDs and
+create-only durable inserts prevent a retry from overwriting a receipt; changed
+payloads with a reused ID are rejected. Retry the *identical* body after an
+uncertain result. The mobile app saves that body before sending, restores it
+after relaunch, and retries pending submissions on resume. Drafts and all tracked
+request IDs are stored per scan; chat and direct requests can coexist.
+
+`POST /ai/quote-requests/{request}/quotes/{quote}/approve` now accepts JSON:
+
+```json
+{
+  "contact": {
+    "fullName": "Test Homeowner",
+    "phone": "6155550199",
+    "email": "test@example.com",
+    "address": "123 Main Street, Nashville, TN 37203, Unit 4B"
+  },
+  "signedPDF": "optional base64 PDF bytes"
+}
+```
+
+Omit `signedPDF` for a callback. The bounded JSON envelope allows the entire
+contact/signature decision to be validated together; decoded PDFs retain the
+25 MiB limit and separate private content-addressed storage. A failed upload or
+durable save never approves the quote. Completed retries reuse the saved
+approval. The original provider PDF is unchanged. Contact prefill is an
+owner-authorized, no-store GET at `/ai/quote-requests/{request}/contact`; it does
+not collect, approve, or notify. Corrected contact data is saved on the chosen
+quote and appears in the authorized operations view only after approval.
+
+Build 16's raw PDF and phone-only JSON contracts remain usable only if the
+request already contains complete valid contact details; otherwise they return
+HTTP 409 asking for an app update. Legacy `/select` and approval through `/decide`
+always return 409 directing clients to the contact approval flow. `/decide`
+continues to support declines. Deploy this backend before distributing the new
+app; older installations with incomplete contact data must update to accept.
+
+Acceptance messages retain `settings.ops_email` and explicitly CC
+`noah@takeshapehome.com`. A read-only check of stored production email payloads
+on October 15 found `quintin@takeshapehome.com` as the existing recipient
+(spelled Quintin). The setting is not replaced. Initial-email CC and inbound
+command trust are unchanged. Accepted contact name, phone, email, full address,
+provider/price, decision method, and private signed-copy link (when applicable)
+go to operations for forwarding, never automatically to providers. Initial
+provider mail and the general scan viewer do not expose acceptance contacts.
+Declines retain their original recipient and omit acceptance contact details.
+
+A pending acceptance-delivery receipt is saved with the approval. A startup-owned
+worker checks it every 30 seconds, and approval retries also retry failed mail.
+Delivered receipts suppress repeat messages. The stable Resend idempotency key
+covers an uncertain transport/durable-receipt retry. As with initial emails,
+Resend's 24-hour key retention and SMTP's lack of transactional delivery leave a
+rare ambiguous-send window that requires operations reconciliation after an
+extended outage; local capture is not mislabeled as live delivery.
+
+Read-only schema/storage inspection confirmed JSONB request records with a text
+thread ID, backend-only RLS, and a private `metashape-exports` bucket. No new
+migration is needed; do not reapply `20261013200344_provider_pdf_responses`.
+Validation: the full backend suite passes **1,304 tests, with 2 skipped**.
+Direct-route tests cover exact text/ZIP preservation, immutable model/context/photo
+references, selected-area geometry and window dimensions, pending uploads,
+ownership, mismatched scan context, concurrent retries, and durable insert failure.
+Approval tests cover both complete-contact contracts, legacy bypass rejection,
+private prefill, signed-copy storage, cancellation/decline privacy, intended
+recipients, unchanged inbound trust, and notification recovery (including requests
+beyond the database's first result page). Both isolated
+browser scripts pass model measurements, camera photos, price/PDF submission,
+and responsive/touch behavior.
+
+All verification uses isolated fixtures and mocked mail. These changes are
+integrated into local `main` for testing at
+`/Users/noahwaldron/Documents/code/takeshape-backend-staged-upload`.
+No GitHub push, Render deployment, or TestFlight upload has been performed.
+End-to-end testing of the new mobile APIs requires this backend version; the
+hosted backend remains on the October 14 release until separately deployed.
+
+
 
 ## October 14 cleanup — deployed
 
@@ -98,8 +190,9 @@ runs on the quote submission response path.
 
 `LIDARAI_OPS_EMAIL` retains the primary operations address. Set
 `LIDARAI_OPS_QUOTE_CC=noah@takeshapehome.com` for submission copies. The setting is
-only applied to quote-request lead messages, including explicit resends; decision
-emails and reply confirmations keep their existing destinations. Resend and SMTP
+only applied to quote-request lead messages, including explicit resends. Acceptance
+emails independently add Noah as described above; decline emails and reply
+confirmations keep their existing destinations. Resend and SMTP
 receive separate validated recipient lists with duplicate addresses removed.
 `LIDARAI_OPS_REPLY_TO` and `LIDARAI_OPS_REPLY_SENDERS` retain their existing meanings;
 a CC recipient does not gain email-command privileges.

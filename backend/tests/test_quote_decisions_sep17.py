@@ -19,6 +19,7 @@ from app.config import settings
 from app.flow import ops_email
 from app.flow.state import FlowState, QuoteRequestRef
 from app.flow_api import _record_decision
+from app.flow_quotes import ApprovalContact
 from app.flow_quotes import QuoteRequestRecord, ReturnedQuote, quote_store
 from app.models import now_utc
 
@@ -45,7 +46,7 @@ def _quiet_ops_email(monkeypatch):
     """Every decision notifies operations; capture instead of sending."""
     sent: list[tuple[str, str]] = []
 
-    async def _capture(subject, body, html=None, *, outbox_key="message"):
+    async def _capture(subject, body, html=None, *, outbox_key="message", **kwargs):
         sent.append((subject, body))
         return "sent"
 
@@ -60,6 +61,8 @@ async def test_approving_records_the_verdict_and_releases_the_address(monkeypatc
     record = _record()
     await quote_store.save(record)
 
+    record.quote_by_id("q1").approvalMethod = "callback"
+    record.quote_by_id("q1").approvalContact = ApprovalContact(fullName="Test Homeowner", phone="6155550199", email="home@example.test", address="123 Hidden Street, Nashville, TN 37203")
     await _record_decision(record, "q1", "approved", "Looks right, let's go")
 
     quote = record.quote_by_id("q1")
@@ -90,6 +93,8 @@ async def test_declining_the_approved_quote_takes_the_approval_back(monkeypatch,
     record = _record()
     await quote_store.save(record)
 
+    record.quote_by_id("q1").approvalMethod = "callback"
+    record.quote_by_id("q1").approvalContact = ApprovalContact(fullName="Test Homeowner", phone="6155550199", email="home@example.test", address="123 Hidden Street, Nashville, TN 37203")
     await _record_decision(record, "q1", "approved", None)
     assert record.selectedQuoteId == "q1"
     await _record_decision(record, "q1", "declined", "Changed my mind")
@@ -105,6 +110,8 @@ async def test_an_empty_comment_is_stored_as_no_comment(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     record = _record()
     await quote_store.save(record)
+    record.quote_by_id("q1").approvalMethod = "callback"
+    record.quote_by_id("q1").approvalContact = ApprovalContact(fullName="Test Homeowner", phone="6155550199", email="home@example.test", address="123 Hidden Street, Nashville, TN 37203")
     await _record_decision(record, "q1", "approved", "   ")
     assert record.quote_by_id("q1").decisionNote is None
 
@@ -132,12 +139,14 @@ async def test_operations_is_told_about_an_approval_with_the_address(
     record = _record()
     await quote_store.save(record)
 
+    record.quote_by_id("q1").approvalMethod = "callback"
+    record.quote_by_id("q1").approvalContact = ApprovalContact(fullName="Test Homeowner", phone="6155550199", email="home@example.test", address="123 Hidden Street, Nashville, TN 37203")
     await _record_decision(record, "q1", "approved", "Looks right")
 
     subject, body = _quiet_ops_email[-1]
     assert subject.startswith("APPROVED: Brightline Painting")
     assert "qr_dec" in subject
-    assert "12 Elm St" in body, "approval is the address-release moment"
+    assert "123 Hidden Street" in body, "approval is the address-release moment"
     assert "Looks right" in body
 
 
@@ -170,6 +179,8 @@ async def test_a_mail_failure_never_breaks_the_decision(monkeypatch, tmp_path):
     record = _record()
     await quote_store.save(record)
 
+    record.quote_by_id("q1").approvalMethod = "callback"
+    record.quote_by_id("q1").approvalContact = ApprovalContact(fullName="Test Homeowner", phone="6155550199", email="home@example.test", address="123 Hidden Street, Nashville, TN 37203")
     await _record_decision(record, "q1", "approved", None)
     assert record.quote_by_id("q1").decision == "approved"
 

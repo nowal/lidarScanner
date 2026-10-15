@@ -565,11 +565,15 @@ async def send_decision_email(record: Any, quote: Any) -> str:
         lines.extend(f"    {ln}" for ln in quote.decisionNote.splitlines())
     lines.append("")
     if approved:
+        contact = getattr(quote, 'approvalContact', None)
+        if contact:
+            lines.extend([f"  Full name: {contact.fullName}", f"  Phone: {contact.phone}",
+                          f"  Email: {contact.email}"])
         lines.append(
             "This is the address-release moment: the street address below goes to "
             "this provider and to nobody else."
         )
-        lines.append(f"  Address: {record.address or 'not captured in the walk'}")
+        lines.append(f"  Address: {contact.address if contact else record.address or 'not captured in the walk'}")
         lines.append("")
         if quote.approvalMethod == "callback":
             lines.append(f"  Callback phone: {quote.callbackPhone}")
@@ -593,7 +597,66 @@ async def send_decision_email(record: Any, quote: Any) -> str:
                 else "Nothing else is on this request, so it needs another quote."
             )
         )
-    return await send_ops_message(subject, "\n".join(lines), outbox_key=f"decision-{record.id}")
+    extras = {}
+    if approved:
+        # Acceptance copies do not change initial-email recipients or inbound command trust.
+        extras = dict(cc=['noah@takeshapehome.com'],
+                      idempotency_key=f'acceptance-{record.id}-{quote.id}-{quote.decidedAt}')
+    return await send_ops_message(subject, "\n".join(lines), outbox_key=f"decision-{record.id}", **extras)
+
+
+_acceptance_locks: dict[str, asyncio.Lock] = {}
+
+
+async def deliver_acceptance(request_id: str, quote_id: str) -> str:
+    """Durable outbox receipt; retries reload consent and never repeat a saved send."""
+    from ..flow_quotes import quote_store
+    from ..models import now_utc
+    async with _acceptance_locks.setdefault(request_id, asyncio.Lock()):
+        record = await quote_store.get(request_id)
+        quote = record.quote_by_id(quote_id) if record else None
+        if (not quote or record.selectedQuoteId != quote_id or quote.decision != 'approved'
+                or not quote.acceptanceNotificationQueuedAt):
+            return 'cancelled'
+        if quote.acceptanceNotificationDeliveredAt:
+            return 'already_sent'
+        result = await send_decision_email(record, quote)
+        # Fetch again so email receipts cannot overwrite another quote/decision.
+        latest = await quote_store.get(request_id)
+        current = latest.quote_by_id(quote_id) if latest else None
+        if current and current.decidedAt == quote.decidedAt and current.decision == 'approved':
+            if result == 'sent':
+                current.acceptanceNotificationDeliveredAt = now_utc().isoformat()
+            elif result == 'outbox':
+                current.acceptanceNotificationCapturedAt = now_utc().isoformat()
+            if result in ('sent', 'outbox'):
+                await quote_store.save(latest, require_durable=True)
+        return result
+
+
+async def retry_pending_acceptances() -> int:
+    from ..flow_quotes import quote_store
+    count = 0
+    for record in await quote_store.list():
+        quote = record.quote_by_id(record.selectedQuoteId) if record.selectedQuoteId else None
+        if (quote and quote.decision == 'approved' and quote.acceptanceNotificationQueuedAt
+                and not quote.acceptanceNotificationDeliveredAt
+                and (settings.resend_api_key or _smtp_configured() or not quote.acceptanceNotificationCapturedAt)):
+            try:
+                await deliver_acceptance(record.id, quote.id)
+                count += 1
+            except Exception:
+                logger.warning('Acceptance delivery retry failed for %s', record.id)
+    return count
+
+
+async def run_acceptance_email_worker() -> None:
+    while True:
+        try:
+            await retry_pending_acceptances()
+        except Exception:
+            logger.warning('Could not recover pending acceptance notifications')
+        await asyncio.sleep(30)
 
 
 def _decision_price(quote: Any) -> str:

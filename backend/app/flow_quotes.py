@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional
 
 import httpx
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 from .config import settings
 from .flow import supabase_store
@@ -95,6 +95,30 @@ class QuoteDocument(BaseModel):
     uploadedAt: str = Field(default_factory=lambda: now_utc().isoformat())
 
 
+class ApprovalContact(BaseModel):
+    fullName: str = Field(min_length=1, max_length=200)
+    phone: str = Field(min_length=7, max_length=40)
+    email: str = Field(min_length=3, max_length=254)
+    address: str = Field(min_length=10, max_length=1000)
+
+    @field_validator('*', mode='before')
+    @classmethod
+    def trim(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode='after')
+    def validate_contact(self):
+        if not self.fullName or not any(c.isalpha() for c in self.fullName):
+            raise ValueError('Enter your full name')
+        if not 7 <= len(re.sub(r'\D', '', self.phone)) <= 15 or not re.fullmatch(r'\+?[0-9(). \-]+', self.phone):
+            raise ValueError('Enter a valid phone number')
+        if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', self.email):
+            raise ValueError('Enter a valid email')
+        if not re.search(r'\b[0-9]{5}(?:-[0-9]{4})?\b', self.address) or not any(c.isalpha() for c in self.address):
+            raise ValueError('Enter your full street address, city, state and ZIP')
+        return self
+
+
 class ReturnedQuote(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     providerName: str = Field(max_length=200)
@@ -122,6 +146,10 @@ class ReturnedQuote(BaseModel):
     approvalMethod: Optional[Literal["signature", "callback"]] = None
     callbackPhone: Optional[str] = None
     signedDocument: Optional[QuoteDocument] = None
+    approvalContact: Optional[ApprovalContact] = None
+    acceptanceNotificationQueuedAt: Optional[str] = None
+    acceptanceNotificationDeliveredAt: Optional[str] = None
+    acceptanceNotificationCapturedAt: Optional[str] = None
 
     @model_validator(mode="after")
     def _sane_prices(self) -> "ReturnedQuote":
@@ -203,6 +231,8 @@ class QuoteRequestRecord(BaseModel):
     opsEmailQueuedAt: Optional[str] = None
     opsEmailDeliveredAt: Optional[str] = None
     opsEmailCapturedAt: Optional[str] = None
+    submissionMode: str = 'chat'
+    submissionFingerprint: Optional[str] = None
 
     # ---------------------------------------------------------------- views
     def homeowner_view(self) -> dict[str, Any]:
@@ -241,6 +271,8 @@ class QuoteRequestRecord(BaseModel):
         address_released = (
             include_address if include_address is not None else self.selectedQuoteId is not None
         )
+        selected = self.quote_by_id(self.selectedQuoteId) if self.selectedQuoteId else None
+        accepted_contact = selected.approvalContact if address_released and selected and selected.decision == 'approved' else None
         model = {k: v for k, v in (self.modelLink or {}).items() if k != "jobId"} or None
         return {
             "schemaVersion": SCHEMA_VERSION,
@@ -252,9 +284,10 @@ class QuoteRequestRecord(BaseModel):
                 "contact": {"email": self.contactEmail, "phone": self.contactPhone},
                 "zip": self.zip,
             },
-            "address": self.address if address_released else None,
+            "address": accepted_contact.address if accepted_contact else self.address if address_released else None,
             "addressReleasePolicy": "withheld_until_quote_selected",
             "addressReleased": address_released,
+            "approvalContact": accepted_contact.model_dump() if accepted_contact else None,
             "project": {
                 "serviceType": self.serviceType,
                 "room": self.roomName,
@@ -307,6 +340,34 @@ class QuoteRequestStore:
     def _path(self, request_id: str) -> Path:
         safe = re.sub(r"[^A-Za-z0-9_-]", "_", request_id)
         return self._dir() / f"{safe}.json"
+
+    async def create(self, record: QuoteRequestRecord) -> QuoteRequestRecord:
+        """Insert once by deterministic ID. A second worker cannot overwrite a receipt."""
+        if supabase_store.enabled():
+            try:
+                response = await supabase_store._rest().post('/flow_quote_requests',
+                    headers={'Prefer': 'resolution=ignore-duplicates,return=representation'},
+                    json=dict(id=record.id, thread_id=record.threadId, homeowner_id=record.homeownerId,
+                              status=record.status, record=record.model_dump(mode='json')))
+                response.raise_for_status()
+                rows = response.json()
+                if not rows:
+                    existing = await supabase_store.get_quote_request(record.id)
+                    if not existing:
+                        raise RuntimeError('Could not restore the existing submission')
+                    return QuoteRequestRecord.model_validate(existing)
+            except Exception as exc:
+                raise RuntimeError('Quote request could not be saved durably') from exc
+            try:
+                self._path(record.id).write_text(record.model_dump_json(), encoding='utf-8')
+            except OSError:
+                logger.warning('Could not cache durable quote request %s locally', record.id)
+            return record
+        existing = self._get_local(record.id)
+        if existing:
+            return existing
+        await self.save(record, require_durable=True)
+        return record
 
     async def save(self, record: QuoteRequestRecord, *, require_durable: bool = False) -> None:
         saved = await supabase_store.upsert_quote_request(
@@ -629,8 +690,27 @@ async def create_quote_request(
             list(state.slots.materials), measurements,
         ),
     )
+    await save_request_snapshot(record)
+    state.quote_request = QuoteRequestRef(id=record.id, status="submitted")
+    state.mark_complete(FlowStep.QUOTE_REQUEST)
+    return record
+
+
+async def save_request_snapshot(record: QuoteRequestRecord, *, require_model: bool = False, expected_revision: str | None = None,
+                                create_only: bool = False) -> QuoteRequestRecord:
+    """Shared durable media pipeline; direct requests never advance a chat flow."""
     from .flow import quote_media
     record.scanMedia = await quote_media.capture(record)
+    if expected_revision and record.scanMedia.get('revision') != expected_revision:
+        from fastapi import HTTPException
+        raise HTTPException(409, 'The scan changed while submitting. Please wait for the latest upload.')
+    if require_model and (not record.scanMedia.get('snapshotId') or not record.scanMedia.get('models')
+                          or not record.scanMedia.get('context', {}).get('object')):
+        from fastapi import HTTPException
+        raise HTTPException(409, 'The latest scan model and photos must finish uploading before requesting a quote.')
+    if require_model and record.scopeIntent == 'selected_rooms' and len(record.scanMedia['models']) != len(record.scanMedia['rooms']):
+        from fastapi import HTTPException
+        raise HTTPException(409, 'Every selected area must finish uploading its model before requesting a quote.')
     if record.scanMedia.get('snapshotId'):
         import time
         record.scanMedia['expiresAt'] = int(time.time()) + quote_media.TTL
@@ -639,9 +719,9 @@ async def create_quote_request(
             'url': viewer + '/models/0/usdz' if viewer and record.scanMedia['models'] else None}
     elif record.scanMedia:
         record.modelLink = {'status': 'not_available', 'reason': record.scanMedia['reason']}
+    if create_only:
+        return await quote_store.create(record)
     await quote_store.save(record, require_durable=True)
-    state.quote_request = QuoteRequestRef(id=record.id, status="submitted")
-    state.mark_complete(FlowStep.QUOTE_REQUEST)
     return record
 
 

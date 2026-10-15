@@ -27,14 +27,19 @@ def document_link(record, quote) -> str | None:
             f'{record.id}/{quote.id}/{exp}/{signature(record, quote, exp)}')
 
 
-async def save_signed_pdf(record, quote, request: Request) -> QuoteDocument:
+async def save_signed_pdf(record, quote, request: Request | bytes) -> QuoteDocument:
     if not quote.document:
         raise HTTPException(422, 'This quote has no PDF to sign. Choose a callback instead.')
     data = bytearray()
-    async for chunk in request.stream():
-        if len(data) + len(chunk) > provider_responses.MAX_PDF_BYTES:
-            raise HTTPException(413, 'The signed PDF must be 25 MB or smaller.')
-        data.extend(chunk)
+    if isinstance(request, bytes):
+        data.extend(request)
+    else:
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > provider_responses.MAX_PDF_BYTES:
+                raise HTTPException(413, 'The signed PDF must be 25 MB or smaller.')
+            data.extend(chunk)
+    if len(data) > provider_responses.MAX_PDF_BYTES:
+        raise HTTPException(413, 'The signed PDF must be 25 MB or smaller.')
     if not data.startswith(b'%PDF-') or b'%%EOF' not in data[-1024:]:
         raise HTTPException(422, 'The signed PDF is incomplete. Please try again.')
     # Hashes make retries address the same object without trusting client filenames.

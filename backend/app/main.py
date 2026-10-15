@@ -165,6 +165,7 @@ async def health() -> HealthResponse:
 
 _ops_reply_task = None
 _ops_email_task = None
+_acceptance_email_task = None
 
 
 @app.on_event("startup")
@@ -201,7 +202,7 @@ async def _start_ops_email_worker() -> None:
     """Owns lead-email delivery for the life of the process. Sending from a
     task spawned inside a request loses the lead when that request's context
     goes away — which is exactly what happened through the demo proxy."""
-    global _ops_email_task
+    global _ops_email_task, _acceptance_email_task
     if not settings.ops_email:
         logger.info("No ops email configured; lead-email worker not started")
         return
@@ -210,6 +211,8 @@ async def _start_ops_email_worker() -> None:
     from .flow.ops_email import run_ops_email_worker
 
     _ops_email_task = asyncio.create_task(run_ops_email_worker())
+    from .flow.ops_email import run_acceptance_email_worker
+    _acceptance_email_task = asyncio.create_task(run_acceptance_email_worker())
 
 
 @app.post(

@@ -73,14 +73,14 @@ def test_homeowner_view_carries_the_selected_quote():
 
 
 @pytest.mark.asyncio
-async def test_select_endpoint_confirms_the_selection(monkeypatch, tmp_path):
+async def test_select_endpoint_requires_the_contact_approval_flow(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     quote = ReturnedQuote(providerName="Nash Painting", priceUsd=1850)
     await quote_store.save(_record(id="qr_select01", quotes=[quote], status="quotes_ready"))
     async with client() as http:
         resp = await http.post("/api/v1/ai/quote-requests/qr_select01/select", json={"quoteId": quote.id})
-    assert resp.status_code == 200
-    assert resp.json()["selectedQuoteId"] == quote.id
+    assert resp.status_code == 409
+    assert (await quote_store.get("qr_select01")).selectedQuoteId is None
 
 
 # -------------------------------------------------------------- 2. resume
