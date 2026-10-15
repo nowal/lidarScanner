@@ -195,6 +195,10 @@ class FlowState(BaseModel):
     # persisted rename off an inference is not something they can undo.
     # An explicit naming ("that space is the mudroom") still persists.
     unnamed_room_key: str | None = None
+    # A space they named ("the foyer") that the scan took in as part of an
+    # area it did not divide into rooms. It is in the scan, just not on its
+    # own; telling them otherwise is what they had to argue with (Oct 14).
+    part_room_phrase: str | None = None
 
     # --- Single captures (no whole-home index) -----------------------------
     # What the capture's own photos show, from one vision pass on the first
