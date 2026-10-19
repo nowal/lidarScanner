@@ -203,6 +203,14 @@ class Room:
     # Hash of capture geometry and selected photo bytes, before any AI pass.
     # Names, model links and nondeterministic vision wording are not changes.
     context_fingerprint: str | None = None
+    # Every section label RoomPlan gave this area, not just the first: one
+    # area walked through a kitchen, a dining room and a half bath comes
+    # back as one room with three sections (Quintin, Oct 14).
+    sections: list[str] = field(default_factory=list)
+    # What an undivided area takes in ("kitchen", "laundry", "stairs", ...),
+    # set only on ``open_plan`` areas. Lets "the laundry room" find the
+    # kitchen-and-laundry area instead of finding nothing.
+    contains: list[str] = field(default_factory=list)
 
     @property
     def centroid(self) -> tuple[float, float]:
@@ -254,6 +262,8 @@ class Room:
             "model": dict(self.model),
             "appearance": dict(self.appearance),
             "contextFingerprint": self.context_fingerprint,
+            "sections": list(self.sections),
+            "contains": list(self.contains),
         }
 
     @classmethod
@@ -278,6 +288,8 @@ class Room:
             appearance=dict(data.get("appearance") or {}),
             context_fingerprint=data.get("contextFingerprint"),
             model=dict(data.get("model") or {}),
+            sections=[str(s) for s in data.get("sections") or []],
+            contains=[str(c) for c in data.get("contains") or []],
         )
 
 
@@ -313,6 +325,110 @@ def _storey_words(storeys: list[int]) -> dict[int, str]:
     return words
 
 
+# Kinds of room an area can take in, in the order a name lists them.
+_OPEN_KINDS = ("kitchen", "living", "dining", "bedroom", "bathroom", "laundry")
+_SECTION_KINDS = {
+    "kitchen": "kitchen", "livingroom": "living", "diningroom": "dining",
+    "bedroom": "bedroom", "bathroom": "bathroom",
+}
+# How the agent's room list says each one ("it takes in the kitchen, ...").
+_KIND_PHRASES = {
+    "kitchen": "the kitchen", "living": "a living area", "dining": "a dining area",
+    "bedroom": "a bedroom", "bathroom": "a bathroom", "laundry": "the laundry",
+    "stairs": "the stairs",
+}
+
+
+def _room_kinds(r: Room) -> list[str]:
+    """Which kinds of room this one area holds, from RoomPlan's own section
+    labels and from fixtures that only one kind of room has.
+
+    One kind is a room. Two or more is an area RoomPlan never divided, and
+    naming it after a single fixture is how a whole ground floor -- kitchen,
+    dining, half bath, laundry and the stairs -- became "laundry room", and
+    an entire upstairs became "bathroom" because it had a toilet in it
+    (Quintin, Oct 14). Dining comes only from a label: a table and chairs
+    stand in plenty of living rooms.
+    """
+    def has(*cats: str) -> bool:
+        return any(r.objects.get(c, 0) for c in cats)
+
+    kinds = {
+        _SECTION_KINDS[key]
+        for key in ((s or "").lower().replace(" ", "") for s in [*r.sections, r.plan_label])
+        if key in _SECTION_KINDS
+    }
+    if has("stove", "oven", "refrigerator", "dishwasher"):
+        kinds.add("kitchen")
+    if has("washerDryer"):
+        kinds.add("laundry")
+    if has("toilet", "bathtub", "shower"):
+        kinds.add("bathroom")
+    if has("bed"):
+        kinds.add("bedroom")
+    if has("fireplace") or r.objects.get("sofa", 0) >= 2:
+        kinds.add("living")
+    return [k for k in _OPEN_KINDS if k in kinds]
+
+
+def _is_open_area(r: Room) -> bool:
+    return len(_room_kinds(r)) >= 2
+
+
+def _join(words: list[str]) -> str:
+    if len(words) <= 1:
+        return "".join(words)
+    return ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _name_open_areas(rooms: list[Room], words: dict[int, str]) -> None:
+    """Name the ``open_plan`` areas: after their floor when an area is the
+    whole of it ("upstairs" is what the homeowner calls it), otherwise after
+    what it takes in. A name the homeowner gave is kept."""
+    several_storeys = len({r.storey for r in rooms}) > 1
+    opens = [r for r in rooms if r.role == "open_plan"]
+    for r in opens:
+        kinds = _room_kinds(r)
+        r.contains = kinds + (["stairs"] if r.objects.get("stairs") else [])
+        r.storey_word = words.get(r.storey, "")
+        if r.named_by_homeowner:
+            continue
+        alone = several_storeys and sum(1 for x in rooms if x.storey == r.storey) == 1
+        r.display_name = words[r.storey] if alone and words.get(r.storey) else f"{_join(kinds[:4])} area"
+        r.name_basis = (
+            "one area the scan did not divide into rooms; it takes in "
+            + _join([_KIND_PHRASES[c] for c in r.contains])
+        )
+        r.confident = True
+    # Two open areas taking in the same rooms read the same; the floor tells
+    # them apart, then a number.
+    by_name: dict[str, list[Room]] = {}
+    for r in opens:
+        if not r.named_by_homeowner:
+            by_name.setdefault(r.display_name, []).append(r)
+    for same in by_name.values():
+        if len(same) < 2:
+            continue
+        for i, r in enumerate(sorted(same, key=lambda x: (x.storey, x.index)), start=1):
+            word = r.storey_word if len({x.storey for x in same}) == len(same) else ""
+            r.display_name += f" ({word})" if word else f" {i}"
+
+
+def _upgrade_open_areas(rooms: list[Room]) -> None:
+    """Indexes saved before Oct 14 named undivided areas after one fixture,
+    and the bundle that would rebuild them is gone. The fixtures and the
+    storeys are on the index, so those areas are renamed on load; every
+    other room keeps exactly the name it was saved with."""
+    changed = False
+    for r in rooms:
+        if r.role in ("open_plan", "exterior") or r.named_by_homeowner or not _is_open_area(r):
+            continue
+        r.role = "open_plan"
+        changed = True
+    if changed or any(r.role == "open_plan" and not r.contains for r in rooms):
+        _name_open_areas(rooms, _storey_words([r.storey for r in rooms]))
+
+
 def _name_rooms(rooms: list[Room]) -> None:
     """Assign homeowner-recognisable names, recording the evidence.
 
@@ -331,7 +447,9 @@ def _name_rooms(rooms: list[Room]) -> None:
 
     roles: dict[str, str] = {}
     for r in rooms:
-        if has(r, "washerDryer"):
+        if _is_open_area(r):
+            roles[r.key] = "open_plan"
+        elif has(r, "washerDryer"):
             roles[r.key] = "laundry"
         elif "kitchen" in label(r) or has(r, "stove", "oven", "refrigerator", "dishwasher"):
             roles[r.key] = "kitchen"
@@ -455,6 +573,8 @@ def _name_rooms(rooms: list[Room]) -> None:
         r.name_basis = "no fixtures and no RoomPlan label - needs the homeowner to say what it is"
         r.confident = False
 
+    _name_open_areas(rooms, words)
+
 
 # --------------------------------------------------------------------------
 # Index
@@ -511,6 +631,26 @@ _STOPWORDS = re.compile(
     r"\b(the|my|our|a|an|in|of|please|lets|let s|do|redo|paint|painting|want|to|for|about)\b"
 )
 
+# "stair well", "stairwell", "staircase", "stairway", "stair" are all the
+# stairs. "upstairs" is not: no word boundary before its "stairs".
+_STAIRS = re.compile(r"\bstair\s*(?:well|case|way)s?\b|\bstairs?\b")
+
+# How people name a floor, and which one it is counted from the bottom
+# (-1: the top). US usage: the first floor is the ground floor.
+_STOREY_PHRASES = (
+    ("second floor", 1), ("2nd floor", 1), ("second story", 1), ("second storey", 1),
+    ("upper floor", 1), ("upper level", 1), ("upstairs", 1),
+    ("third floor", 2), ("3rd floor", 2),
+    ("first floor", 0), ("1st floor", 0), ("ground floor", 0), ("main floor", 0),
+    ("main level", 0), ("downstairs", 0), ("top floor", -1),
+)
+# Fine for a two-storey home, a guess in a taller one.
+_UPPER_ONLY_IF_TWO = {"upstairs", "upper floor", "upper level"}
+
+
+def _names_kind(q: str, kind: str) -> bool:
+    return re.search(rf"\b{kind}", q) is not None
+
 
 class HomeIndex:
     """Named rooms for one scanned home, and the queries the agent needs."""
@@ -532,6 +672,23 @@ class HomeIndex:
     def by_key(self, key: str) -> Room | None:
         return next((r for r in self.rooms if r.key == key), None)
 
+    def storey_asked(self, text: str) -> tuple[int | None, str | None]:
+        """The storey a phrase names ("upstairs", "the second floor") and the
+        words that named it, or (None, None). Only a home walked on more
+        than one storey has a floor to name."""
+        ordered = sorted({r.storey for r in self.rooms})
+        if len(ordered) < 2:
+            return None, None
+        for phrase, pos in _STOREY_PHRASES:
+            if not re.search(rf"\b{phrase}\b", text):
+                continue
+            if phrase in _UPPER_ONLY_IF_TWO and len(ordered) > 2:
+                continue
+            if pos >= len(ordered):
+                continue
+            return ordered[pos], phrase
+        return None, None
+
     def resolve(self, phrase: str) -> Room | None:
         """Match what a homeowner typed to a room, or return None.
 
@@ -545,6 +702,7 @@ class HomeIndex:
         q = re.sub(r"\s+", " ", q).strip()
         if not q:
             return None
+        q = _STAIRS.sub("stairs", q)
         for word, canonical in _SYNONYMS.items():
             if word in q:
                 q = q.replace(word, canonical)
@@ -558,14 +716,12 @@ class HomeIndex:
         # upstairs bathroom" must never land on a downstairs one, even
         # though "bathroom" matches both.
         pool = self.rooms
-        storey_asked = next(
-            (w for w in ("upstairs", "downstairs", "top floor") if w in q), None
-        )
-        if storey_asked:
-            on_storey = [r for r in self.rooms if r.storey_word == storey_asked]
+        storey, storey_phrase = self.storey_asked(q)
+        if storey is not None:
+            on_storey = [r for r in self.rooms if r.storey == storey]
             if on_storey:
                 pool = on_storey
-                q = re.sub(r"\s+", " ", q.replace(storey_asked, " ")).strip()
+                q = re.sub(r"\s+", " ", q.replace(storey_phrase, " ")).strip()
                 if not q:
                     return max(pool, key=lambda r: r.area_sqft)
                 for r in pool:
@@ -575,10 +731,19 @@ class HomeIndex:
                 role_hits = [r for r in pool if r.role == q or q in r.role]
                 if role_hits:
                     return max(role_hits, key=lambda r: r.area_sqft)
+                inside = [r for r in pool if any(_names_kind(q, k) for k in r.contains)]
+                if inside:
+                    return max(inside, key=lambda r: r.area_sqft)
+                if not set(q.split()) & (_ROOM_WORDS | set(_OPEN_KINDS)):
+                    # "can you see anything up there?" asks about the floor
+                    # itself, and the floor is in the scan (Quintin, Oct 14).
+                    return max(pool, key=lambda r: r.area_sqft)
 
+        # From a word start: "stairs" is inside "upstairs", and the stairs
+        # are not the upstairs.
         contained = [
             r for r in pool
-            if r.display_name.lower() in q or q in r.display_name.lower()
+            if r.display_name.lower() in q or re.search(rf"\b{re.escape(q)}", r.display_name.lower())
         ]
         if len(contained) == 1:
             return contained[0]
@@ -588,6 +753,12 @@ class HomeIndex:
         role_hits = [r for r in pool if r.role != "unknown" and r.role in q]
         if role_hits:
             return max(role_hits, key=lambda r: r.area_sqft)
+
+        # "the laundry room" in a home whose laundry sits inside an
+        # undivided area: that area. A room that IS a laundry won above.
+        inside = [r for r in pool if any(_names_kind(q, k) for k in r.contains)]
+        if inside:
+            return max(inside, key=lambda r: r.area_sqft)
 
         if not pool:
             return None
@@ -610,26 +781,28 @@ class HomeIndex:
         """
         if not message:
             return None, None
-        text = re.sub(r"[^a-z0-9 ]+", " ", message.lower())
+        text = _STAIRS.sub("stairs", re.sub(r"[^a-z0-9 ]+", " ", message.lower()))
         words = set(text.split())
 
         vocabulary = set(_ROOM_WORDS)
         for room in self.rooms:
-            for token in room.display_name.lower().split():
-                if token not in {"room", "area", "unnamed"} and not token.isdigit():
-                    vocabulary.add(token.strip("()"))
-            if room.role != "unknown":
+            for token in re.sub(r"[^a-z0-9 ]+", " ", room.display_name.lower()).split():
+                if token not in {"room", "area", "unnamed", "and"} and not token.isdigit():
+                    vocabulary.add(token)
+            if room.role not in ("unknown", "open_plan"):
                 vocabulary.add(room.role)
+            vocabulary.update(room.contains)
 
         phrase_hit = next((p for p in _SYNONYMS if p in text), None)
         word_hit = next((w for w in vocabulary if w in words), None)
-        if not phrase_hit and not word_hit:
+        storey_hit = self.storey_asked(text)[1]
+        if not phrase_hit and not word_hit and not storey_hit:
             return None, None
 
         room = self.resolve(message)
         if room is not None:
             return room, None
-        return None, (phrase_hit or word_hit)
+        return None, (phrase_hit or word_hit or storey_hit)
 
     def small_unnamed_room(self, message: str) -> "Room | None":
         """"that little room" / "the small one" -- unambiguous only while a
@@ -701,8 +874,10 @@ class HomeIndex:
 
     @classmethod
     def from_json(cls, data: dict) -> "HomeIndex":
+        rooms = [Room.from_json(r) for r in data.get("rooms", [])]
+        _upgrade_open_areas(rooms)
         return cls(
-            [Room.from_json(r) for r in data.get("rooms", [])],
+            rooms,
             bundle_id=data.get("bundleId", ""),
             storey_count=int(data.get("storeys", 1) or 1),
             home_model=dict(data.get("homeModel") or {}),
@@ -817,7 +992,18 @@ class HomeIndex:
         though the photo pass never said so (the homeowner did)."""
         lines = []
         exterior = set(exterior_keys or ()) | {r.key for r in self.rooms if r.role == "exterior"}
+        # A walk on several storeys is listed floor by floor. Unlabelled, an
+        # upstairs area read as one more room and the agent told the
+        # homeowner it had no upstairs (Quintin, Oct 14).
+        storeys = sorted({r.storey for r in self.rooms})
+        words = _storey_words(storeys) if len(storeys) > 1 else {}
+        heading = None
         for r in sorted(self.rooms, key=lambda x: (x.storey, -x.area_sqft)):
+            if words and r.storey != heading:
+                heading = r.storey
+                place = storeys.index(r.storey) + 1
+                lines.append(f"{(words[r.storey] or f'floor {place}').capitalize()} "
+                             f"(floor {place} of {len(storeys)}):")
             fixtures = ", ".join(c for c, _ in r.objects.most_common(4))
             hedge = "" if r.confident else " (name uncertain)"
             if r.key in exterior:
@@ -843,6 +1029,14 @@ class HomeIndex:
             # Oct 5: "doesn't know ... how many doors there are in the scan").
             size = self.footprint_feet(r)
             dims = f" (about {size[0]:.0f} x {size[1]:.0f} ft)" if size else ""
+            if r.role == "open_plan" and r.contains:
+                lines.append(
+                    f"- {r.display_name}: one open area the scan did not divide into "
+                    f"rooms. It takes in {_join([_KIND_PHRASES[c] for c in r.contains])}. "
+                    f"~{round(r.area_sqft)} sq ft for the whole area{dims}, "
+                    f"{r.window_count} window opening(s), {r.door_count} door(s)"
+                )
+                continue
             line = (
                 f"- {r.display_name}{hedge}: ~{round(r.area_sqft)} sq ft{dims}, "
                 f"{r.window_count} window opening(s), {r.door_count} door(s)"
@@ -899,6 +1093,7 @@ def load_bundle(bundle_dir: str | Path) -> HomeIndex:
             door_count=len(structure.get("doors") or []),
             wall_count=len(structure.get("walls") or []),
             model=_model_record(room_dir / "model.usdz", f"rooms/{room_dir.name}/model.usdz"),
+            sections=[s for s in sections if s and s != "unidentified"],
         ))
 
     _assign_frames(base, rooms)
