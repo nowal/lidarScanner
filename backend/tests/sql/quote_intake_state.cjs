@@ -1,0 +1,24 @@
+const { PGlite } = require(process.env.PGLITE_MODULE || '@electric-sql/pglite');
+const fs = require('fs');
+(async () => {
+ const db = new PGlite();
+ await db.exec(`create role anon; create role authenticated; create role service_role bypassrls;
+ create table public.homeowners(id uuid primary key);`);
+ await db.exec(fs.readFileSync(require('path').join(__dirname, '../../supabase/migrations/20261019182934_quote_intake_state.sql'),'utf8'));
+ const owner='11111111-1111-1111-1111-111111111111', home='22222222-2222-2222-2222-222222222222', id='33333333-3333-3333-3333-333333333333';
+ await db.query('insert into homeowners values($1)',[owner]);
+ await db.exec('set role service_role');
+ await db.query('insert into quote_intakes values($1,$2,$3,0,$4)',[id,owner,home,JSON.stringify({revision:0})]);
+ let update=await db.query('update quote_intakes set version=1 where id=$1 and version=0 returning version',[id]);
+ if(update.rows.length!==1) throw Error('CAS failed');
+ update=await db.query('update quote_intakes set version=2 where id=$1 and version=0 returning version',[id]);
+ if(update.rows.length!==0) throw Error('Stale CAS succeeded');
+ await db.exec('reset role');
+ const grants=await db.query("select has_table_privilege('anon','quote_intakes','select') as anon, has_table_privilege('authenticated','quote_intakes','update') as authenticated, relrowsecurity from pg_class where oid='public.quote_intakes'::regclass");
+ if(grants.rows[0].anon || grants.rows[0].authenticated || !grants.rows[0].relrowsecurity) throw Error('Permissions incorrect');
+ await db.query('delete from homeowners where id=$1',[owner]);
+ const rows=await db.query('select * from quote_intakes');
+ if(rows.rows.length) throw Error('Cascade failed');
+ console.log('PASS: migration, RLS/grants, service role, CAS fencing and owner cascade (local PGlite).');
+ await db.close();
+})();

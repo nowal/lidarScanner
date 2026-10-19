@@ -12,3 +12,6 @@ Pillow==12.2.0
 # OpenUSD composes actual nested USDZ exports for the desktop derivative.
 usd-core==25.11
 numpy==2.2.6
+
+# Editable quote-intake Markdown/YAML service definitions.
+PyYAML==6.0.3

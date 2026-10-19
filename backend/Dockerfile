@@ -20,6 +20,7 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install -r requirements-rgbd.txt
 
 COPY app ./app
+COPY docs/QUOTE_INTAKE_SYSTEM_PROMPT.md docs/QUOTE_INTAKE_RUBRICS.md ./docs/
 
 EXPOSE 8000
 

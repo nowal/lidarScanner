@@ -50,6 +50,7 @@ from .flow_runtime import (
     run_opening_turn,
 )
 from .home_ai import HomeAIChatResponse, HomeAIContextPacket
+from .quote_intake.schema import Handoff as QuoteIntakeHandoff
 from .models import SCHEMA_VERSION, now_utc
 from .flow.scan_updates import ScanUpdateRequest
 
@@ -150,6 +151,9 @@ class DirectQuoteSubmission(BaseModel):
     roomKeys: list[str] = Field(default_factory=list, max_length=100)
     homeContext: Optional[HomeAIContextPacket] = None
 
+    # Additive provider handoff from the separate intake adapter. Never model input.
+    intakeDetails: Optional[QuoteIntakeHandoff] = None
+
     @field_validator('description')
     @classmethod
     def nonblank(cls, value):
@@ -171,7 +175,9 @@ async def submit_direct_quote_request(body: DirectQuoteSubmission,
     if body.homeContext and body.homeContext.scanId and body.homeContext.scanId.lower() != home_id:
         raise HTTPException(422, 'The measurement context must belong to the submitted scan.')
     request_id = 'qr_' + hashlib.sha256(f'{owner}:{body.submissionId}'.encode()).hexdigest()[:32]
-    fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+    # Preserve legacy fingerprints when the additive field is absent.
+    encoded = body.model_dump_json(exclude={'intakeDetails'} if body.intakeDetails is None else set())
+    fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
     async with _direct_submission_locks.setdefault(request_id, asyncio.Lock()):
         existing = await quote_store.get(request_id)
         if existing:
@@ -215,7 +221,11 @@ async def submit_direct_quote_request(body: DirectQuoteSubmission,
             threadId=f'direct_{body.submissionId}', homeownerId=owner, homeId=home_id,
             zip=body.zip, synopsis=body.description, submissionMode='direct',
             submissionFingerprint=fingerprint, measurements=measurements,
-            scopeIntent='selected_rooms' if keys else 'whole_home', scopeRooms=sorted(keys),
+            scopeIntent='selected_rooms' if keys else ('described_scope' if body.intakeDetails else 'whole_home'),
+            quoteDraft={'intake': body.intakeDetails.model_dump()} if body.intakeDetails else {},
+            serviceType=(body.intakeDetails.workItems[0].service
+                         if body.intakeDetails and len(body.intakeDetails.workItems) == 1 else None),
+            scopeRooms=sorted(keys),
             opsEmailQueuedAt=now_utc().isoformat())
         try:
             record = await save_request_snapshot(record, require_model=True, expected_revision=str(body.revision), create_only=True)
