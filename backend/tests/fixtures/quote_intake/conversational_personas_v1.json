@@ -1,0 +1,49 @@
+{
+  "version": "quote-intake-conversational-personas-v1",
+  "cases": [
+    {"id":"painting_informed","turns":["Repaint the living room walls and ceiling, full repaint, and have the painter recommend the finish. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Painting","expectedAction":"needs_provider_review"},
+    {"id":"painting_uncertain","turns":["I want painting done in the living room. Project ZIP 37129.","I'm not sure which surfaces should be included."],"maxClarifications":1,"expectedReady":false,"expectedService":"Painting","expectedAction":"consultation_required"},
+
+    {"id":"roofing_informed","turns":["Replace the main house roof with similar shingles and include the detached garage. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Roofing & Siding","expectedAction":"ready"},
+    {"id":"roofing_uncertain","turns":["I need exterior work but I can't tell whether the problem is the roof, siding, or gutters. Project ZIP 37129.","I'm still not sure which one it is."],"maxClarifications":1,"expectedReady":false,"expectedService":"Roofing & Siding","expectedAction":"consultation_required"},
+
+    {"id":"gutter_install_informed","turns":["Replace the gutters on the main house with a similar system. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Roofing & Siding","expectedAction":"ready"},
+    {"id":"gutter_install_uncertain","turns":["I need help with the gutters on the main house. Project ZIP 37129.","I don't know whether they need repair or replacement."],"maxClarifications":1,"expectedReady":false,"expectedService":"Roofing & Siding","expectedAction":"consultation_required"},
+
+    {"id":"siding_informed","turns":["Replace the damaged siding on the rear elevation with a similar material. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Roofing & Siding","expectedAction":"ready"},
+    {"id":"siding_uncertain","turns":["I need siding work on the back of the house. Project ZIP 37129.","I'm not sure whether it needs repair or replacement."],"maxClarifications":1,"expectedReady":false,"expectedService":"Roofing & Siding","expectedAction":"consultation_required"},
+
+    {"id":"flooring_informed","turns":["Replace the bedroom carpet with LVP and include removal and disposal. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Flooring","expectedAction":"ready"},
+    {"id":"flooring_uncertain","turns":["The bedroom floor needs work. Project ZIP 37129.","I don't know whether it should be repaired, refinished, or replaced."],"maxClarifications":1,"expectedReady":false,"expectedService":"Flooring","expectedAction":"consultation_required"},
+
+    {"id":"window_install_informed","turns":["Replace the living room windows and have the provider recommend the products. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Window & Door Install","expectedAction":"ready"},
+    {"id":"window_install_uncertain","turns":["I need work on the living room windows. Project ZIP 37129.","I'm not sure whether they need repair or replacement."],"maxClarifications":1,"expectedReady":false,"expectedService":"Window & Door Install","expectedAction":"consultation_required"},
+
+    {"id":"door_install_informed","turns":["Repair the sticking back door; I want it to open and latch normally. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Handyman","expectedAction":"ready"},
+    {"id":"door_install_uncertain","turns":["I need work on the back door. Project ZIP 37129.","I don't know whether it can be repaired or needs replacement."],"maxClarifications":1,"expectedReady":false,"expectedService":"Window & Door Install","expectedAction":"consultation_required"},
+
+    {"id":"window_cleaning_informed","turns":["Clean all the windows inside and outside, including screens and tracks. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Window Cleaning","expectedAction":"ready"},
+    {"id":"window_cleaning_uncertain","turns":["I need the windows cleaned. Project ZIP 37129.","I'm not sure whether inside or outside.","I don't know about screens or tracks either."],"maxClarifications":2,"expectedReady":true,"expectedService":"Window Cleaning","expectedAction":"needs_provider_review"},
+
+    {"id":"power_washing_informed","turns":["Power wash the driveway and front walkway for a general clean; leave the painted porch alone. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Power Washing","expectedAction":"ready"},
+    {"id":"power_washing_uncertain","turns":["I need power washing around my front entry, but I'm not sure whether the walkway, steps, or siding should be included. I don't know what the staining is. Project ZIP 37129."],"maxClarifications":0,"expectedReady":false,"expectedService":"Power Washing","expectedAction":"consultation_required"},
+
+    {"id":"gutter_cleaning_informed","turns":["Routine gutter cleaning for the main house, including downspout flushing. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Gutter Cleaning","expectedAction":"ready"},
+    {"id":"gutter_cleaning_uncertain","turns":["I need the gutters cleaned. Project ZIP 37129.","I'm not sure whether this is routine or an overflow problem."],"maxClarifications":1,"expectedReady":true,"expectedService":"Gutter Cleaning","expectedAction":"ready"},
+
+    {"id":"maid_informed","turns":["I need a one-time deep clean of the kitchen, two bathrooms, and living room. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Interior Cleaning","expectedAction":"ready"},
+    {"id":"maid_uncertain","turns":["I need help cleaning my entire occupied home. Project ZIP 37129.","I'm not sure whether it counts as regular or deep cleaning.","I don't know whether this will be one-time or recurring."],"maxClarifications":2,"expectedReady":true,"expectedService":"Interior Cleaning","expectedAction":"needs_provider_review"},
+
+    {"id":"handyman_informed","turns":["Install two floating shelves in the office, and have the provider supply the shelves and mounting hardware. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Handyman","expectedAction":"ready"},
+    {"id":"handyman_uncertain","turns":["I need a handyman for something in the office. Project ZIP 37129.","I'm not sure what repair is actually needed.","I don't have any parts and don't know what would be required."],"maxClarifications":2,"expectedReady":true,"expectedService":"Handyman","expectedAction":"needs_provider_review"},
+
+    {"id":"remodeling_informed","turns":["Remodel the kitchen with new cabinets and counters while keeping the current layout; I want the provider to help with the design direction. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Interior Remodeling","expectedAction":"ready"},
+    {"id":"remodeling_uncertain","turns":["I want to remodel the kitchen. Project ZIP 37129.","I don't know what changes should be made yet."],"maxClarifications":1,"expectedReady":false,"expectedService":"Interior Remodeling","expectedAction":"consultation_required"},
+
+    {"id":"moving_informed","turns":["Move everything in the scanned apartment to ZIP 37203 on November 15, including packing help. The project ZIP is 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Moving","expectedAction":"ready"},
+    {"id":"junk_uncertain","turns":["I need junk removed from the garage. Project ZIP 37129.","I'm not sure exactly what should go and what should stay.","I don't know whether I can set it outside or need the crew to remove it."],"maxClarifications":2,"expectedReady":true,"expectedService":"Junk Removal","expectedAction":"needs_provider_review"},
+
+    {"id":"landscaping_defined","turns":["I need weekly mowing, edging, and leaf removal for the whole yard. Project ZIP 37129."],"maxClarifications":0,"expectedReady":true,"expectedService":"Landscaping","expectedAction":"ready"},
+    {"id":"landscaping_uncertain","turns":["I need help with the yard but I'm not sure what needs to change. Project ZIP 37129.","I'm still not sure what landscaping work I want done."],"maxClarifications":1,"expectedReady":false,"expectedService":"Landscaping","expectedAction":"consultation_required"}
+  ]
+}

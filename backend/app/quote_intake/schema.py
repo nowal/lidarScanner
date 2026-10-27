@@ -13,6 +13,12 @@ class Answer(StrictModel):
                          description='Exact verbatim substring of the cited homeowner turn, never a paraphrase.')
 
 
+class SharedAnswer(Answer):
+    field: Literal['deadline', 'budget', 'symptoms', 'exclusions', 'logistics']
+    status: Literal['answered']
+    value: str = Field(min_length=1)
+
+
 class WorkItem(StrictModel):
     id: str = Field(pattern=r'^[a-z][a-z0-9_]{0,39}$')
     rubricId: str
@@ -46,15 +52,32 @@ class Result(StrictModel):
     serviceCandidates: list[str] = Field(max_length=14, description='Only exact supportedCatalogLabels. For an unsupported trade use an empty list and preserve its name in serviceName.')
     workItems: list[WorkItem] = Field(max_length=8)
     removedWorkItems: list[RemovedItem] = Field(max_length=8)
-    answerUpdates: list[Answer] = Field(max_length=15)  # shared logistics only
+    answerUpdates: list[SharedAnswer] = Field(max_length=15, description='Only volunteered deadline, budget, symptoms, exclusions, or logistics. Service scope, colors, finishes, and other service preferences belong in workItems.')
     zipUpdates: list[ZipAnswer] = Field(max_length=4)
     nextQuestion: list[Question] = Field(max_length=2, description='Only applicable decisions still unanswered after extracting the entire message. If any answer evidence supplies this intent, populate the equivalent field instead of asking again.')
     deferred: list[str] = Field(max_length=20)
     quoteBrief: str = Field(max_length=3000)
-    action: Literal['ask', 'request_zip', 'ready', 'needs_provider_review']
+    action: Literal['ask', 'request_zip', 'ready', 'needs_provider_review', 'consultation_required']
     intent: Literal['request', 'pause', 'cancel', 'browse', 'resume']
     intentSourceTurnId: str
     intentEvidence: str = Field(min_length=1, max_length=1000)
+
+
+class SupplementalPhotoUpload(StrictModel):
+    id: UUID = Field(strict=False)
+    fileName: str = Field(min_length=1, max_length=180)
+    mimeType: Literal['image/jpeg', 'image/png', 'image/heic']
+    dataBase64: str = Field(min_length=1, max_length=8_500_000)
+
+
+class SupplementalPhotoRef(StrictModel):
+    id: str
+    fileName: str
+    mimeType: Literal['image/jpeg'] = 'image/jpeg'
+    byteCount: int = Field(ge=1, le=6_000_000)
+    storageBucket: str
+    storagePath: str
+    thumbnailPath: str
 
 
 class TurnRequest(StrictModel):
@@ -64,6 +87,7 @@ class TurnRequest(StrictModel):
     expectedRevision: int = Field(ge=0)
     text: str = Field(min_length=1, max_length=4000)
     timeZone: str = Field(default='America/New_York', max_length=100)
+    attachments: list[SupplementalPhotoUpload] = Field(default_factory=list, max_length=3)
 
 
 class SubmitRequest(StrictModel):
@@ -78,6 +102,7 @@ class ZipFact(ZipAnswer):
 
 
 class Handoff(StrictModel):
+    handoffType: Literal['quote_request', 'consultation_request'] = 'quote_request'
     originalRequest: str = Field(min_length=1, max_length=4000)
     workItems: list[WorkItem] = Field(min_length=1, max_length=8)
     sharedAnswers: list[Answer] = Field(max_length=15)
@@ -89,3 +114,4 @@ class Handoff(StrictModel):
     rubricVersion: str
     rubricHash: str = Field(pattern=r'^[0-9a-f]{64}$')
     deferred: list[str] = Field(max_length=20)
+    supplementalPhotos: list[SupplementalPhotoRef] = Field(default_factory=list, max_length=12)

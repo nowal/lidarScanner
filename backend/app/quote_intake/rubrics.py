@@ -15,8 +15,10 @@ from ..home_guide_tools import KNOWN_SERVICE_TYPES
 DOCS = Path(__file__).resolve().parents[2] / 'docs'
 RUBRIC_PATH = DOCS / 'QUOTE_INTAKE_RUBRICS.md'
 PROMPT_PATH = DOCS / 'QUOTE_INTAKE_SYSTEM_PROMPT.md'
-PROMPT_VERSION = 'quote-intake-v1.1'
+PROMPT_VERSION = 'quote-intake-v1.14'
 Status = Literal['answered', 'unknown', 'no_preference', 'provider_recommendation', 'not_applicable', 'provider_review']
+UnknownOutcome = Literal['ready', 'needs_provider_review', 'consultation_required']
+DecisionCategory = Literal['scope', 'service_level', 'preference', 'design', 'logistics', 'timing', 'routing']
 
 
 class StrictModel(BaseModel):
@@ -27,11 +29,15 @@ class Condition(StrictModel):
     field: str
     equals: str | None = None
     one_of: list[str] | None = None
+    and_field: str | None = None
+    and_equals: str | None = None
 
     @model_validator(mode='after')
     def one_operator(self):
         if (self.equals is None) == (self.one_of is None) or self.one_of == []:
             raise ValueError('when needs exactly one of equals or nonempty one_of')
+        if (self.and_field is None) != (self.and_equals is None):
+            raise ValueError('when secondary condition needs both and_field and and_equals')
         return self
 
 
@@ -39,6 +45,11 @@ class Decision(StrictModel):
     id: str = Field(pattern=r'^[a-z][a-z0-9_]*$')
     priority: int = Field(ge=1)
     question: str = Field(min_length=1)
+    category: DecisionCategory
+    unknown_outcome: UnknownOutcome
+    asked_to: Literal['homeowner'] = 'homeowner'
+    required_for_quote: bool = True
+    can_provider_derive_from_model: Literal[False] = False
     defer: list[Status]
     values: list[str] | None = None
     when: Condition | None = None
@@ -60,12 +71,19 @@ class RequiredField(StrictModel):
     id: str
     question: str = Field(min_length=1)
     rule: str
+    category: DecisionCategory
+    unknown_outcome: UnknownOutcome
+    asked_to: Literal['homeowner'] = 'homeowner'
+    required_for_quote: Literal[True] = True
+    can_provider_derive_from_model: Literal[False] = False
 
 
 class Common(StrictModel):
     required: list[RequiredField] = Field(min_length=1)
     shared_optional: list[str]
     provider_review: list[str]
+    provider_model_review: list[str]
+    provider_technical_review: list[str]
     readiness: list[str]
 
 
@@ -80,6 +98,11 @@ class Service(StrictModel):
     decisions: list[Decision] = Field(min_length=1)
     optional: list[str]
     provider_review: list[str]
+    provider_model_review: list[str] = []
+    provider_technical_review: list[str] = []
+    quote_options: list[str] = []
+    consultation_before_quote: bool = False
+    consultation_when: Condition | None = None
 
 
 class Snapshot(StrictModel):
@@ -152,12 +175,23 @@ def parse_document(text: str) -> Snapshot:
             values = [field.when.equals] if field.when.equals is not None else field.when.one_of
             if not parent or parent.id == field.id or not parent.values or not set(values) <= set(parent.values):
                 raise ValueError(f'{service.id}.{field.id}: when must reference another enumerated field and valid values')
+            if field.when.and_field:
+                second = fields.get(field.when.and_field)
+                if (not second or second.id == field.id or not second.values
+                        or field.when.and_equals not in second.values):
+                    raise ValueError(f'{service.id}.{field.id}: secondary when must reference another enumerated field and valid value')
             seen = {field.id}
             while parent and parent.when:
                 if parent.id in seen:
                     raise ValueError(f'{service.id}.{field.id}: cyclic condition')
                 seen.add(parent.id)
                 parent = fields.get(parent.when.field)
+        if service.consultation_when:
+            condition = service.consultation_when
+            parent = fields.get(condition.field)
+            values = [condition.equals] if condition.equals is not None else condition.one_of
+            if not parent or not parent.values or not set(values) <= set(parent.values):
+                raise ValueError(f'{service.id}: consultation_when must reference an enumerated decision')
     return Snapshot(rubric_version=common.rubric_version, content_hash=hashlib.sha256(text.encode()).hexdigest(),
                     common=common.common, services=services)
 

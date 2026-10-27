@@ -18,6 +18,7 @@ KNOWN_SERVICE_TYPES = [
     "Power Washing",
     "Moving",
     "Junk Removal",
+    "Landscaping",
 ]
 
 # What an interior LiDAR walk can actually measure for a trade. The lead
@@ -39,6 +40,7 @@ SCAN_SUPPORT = {
     "Roofing & Siding": "exterior",
     "Gutter Cleaning": "exterior",
     "Power Washing": "exterior",
+    "Landscaping": "exterior",
 }
 
 
@@ -85,6 +87,10 @@ _SCOPE_EXAMPLES: dict[str, tuple[str, ...]] = {
     "Power Washing": ("siding", "patio", "driveway", "walkways"),
     "Moving": ("local move", "packing", "loading", "furniture only"),
     "Junk Removal": ("single item", "whole room", "garage clear-out", "haul away"),
+    "Landscaping": (
+        "mowing", "trimming", "mulch", "seeding", "fertilizing", "sod",
+        "yard cleanup", "planting", "landscape design", "outdoor living",
+    ),
 }
 
 
@@ -140,6 +146,11 @@ _STRONG_KEYWORDS: dict[str, tuple[str, ...]] = {
     "Junk Removal": (
         "junk", "haul away", "hauling", "dumpster", "declutter", "clear out",
         "get rid of",
+    ),
+    "Landscaping": (
+        "landscap", "yard work", "mow", "mowing", "trim shrubs", "trim trees",
+        "aeration", "mulch", "seeding", "fertiliz", "bug spray", "lay sod",
+        "leaf removal", "limb removal", "yard cleanup", "planting",
     ),
 }
 

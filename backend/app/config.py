@@ -112,7 +112,8 @@ class Settings(BaseSettings):
         '"Gutter Cleaning": "gutter cleaning service", '
         '"Power Washing": "pressure washing service", '
         '"Moving": "moving company", '
-        '"Junk Removal": "junk removal service"}'
+        '"Junk Removal": "junk removal service", '
+        '"Landscaping": "landscaping service"}'
     )
     # Profile links on the link-only platforms come from the existing
     # web-search path (search results, not the platforms' pages).

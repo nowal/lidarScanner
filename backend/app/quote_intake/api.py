@@ -1,6 +1,9 @@
 """Versioned homeowner intake routes; no legacy flow tokens or state machine."""
 import asyncio
+import base64
 import copy
+import hashlib
+import io
 import json
 import time
 from datetime import datetime, timezone
@@ -8,9 +11,11 @@ from uuid import UUID, uuid4
 
 import anthropic
 from fastapi import APIRouter, Depends, Header, HTTPException
+from PIL import Image, ImageOps
 
 from ..config import settings
 from ..flow_api import require_token, _scan_upload_owner, DirectQuoteSubmission, submit_direct_quote_request
+from ..flow import quote_media, supabase_store
 from . import conversation, engine, store
 from .schema import TurnRequest, SubmitRequest
 
@@ -19,8 +24,9 @@ router = APIRouter(prefix=settings.api_prefix + '/ai/quote-intake', dependencies
 
 def view(identifier, home, state):
     return dict(conversationId=identifier, homeId=home, revision=state['revision'],
-        messages=[{k: t[k] for k in ('id', 'role', 'text')} for t in state['transcript']],
+        messages=[{k: t[k] for k in ('id', 'role', 'text', 'attachments') if k in t} for t in state['transcript']],
         result=state['result'], projectZip=state['projectZip'], ready=state.get('ready', False),
+        consultationReady=state.get('consultationReady', False),
         paused=state['paused'], submissionPending=state['pendingSubmission'] is not None,
         receipt=state['receipt'], pendingTurn=state['pendingTurn'], pendingTurnId=(state['pendingTurn'] or {}).get('clientTurnId'),
         promptVersion=state['promptVersion'], rubricVersion=state['rubric']['rubric_version'])
@@ -36,6 +42,41 @@ async def load(identifier, owner, home):
     if row is None:
         raise HTTPException(404, 'Intake not found')
     return row, copy.deepcopy(row['state'])
+
+
+async def store_supplemental_photos(attachments, owner: str, home: str, conversation: str):
+    refs = []
+    for attachment in attachments:
+        try:
+            raw = base64.b64decode(attachment.dataBase64, validate=True)
+            if not raw or len(raw) > 6_000_000:
+                raise ValueError
+            with Image.open(io.BytesIO(raw)) as source:
+                source.verify()
+            with Image.open(io.BytesIO(raw)) as source:
+                image = ImageOps.exif_transpose(source).convert('RGB')
+                if image.width < 16 or image.height < 16 or image.width * image.height > 40_000_000:
+                    raise ValueError
+                image.thumbnail((2048, 2048))
+                full = io.BytesIO(); image.save(full, format='JPEG', quality=88)
+                image.thumbnail((360, 270))
+                canvas = Image.new('RGB', (360, 270), '#edf0f3')
+                canvas.paste(image, ((360-image.width)//2, (270-image.height)//2))
+                thumb = io.BytesIO(); canvas.save(thumb, format='JPEG', quality=82)
+        except (ValueError, OSError, base64.binascii.Error):
+            raise HTTPException(422, f'{attachment.fileName} is not a valid supported photo')
+        digest = hashlib.sha256(full.getvalue()).hexdigest()
+        root = f'{owner}/{home}/quote-intake/{conversation}'
+        full_path = f'{root}/{attachment.id}-{digest}.jpg'
+        thumb_path = f'{root}/{attachment.id}-{digest}-thumb.jpg'
+        full_url = await supabase_store.upload_bytes(quote_media.BUCKET, full_path, full.getvalue(), 'image/jpeg')
+        thumb_url = await supabase_store.upload_bytes(quote_media.BUCKET, thumb_path, thumb.getvalue(), 'image/jpeg')
+        if not full_url or not thumb_url:
+            raise HTTPException(503, 'The supplemental photo could not be saved. Please retry.')
+        refs.append(dict(id=str(attachment.id), fileName=attachment.fileName, mimeType='image/jpeg',
+                         byteCount=len(full.getvalue()), storageBucket=quote_media.BUCKET,
+                         storagePath=full_path, thumbnailPath=thumb_path))
+    return refs
 
 
 @router.get('/{conversation_id}')
@@ -62,6 +103,9 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
     else:
         state, version = copy.deepcopy(row['state']), row['version']
     request = body.model_dump(mode='json')
+    request['attachments'] = [dict(id=str(a.id), fileName=a.fileName, mimeType=a.mimeType,
+                                   sha256=hashlib.sha256(a.dataBase64.encode()).hexdigest())
+                              for a in body.attachments]
     turn_id = str(body.clientTurnId)
     if turn_id in state['completed']:
         if state['completed'][turn_id]['request'] != request:
@@ -80,9 +124,14 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
     if state['pendingTurn'] is None:
         if len(state['transcript']) >= 200:
             raise HTTPException(422, 'This conversation is full. Start another request.')
+        refs = await store_supplemental_photos(body.attachments, owner, home, identifier) if body.attachments else []
+        known = {photo['id']: photo for photo in state.get('supplementalPhotos', [])}
+        known.update({photo['id']: photo for photo in refs})
+        state['supplementalPhotos'] = list(known.values())
         state['pendingTurn'] = request
         state['transcript'].append(dict(id=turn_id, role='homeowner', text=body.text,
-            receivedAt=datetime.now(timezone.utc).isoformat(), timeZone=body.timeZone))
+            receivedAt=datetime.now(timezone.utc).isoformat(), timeZone=body.timeZone,
+            attachments=[{k: photo[k] for k in ('id','fileName','mimeType','byteCount')} for photo in refs]))
     state['ready'] = False
     state['leaseUntil'] = time.time() + 2 * settings.anthropic_request_timeout_seconds + 30
     version = await store.save(identifier, owner, home, state, version)
@@ -118,7 +167,7 @@ async def submit(body: SubmitRequest, x_homeowner_token: str | None = Header(def
     unlocked(state)
     if state['pendingSubmission'] is None:
         if (body.expectedRevision != state['revision'] or state['pendingTurn'] or state['paused']
-                or not state.get('ready') or not state['projectZip']):
+                or not (state.get('ready') or state.get('consultationReady')) or not state['projectZip']):
             raise HTTPException(409, 'Finish the current scope and project ZIP before submitting')
         package = engine.provider_package(state)
         state['submissionId'] = state['submissionId'] or str(uuid4())
@@ -135,6 +184,7 @@ async def submit(body: SubmitRequest, x_homeowner_token: str | None = Header(def
         state['receipt'] = json.loads(response.body)
         state['pendingSubmission'] = None
         state['ready'] = False
+        state['consultationReady'] = False
         state['leaseUntil'] = 0
         await store.save(identifier, owner, home, state, version)
         return view(identifier, home, state)

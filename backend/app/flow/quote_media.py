@@ -76,10 +76,13 @@ async def capture(record) -> dict:
     for key, label, m in candidates:
         if m.get('bucket') == BUCKET and re.search(r'-[a-f0-9]{64}\.usdz$', m.get('object', '')):
             models.append(dict(key=key, label=label, bucket=BUCKET, object=m['object'], bytes=m.get('bytes', 0)))
+    supplemental = (((record.quoteDraft or {}).get('intake') or {}).get('supplementalPhotos') or [])
     media = {'version': 1, 'homeId': record.homeId, 'ownerId': upload.get('ownerId') or state.get('ownerId'),
              'revision': upload['revision'], 'context': {'bucket': upload.get('contextBucket', BUCKET), 'object': upload.get('contextObject')},
              'rooms': [{'key': r.key, 'label': r.display_name, 'frameIds': list(r.frame_ids)} for r in rooms],
-             'models': models, 'photos': []}
+             'models': models, 'photos': [dict(label=p['fileName'], object=p['storagePath'],
+                                                thumbnail=p['thumbnailPath'], supplemental=True)
+                                         for p in supplemental]}
     media['snapshotId'] = _hash(media)
     return media
 
@@ -232,7 +235,7 @@ async def prepare_email(record):
                     small = prefix(media) + f'quote-thumb-{key}.jpg'
                     await put_bytes(obj, full, 'image/jpeg'); await put_bytes(small, thumb, 'image/jpeg')
                     entries.append(dict(info, object=obj, thumbnail=small))
-                media['photos'] = entries
+                media['photos'] = list(media.get('photos', [])) + entries
                 media['photosPrepared'] = True
         except Exception as exc:
             logger.warning('Quote photos unavailable for %s (%s)', record.id, type(exc).__name__)

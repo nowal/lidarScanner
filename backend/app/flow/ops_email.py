@@ -359,12 +359,18 @@ def build_ops_email(
     from .quote_media import link as media_link
 
     service = record.serviceType or "Home project"
+    intake = (getattr(record, "quoteDraft", None) or {}).get("intake") or {}
+    consultation = intake.get("handoffType") == "consultation_request"
+    request_kind = "consultation request" if consultation else "quote request"
     where = record.zip or "zip unknown"
     title = f"{service} in {where}"
-    lines = ["TakeShape", title, f"Submitted {record.createdAt}", "", "HOMEOWNER",
+    lines = ["TakeShape", title]
+    if consultation:
+        lines.append("Request type: Consultation Request")
+    lines.extend([f"Submitted {record.createdAt}", "", "HOMEOWNER",
              f"  Name: {record.firstName or '—'}", f"  ZIP code: {record.zip or '—'}",
              "  Address and contact details: withheld until homeowner selects a quote.",
-             "", "PROJECT", f"  Scope of work: {scope_label(record)}"]
+             "", "PROJECT", f"  Scope of work: {scope_label(record)}"])
     if getattr(record, "roomName", None):
         lines.append(f"  Room: {record.roomName}")
     if record.scopeOptions:
@@ -377,7 +383,7 @@ def build_ops_email(
     if media_url:
         lines.extend(["", "Open scan gallery & 3D viewer", media_url,
                       "Private link expires in 30 days."])
-    return f"New quote request: {title}", "\n".join(lines)
+    return f"New {request_kind}: {title}", "\n".join(lines)
 
 
 def _esc(value) -> str:
@@ -401,6 +407,8 @@ def build_ops_email_html(
         return (f'<tr><td style="padding:4px 14px 4px 0;color:#5A6772;font-size:13px;vertical-align:top">{e(label)}</td>'
                 f'<td style="padding:4px 0;color:#17212B;font-size:14px">{e(value)}</td></tr>')
 
+    intake = (getattr(record, "quoteDraft", None) or {}).get("intake") or {}
+    request_kind = "Consultation request" if intake.get("handoffType") == "consultation_request" else None
     homeowner = row("Name", record.firstName) + row("ZIP code", record.zip)
     homeowner += row("Address & contact", "Withheld until homeowner selects a quote")
     project = row("Scope of work", scope_label(record))
@@ -421,7 +429,7 @@ def build_ops_email_html(
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#FFFFFF;border-radius:14px;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-system,sans-serif">
 <tr><td style="padding:22px 28px;border-bottom:1px solid #EDF0F3"><span style="font-size:17px;font-weight:700;color:#17212B">TakeShape</span></td></tr>
 <tr><td style="padding:24px 28px 8px"><div style="font-size:21px;font-weight:700;color:#17212B;margin-bottom:6px">{e(record.serviceType or "Home project")} in {e(record.zip or "—")}</div>
-<div style="font-size:13px;color:#5A6772">Submitted {e(str(record.createdAt)[:16].replace("T", " at "))}</div></td></tr>
+<div style="font-size:13px;color:#5A6772">{(e(request_kind) + " · ") if request_kind else ""}Submitted {e(str(record.createdAt)[:16].replace("T", " at "))}</div></td></tr>
 <tr><td style="padding:14px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:6px">Homeowner</div><table role="presentation" cellpadding="0" cellspacing="0">{homeowner}</table></td></tr>
 <tr><td style="padding:18px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:6px">Project</div><table role="presentation" cellpadding="0" cellspacing="0">{project}</table>
 <div style="margin-top:12px;padding:14px;background:#F7F9FA;border-radius:8px;color:#3D4852;font-size:13.5px;line-height:1.55;white-space:pre-line">{e(record.synopsis)}</div>
