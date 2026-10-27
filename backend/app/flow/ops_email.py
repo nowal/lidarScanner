@@ -687,6 +687,7 @@ def _decision_price(quote: Any) -> str:
 # A queue drained by a worker owned by application startup has no such tie.
 # --------------------------------------------------------------------------
 _queue: "asyncio.Queue[Any] | None" = None
+OPS_EMAIL_RETRY_SECONDS = 60
 
 
 def queue_ops_email(record: Any) -> bool:
@@ -746,7 +747,15 @@ async def run_ops_email_worker() -> None:
     logger.info("Ops lead-email worker running")
     await requeue_undelivered()
     while True:
-        record = await _queue.get()
+        try:
+            record = await asyncio.wait_for(_queue.get(), timeout=OPS_EMAIL_RETRY_SECONDS)
+        except asyncio.TimeoutError:
+            # The durable queue is the source of truth. Retry failed deliveries
+            # while running, not only after the next process restart. Sweeping
+            # an idle queue also avoids multiplying queued copies during a slow
+            # provider-research/delivery pass.
+            await requeue_undelivered()
+            continue
         try:
             result = await send_ops_email(record)
             logger.info("Ops lead email for %s: %s", record.id, result)

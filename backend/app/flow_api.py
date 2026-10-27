@@ -176,7 +176,17 @@ async def submit_direct_quote_request(body: DirectQuoteSubmission,
         raise HTTPException(422, 'The measurement context must belong to the submitted scan.')
     request_id = 'qr_' + hashlib.sha256(f'{owner}:{body.submissionId}'.encode()).hexdigest()[:32]
     # Preserve legacy fingerprints when the additive field is absent.
-    encoded = body.model_dump_json(exclude={'intakeDetails'} if body.intakeDetails is None else set())
+    exclusions = {'intakeDetails': True} if body.intakeDetails is None else {}
+    if body.intakeDetails is not None:
+        # These additive defaults were absent in deployed intake receipts.
+        # A lost-success retry must retain the original fingerprint.
+        defaults = set()
+        if body.intakeDetails.handoffType == 'quote_request':
+            defaults.add('handoffType')
+        if not body.intakeDetails.supplementalPhotos:
+            defaults.add('supplementalPhotos')
+        exclusions['intakeDetails'] = defaults
+    encoded = body.model_dump_json(exclude=exclusions)
     fingerprint = hashlib.sha256(encoded.encode()).hexdigest()
     async with _direct_submission_locks.setdefault(request_id, asyncio.Lock()):
         existing = await quote_store.get(request_id)

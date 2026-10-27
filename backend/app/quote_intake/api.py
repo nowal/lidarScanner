@@ -52,6 +52,9 @@ async def store_supplemental_photos(attachments, owner: str, home: str, conversa
             if not raw or len(raw) > 6_000_000:
                 raise ValueError
             with Image.open(io.BytesIO(raw)) as source:
+                if (source.format not in ('JPEG', 'PNG', 'HEIF') or source.width < 16
+                        or source.height < 16 or source.width * source.height > 40_000_000):
+                    raise ValueError
                 source.verify()
             with Image.open(io.BytesIO(raw)) as source:
                 image = ImageOps.exif_transpose(source).convert('RGB')
@@ -63,7 +66,7 @@ async def store_supplemental_photos(attachments, owner: str, home: str, conversa
                 canvas = Image.new('RGB', (360, 270), '#edf0f3')
                 canvas.paste(image, ((360-image.width)//2, (270-image.height)//2))
                 thumb = io.BytesIO(); canvas.save(thumb, format='JPEG', quality=82)
-        except (ValueError, OSError, base64.binascii.Error):
+        except (ValueError, OSError, base64.binascii.Error, Image.DecompressionBombError):
             raise HTTPException(422, f'{attachment.fileName} is not a valid supported photo')
         digest = hashlib.sha256(full.getvalue()).hexdigest()
         root = f'{owner}/{home}/quote-intake/{conversation}'
@@ -102,10 +105,15 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
         version = None
     else:
         state, version = copy.deepcopy(row['state']), row['version']
-    request = body.model_dump(mode='json')
-    request['attachments'] = [dict(id=str(a.id), fileName=a.fileName, mimeType=a.mimeType,
-                                   sha256=hashlib.sha256(a.dataBase64.encode()).hexdigest())
-                              for a in body.attachments]
+    # Omit empty attachments to preserve identities from the deployed text-only
+    # API. Saved fingerprints can recover already accepted photo turns without
+    # storing or returning multi-megabyte base64 payloads in conversation JSON.
+    request = body.model_dump(mode='json', exclude={'attachments'})
+    if body.attachments:
+        request['attachments'] = [dict(id=str(a.id), fileName=a.fileName, mimeType=a.mimeType,
+                                       sha256=hashlib.sha256(a.dataBase64.encode()).hexdigest()
+                                       if a.dataBase64 is not None else a.sha256)
+                                  for a in body.attachments]
     turn_id = str(body.clientTurnId)
     if turn_id in state['completed']:
         if state['completed'][turn_id]['request'] != request:
@@ -124,16 +132,25 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
     if state['pendingTurn'] is None:
         if len(state['transcript']) >= 200:
             raise HTTPException(422, 'This conversation is full. Start another request.')
-        refs = await store_supplemental_photos(body.attachments, owner, home, identifier) if body.attachments else []
+        if any(a.dataBase64 is None for a in body.attachments):
+            raise HTTPException(422, 'New photos require image bytes, not saved references.')
+        ids = [str(a.id) for a in body.attachments]
         known = {photo['id']: photo for photo in state.get('supplementalPhotos', [])}
+        if len(set(ids)) != len(ids) or set(ids) & known.keys():
+            raise HTTPException(422, 'Each new photo must have a new attachment identity.')
+        if len(known) + len(ids) > 12:
+            raise HTTPException(422, 'A request supports up to twelve supplemental photos.')
+        refs = await store_supplemental_photos(body.attachments, owner, home, identifier) if body.attachments else []
         known.update({photo['id']: photo for photo in refs})
         state['supplementalPhotos'] = list(known.values())
+        state['readyBeforePendingTurn'] = state.get('ready', False)
         state['pendingTurn'] = request
         state['transcript'].append(dict(id=turn_id, role='homeowner', text=body.text,
             receivedAt=datetime.now(timezone.utc).isoformat(), timeZone=body.timeZone,
             attachments=[{k: photo[k] for k in ('id','fileName','mimeType','byteCount')} for photo in refs]))
     state['ready'] = False
-    state['leaseUntil'] = time.time() + 2 * settings.anthropic_request_timeout_seconds + 30
+    state['consultationReady'] = False
+    state['leaseUntil'] = time.time() + conversation.MAX_GENERATION_ATTEMPTS * settings.anthropic_request_timeout_seconds + 30
     version = await store.save(identifier, owner, home, state, version)
     try:
         state = await conversation.generate_turn(state, body.timeZone)
@@ -141,6 +158,7 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
         state['transcript'].append(dict(id=turn_id + '-reply', role='assistant', text=state['result']['displayText']))
         state['completed'][turn_id] = {'request': request}
         state['pendingTurn'] = None
+        state.pop('readyBeforePendingTurn', None)
         state['leaseUntil'] = 0
         await store.save(identifier, owner, home, state, version)
         return view(identifier, home, state)

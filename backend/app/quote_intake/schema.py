@@ -1,6 +1,6 @@
 from typing import Literal
 from uuid import UUID
-from pydantic import Field
+from pydantic import Field, model_validator
 from .rubrics import StrictModel, Status
 
 
@@ -67,7 +67,16 @@ class SupplementalPhotoUpload(StrictModel):
     id: UUID = Field(strict=False)
     fileName: str = Field(min_length=1, max_length=180)
     mimeType: Literal['image/jpeg', 'image/png', 'image/heic']
-    dataBase64: str = Field(min_length=1, max_length=8_500_000)
+    dataBase64: str | None = Field(default=None, min_length=1, max_length=8_500_000)
+    # Recovery may replay the server's fingerprint after the bytes were stored.
+    # Only an exact saved pending/completed turn may use this form.
+    sha256: str | None = Field(default=None, pattern=r'^[0-9a-f]{64}$')
+
+    @model_validator(mode='after')
+    def bytes_or_saved_fingerprint(self):
+        if (self.dataBase64 is None) == (self.sha256 is None):
+            raise ValueError('Supply photo bytes or a saved photo fingerprint')
+        return self
 
 
 class SupplementalPhotoRef(StrictModel):

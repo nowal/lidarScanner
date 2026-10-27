@@ -77,6 +77,19 @@ async def capture(record) -> dict:
         if m.get('bucket') == BUCKET and re.search(r'-[a-f0-9]{64}\.usdz$', m.get('object', '')):
             models.append(dict(key=key, label=label, bucket=BUCKET, object=m['object'], bytes=m.get('bytes', 0)))
     supplemental = (((record.quoteDraft or {}).get('intake') or {}).get('supplementalPhotos') or [])
+    # intakeDetails is also accepted on the public direct-submission endpoint.
+    # Never turn caller-provided paths into service-role downloads of other
+    # owners' objects. Accept only canonical intake derivatives for this home.
+    root = f'{state.get("ownerId")}/{record.homeId}/quote-intake/'
+    uuid_pattern = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+    for photo in supplemental:
+        path = photo.get('storagePath', '')
+        pattern = re.escape(root) + uuid_pattern + '/' + re.escape(photo.get('id', '')) + r'-[0-9a-f]{64}\.jpg'
+        if (photo.get('storageBucket') != BUCKET
+                or not re.fullmatch(uuid_pattern, photo.get('id', ''))
+                or not re.fullmatch(pattern, path)
+                or photo.get('thumbnailPath') != path[:-4] + '-thumb.jpg'):
+            raise HTTPException(422, 'Supplemental photos must belong to this homeowner and scan.')
     media = {'version': 1, 'homeId': record.homeId, 'ownerId': upload.get('ownerId') or state.get('ownerId'),
              'revision': upload['revision'], 'context': {'bucket': upload.get('contextBucket', BUCKET), 'object': upload.get('contextObject')},
              'rooms': [{'key': r.key, 'label': r.display_name, 'frameIds': list(r.frame_ids)} for r in rooms],

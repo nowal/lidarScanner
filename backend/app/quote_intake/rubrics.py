@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -10,12 +11,12 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from ..home_guide_tools import KNOWN_SERVICE_TYPES
+from .catalog import KNOWN_SERVICE_TYPES
 
 DOCS = Path(__file__).resolve().parents[2] / 'docs'
 RUBRIC_PATH = DOCS / 'QUOTE_INTAKE_RUBRICS.md'
 PROMPT_PATH = DOCS / 'QUOTE_INTAKE_SYSTEM_PROMPT.md'
-PROMPT_VERSION = 'quote-intake-v1.14'
+PROMPT_VERSION = 'quote-intake-v1.15'
 Status = Literal['answered', 'unknown', 'no_preference', 'provider_recommendation', 'not_applicable', 'provider_review']
 UnknownOutcome = Literal['ready', 'needs_provider_review', 'consultation_required']
 DecisionCategory = Literal['scope', 'service_level', 'preference', 'design', 'logistics', 'timing', 'routing']
@@ -110,6 +111,27 @@ class Snapshot(StrictModel):
     content_hash: str
     common: Common
     services: list[Service]
+
+    @model_validator(mode='before')
+    @classmethod
+    def read_original_pinned_snapshot(cls, value):
+        # Existing v1 conversations retain their questions, prompt and content
+        # hash. New metadata only supplies the original provider-review behavior.
+        # parse_document still requires all fields in newly authored rubrics.
+        if not isinstance(value, dict) or value.get('rubric_version') != 'quote-intake-v1':
+            return value
+        value = copy.deepcopy(value)
+        common = value.get('common', {})
+        common.setdefault('provider_model_review', [])
+        common.setdefault('provider_technical_review', [])
+        for field in common.get('required', []):
+            field.setdefault('category', 'scope')
+            field.setdefault('unknown_outcome', 'needs_provider_review')
+        for service in value.get('services', []):
+            for field in service.get('decisions', []):
+                field.setdefault('category', 'scope')
+                field.setdefault('unknown_outcome', 'needs_provider_review')
+        return value
 
     def service(self, identifier: str) -> Service:
         return next(s for s in self.services if s.id == identifier)

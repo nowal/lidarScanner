@@ -253,6 +253,8 @@ class Settings(BaseSettings):
     # what it stops is a body big enough to exhaust the instance's memory,
     # which no amount of rate limiting bounds.
     max_request_bytes: int = 16_000_000
+    # Three 6 MB photos become ~24 MB in JSON base64, plus text/metadata.
+    quote_intake_max_request_bytes: int = 26_000_000
 
 
 settings = Settings()

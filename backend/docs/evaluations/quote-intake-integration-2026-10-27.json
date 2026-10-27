@@ -1,0 +1,1001 @@
+{
+  "version": "quote-intake-integration-v1",
+  "realModel": true,
+  "model": "claude-sonnet-5",
+  "effort": "low",
+  "promptVersion": "quote-intake-v1.15",
+  "promptHash": "c43d950205a805cb2b04ddb655e3c3472e633ca84db53107ff96a82fa45de2bc",
+  "rubricHash": "7959dd6a784f5371600a45192569d22da8008401e2b98e5d6b390e8983c4225d",
+  "submissionCalls": 0,
+  "measurementNotes": "Question/fact guards are deterministic. Human review of semantics, brief completeness and abandonment risk is still required. This runner never dispatches; duplicate submission is covered by API tests.",
+  "cases": [
+    {
+      "id": "complete_painting",
+      "failures": [],
+      "replies": [
+        {
+          "displayText": "Your scope and ZIP are saved. You don’t have to make those choices alone—the provider can walk you through them during the quote consultation. Your request is ready for TakeShape to match with local providers. Once it’s submitted, you’ll be contacted about your quote.",
+          "serviceCandidates": [
+            "Painting"
+          ],
+          "workItems": [
+            {
+              "id": "paint_guest_bedroom",
+              "rubricId": "painting",
+              "service": "Painting",
+              "serviceName": "Painting",
+              "subtype": null,
+              "assessment": false,
+              "answers": [
+                {
+                  "field": "desired_outcome",
+                  "status": "answered",
+                  "value": "Full repaint of guest bedroom walls",
+                  "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+                  "evidence": "Please repaint just the guest bedroom walls, a full repaint."
+                },
+                {
+                  "field": "target_scope",
+                  "status": "answered",
+                  "value": "Guest bedroom walls only",
+                  "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+                  "evidence": "Please repaint just the guest bedroom walls"
+                },
+                {
+                  "field": "included_surfaces",
+                  "status": "answered",
+                  "value": "Walls only; ceiling and trim excluded",
+                  "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+                  "evidence": "Leave the ceiling and trim alone."
+                },
+                {
+                  "field": "extent",
+                  "status": "answered",
+                  "value": "Full repaint",
+                  "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+                  "evidence": "a full repaint"
+                },
+                {
+                  "field": "finish_preference",
+                  "status": "provider_recommendation",
+                  "value": null,
+                  "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+                  "evidence": "I would like the painter to recommend a finish."
+                }
+              ],
+              "providerReview": []
+            }
+          ],
+          "removedWorkItems": [],
+          "answerUpdates": [],
+          "zipUpdates": [
+            {
+              "role": "project",
+              "raw": "01234",
+              "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f"
+            }
+          ],
+          "nextQuestion": [],
+          "deferred": [
+            "finish_preference"
+          ],
+          "quoteBrief": "Homeowner requests a full repaint of the guest bedroom walls only; ceiling and trim are explicitly excluded. Finish selection deferred to painter's recommendation. Project ZIP: 01234.",
+          "action": "needs_provider_review",
+          "intent": "request",
+          "intentSourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+          "intentEvidence": "Please repaint just the guest bedroom walls, a full repaint."
+        }
+      ],
+      "homeownerTurns": [
+        "Please repaint just the guest bedroom walls, a full repaint. Leave the ceiling and trim alone. I would like the painter to recommend a finish. Project ZIP 01234."
+      ],
+      "structuredAnswers": [
+        {
+          "id": "paint_guest_bedroom",
+          "rubricId": "painting",
+          "service": "Painting",
+          "serviceName": "Painting",
+          "subtype": null,
+          "assessment": false,
+          "answers": [
+            {
+              "field": "desired_outcome",
+              "status": "answered",
+              "value": "Full repaint of guest bedroom walls",
+              "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+              "evidence": "Please repaint just the guest bedroom walls, a full repaint."
+            },
+            {
+              "field": "target_scope",
+              "status": "answered",
+              "value": "Guest bedroom walls only",
+              "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+              "evidence": "Please repaint just the guest bedroom walls"
+            },
+            {
+              "field": "included_surfaces",
+              "status": "answered",
+              "value": "Walls only; ceiling and trim excluded",
+              "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+              "evidence": "Leave the ceiling and trim alone."
+            },
+            {
+              "field": "extent",
+              "status": "answered",
+              "value": "Full repaint",
+              "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+              "evidence": "a full repaint"
+            },
+            {
+              "field": "finish_preference",
+              "status": "provider_recommendation",
+              "value": null,
+              "sourceTurnId": "bd1b0b42-648f-4801-ad77-ad96a878bb5f",
+              "evidence": "I would like the painter to recommend a finish."
+            }
+          ],
+          "providerReview": []
+        }
+      ],
+      "clarificationTurns": 0,
+      "repeatedQuestionCount": 0,
+      "modelAttempts": [
+        [
+          {
+            "validated": true
+          }
+        ]
+      ],
+      "latencySeconds": [
+        12.791
+      ],
+      "replyWordCounts": [
+        44
+      ],
+      "providerBrief": "Original homeowner request:\nPlease repaint just the guest bedroom walls, a full repaint. Leave the ceiling and trim alone. I would like the painter to recommend a finish. Project ZIP 01234.\n\nCurrent requested work (latest answers supersede earlier wording):\nPainting — Painting\n- Desired outcome: Please repaint just the guest bedroom walls, a full repaint. (homeowner: Please repaint just the guest bedroom walls, a full repaint.)\n- Target scope: Please repaint just the guest bedroom walls (homeowner: Please repaint just the guest bedroom walls)\n- Included surfaces: Leave the ceiling and trim alone. (homeowner: Leave the ceiling and trim alone.)\n- Extent: a full repaint (homeowner: a full repaint)\n- Finish preference: provider recommendation requested (homeowner: I would like the painter to recommend a finish.)\nProvider review: Areas, trim lengths, visible preparation needs, substrate, access, and coating specification.\nProvider review for all requested work: Measurements, quantities, geometry, visible condition, and capture coverage.; Material identification and concealed, structural, mechanical, or code-related conditions.; Trade-specific methods, exact specifications, permits, and price.\nProject ZIP: 01234\nModel attachment is context only; requested scope above controls inclusions. The intake agent has not viewed the scan."
+    },
+    {
+      "id": "consultation_then_zip",
+      "failures": [],
+      "replies": [
+        {
+          "displayText": "That’s okay—the provider can help clarify that during consultation. What ZIP code is the project located in so I can route the request?",
+          "serviceCandidates": [
+            "Painting"
+          ],
+          "workItems": [
+            {
+              "id": "wi_painting",
+              "rubricId": "painting",
+              "service": "Painting",
+              "serviceName": "Painting",
+              "subtype": null,
+              "assessment": true,
+              "answers": [
+                {
+                  "field": "desired_outcome",
+                  "status": "answered",
+                  "value": "Paint the living room",
+                  "sourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+                  "evidence": "I want the living room painted"
+                },
+                {
+                  "field": "target_scope",
+                  "status": "answered",
+                  "value": "Living room",
+                  "sourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+                  "evidence": "I want the living room painted"
+                },
+                {
+                  "field": "included_surfaces",
+                  "status": "unknown",
+                  "value": null,
+                  "sourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+                  "evidence": "I don't know whether the walls or ceiling should be included. Please have someone help me work that out."
+                }
+              ],
+              "providerReview": []
+            }
+          ],
+          "removedWorkItems": [],
+          "answerUpdates": [],
+          "zipUpdates": [],
+          "nextQuestion": [],
+          "deferred": [
+            "included_surfaces: homeowner requested help deciding walls vs. ceiling, flagged for consultation"
+          ],
+          "quoteBrief": "Homeowner wants the living room painted. Undecided whether walls only or walls+ceiling should be included — requested provider help deciding. Still need to confirm full repaint vs. touch-ups and finish preference.",
+          "action": "request_zip",
+          "intent": "request",
+          "intentSourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+          "intentEvidence": "I want the living room painted"
+        },
+        {
+          "displayText": "Your scope and ZIP are saved. You don’t have to decide that alone—this project should start with a quote consultation so the provider can clarify the remaining choice before preparing reliable pricing.",
+          "serviceCandidates": [
+            "Painting"
+          ],
+          "workItems": [
+            {
+              "id": "wi_painting",
+              "rubricId": "painting",
+              "service": "Painting",
+              "serviceName": "Painting",
+              "subtype": null,
+              "assessment": true,
+              "answers": [
+                {
+                  "field": "desired_outcome",
+                  "status": "answered",
+                  "value": "Paint the living room",
+                  "sourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+                  "evidence": "I want the living room painted"
+                },
+                {
+                  "field": "target_scope",
+                  "status": "answered",
+                  "value": "Living room",
+                  "sourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+                  "evidence": "I want the living room painted"
+                },
+                {
+                  "field": "included_surfaces",
+                  "status": "unknown",
+                  "value": null,
+                  "sourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+                  "evidence": "I don't know whether the walls or ceiling should be included. Please have someone help me work that out."
+                }
+              ],
+              "providerReview": [
+                "Help homeowner decide whether walls, ceiling, or both should be included in painting scope."
+              ]
+            }
+          ],
+          "removedWorkItems": [],
+          "answerUpdates": [],
+          "zipUpdates": [
+            {
+              "role": "project",
+              "raw": "01234",
+              "sourceTurnId": "6c1286e6-07a2-4241-9cb8-9713cb512718"
+            }
+          ],
+          "nextQuestion": [],
+          "deferred": [
+            "included_surfaces"
+          ],
+          "quoteBrief": "Homeowner wants the living room painted. Uncertain whether walls, ceiling, or both should be included—needs consultation to resolve before final scope/quote. ZIP: 01234.",
+          "action": "consultation_required",
+          "intent": "request",
+          "intentSourceTurnId": "6c1286e6-07a2-4241-9cb8-9713cb512718",
+          "intentEvidence": "01234"
+        }
+      ],
+      "homeownerTurns": [
+        "I want the living room painted, but I don't know whether the walls or ceiling should be included. Please have someone help me work that out.",
+        "01234"
+      ],
+      "structuredAnswers": [
+        {
+          "id": "wi_painting",
+          "rubricId": "painting",
+          "service": "Painting",
+          "serviceName": "Painting",
+          "subtype": null,
+          "assessment": true,
+          "answers": [
+            {
+              "field": "desired_outcome",
+              "status": "answered",
+              "value": "Paint the living room",
+              "sourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+              "evidence": "I want the living room painted"
+            },
+            {
+              "field": "target_scope",
+              "status": "answered",
+              "value": "Living room",
+              "sourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+              "evidence": "I want the living room painted"
+            },
+            {
+              "field": "included_surfaces",
+              "status": "unknown",
+              "value": null,
+              "sourceTurnId": "c3b7b684-a324-4f80-8066-8ec06fa72464",
+              "evidence": "I don't know whether the walls or ceiling should be included. Please have someone help me work that out."
+            }
+          ],
+          "providerReview": [
+            "Help homeowner decide whether walls, ceiling, or both should be included in painting scope."
+          ]
+        }
+      ],
+      "clarificationTurns": 0,
+      "repeatedQuestionCount": 0,
+      "modelAttempts": [
+        [
+          {
+            "validated": true
+          }
+        ],
+        [
+          {
+            "validated": false,
+            "error": "Intent must refer to the current turn"
+          },
+          {
+            "validated": true
+          }
+        ]
+      ],
+      "latencySeconds": [
+        11.281,
+        15.385
+      ],
+      "replyWordCounts": [
+        23,
+        32
+      ],
+      "providerBrief": "Original homeowner request:\nI want the living room painted, but I don't know whether the walls or ceiling should be included. Please have someone help me work that out.\n\nCurrent requested work (latest answers supersede earlier wording):\nPainting — Painting; provider assessment\n- Desired outcome: I want the living room painted (homeowner: I want the living room painted)\n- Target scope: I want the living room painted (homeowner: I want the living room painted)\n- Included surfaces: homeowner unsure (homeowner: I don't know whether the walls or ceiling should be included. Please have someone help me work that out.)\nProvider review: Areas, trim lengths, visible preparation needs, substrate, access, and coating specification.; Help homeowner decide whether walls, ceiling, or both should be included in painting scope.\nProvider review for all requested work: Measurements, quantities, geometry, visible condition, and capture coverage.; Material identification and concealed, structural, mechanical, or code-related conditions.; Trade-specific methods, exact specifications, permits, and price.\nProject ZIP: 01234\nModel attachment is context only; requested scope above controls inclusions. The intake agent has not viewed the scan."
+    },
+    {
+      "id": "window_cleaning_clarifies_specialty_scope",
+      "failures": [],
+      "replies": [
+        {
+          "displayText": "Got it—all windows, inside and out, with screens and tracks included. Quick question: do you know if any are storm windows, French/exterior-grid panes, or skylights? And is this routine cleaning, or is there hard-water staining, paint, or other buildup to deal with?",
+          "serviceCandidates": [
+            "Window Cleaning"
+          ],
+          "workItems": [
+            {
+              "id": "windowcleaning1",
+              "rubricId": "window_cleaning",
+              "service": "Window Cleaning",
+              "serviceName": "Window Cleaning",
+              "subtype": null,
+              "assessment": false,
+              "answers": [
+                {
+                  "field": "desired_outcome",
+                  "status": "answered",
+                  "value": "Clean all windows inside and outside",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside, including screens and tracks."
+                },
+                {
+                  "field": "target_scope",
+                  "status": "answered",
+                  "value": "All windows",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside, including screens and tracks."
+                },
+                {
+                  "field": "sides_included",
+                  "status": "answered",
+                  "value": "both",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside"
+                },
+                {
+                  "field": "extras",
+                  "status": "answered",
+                  "value": "screens and tracks included",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "including screens and tracks"
+                }
+              ],
+              "providerReview": []
+            }
+          ],
+          "removedWorkItems": [],
+          "answerUpdates": [],
+          "zipUpdates": [
+            {
+              "role": "project",
+              "raw": "37129",
+              "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793"
+            }
+          ],
+          "nextQuestion": [
+            {
+              "workItemId": "windowcleaning1",
+              "field": "window_type_details"
+            },
+            {
+              "workItemId": "windowcleaning1",
+              "field": "cleaning_condition"
+            }
+          ],
+          "deferred": [],
+          "quoteBrief": "Homeowner requests cleaning of all windows inside and outside, including screens and tracks. Project ZIP 37129. Still need: specialty glass details (storm, French, skylight) and cleaning condition (routine vs staining). Interior access difficulty to be asked once sides/condition confirmed.",
+          "action": "ask",
+          "intent": "request",
+          "intentSourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+          "intentEvidence": "Clean all the windows inside and outside, including screens and tracks."
+        },
+        {
+          "displayText": "Thanks for confirming—standard windows all around. Is this routine cleaning, or is there hard-water staining, paint, or buildup to address?",
+          "serviceCandidates": [
+            "Window Cleaning"
+          ],
+          "workItems": [
+            {
+              "id": "windowcleaning1",
+              "rubricId": "window_cleaning",
+              "service": "Window Cleaning",
+              "serviceName": "Window Cleaning",
+              "subtype": null,
+              "assessment": false,
+              "answers": [
+                {
+                  "field": "desired_outcome",
+                  "status": "answered",
+                  "value": "Clean all windows inside and outside",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside, including screens and tracks."
+                },
+                {
+                  "field": "target_scope",
+                  "status": "answered",
+                  "value": "All windows",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside, including screens and tracks."
+                },
+                {
+                  "field": "sides_included",
+                  "status": "answered",
+                  "value": "both",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside"
+                },
+                {
+                  "field": "extras",
+                  "status": "answered",
+                  "value": "screens and tracks included",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "including screens and tracks"
+                },
+                {
+                  "field": "window_type_details",
+                  "status": "answered",
+                  "value": "All standard windows, no storm windows, French panes, skylights, or specialty glass",
+                  "sourceTurnId": "4fa931e7-3bd8-49ac-91c2-47b26af37dd9",
+                  "evidence": "All standard windows, no storm windows, French panes, skylights, or specialty glass."
+                }
+              ],
+              "providerReview": []
+            }
+          ],
+          "removedWorkItems": [],
+          "answerUpdates": [],
+          "zipUpdates": [],
+          "nextQuestion": [
+            {
+              "workItemId": "windowcleaning1",
+              "field": "cleaning_condition"
+            }
+          ],
+          "deferred": [],
+          "quoteBrief": "Window Cleaning request: all windows, inside and out, including screens and tracks. All standard windows confirmed—no storm windows, French/exterior-grid panes, skylights, or specialty glass. Project ZIP 37129. Still need: cleaning condition (routine vs staining/buildup) and whether any interior glass is hard to reach.",
+          "action": "ask",
+          "intent": "request",
+          "intentSourceTurnId": "4fa931e7-3bd8-49ac-91c2-47b26af37dd9",
+          "intentEvidence": "All standard windows, no storm windows, French panes, skylights, or specialty glass."
+        },
+        {
+          "displayText": "Routine cleaning, standard windows, no special stains. One more thing: are any interior glass surfaces hard to reach, like lofted windows in a vaulted room?",
+          "serviceCandidates": [
+            "Window Cleaning"
+          ],
+          "workItems": [
+            {
+              "id": "windowcleaning1",
+              "rubricId": "window_cleaning",
+              "service": "Window Cleaning",
+              "serviceName": "Window Cleaning",
+              "subtype": null,
+              "assessment": false,
+              "answers": [
+                {
+                  "field": "desired_outcome",
+                  "status": "answered",
+                  "value": "Clean all windows inside and outside",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside, including screens and tracks."
+                },
+                {
+                  "field": "target_scope",
+                  "status": "answered",
+                  "value": "All windows",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside, including screens and tracks."
+                },
+                {
+                  "field": "sides_included",
+                  "status": "answered",
+                  "value": "both",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside"
+                },
+                {
+                  "field": "extras",
+                  "status": "answered",
+                  "value": "screens and tracks included",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "including screens and tracks"
+                },
+                {
+                  "field": "window_type_details",
+                  "status": "answered",
+                  "value": "All standard windows, no storm windows, French panes, skylights, or specialty glass",
+                  "sourceTurnId": "4fa931e7-3bd8-49ac-91c2-47b26af37dd9",
+                  "evidence": "All standard windows, no storm windows, French panes, skylights, or specialty glass."
+                },
+                {
+                  "field": "cleaning_condition",
+                  "status": "answered",
+                  "value": "Routine cleaning, no hard-water stains, paint, adhesive, or construction debris",
+                  "sourceTurnId": "24d2336d-e479-4528-9644-4bcb352aaabf",
+                  "evidence": "Routine cleaning, with no hard-water stains, paint, adhesive, or construction debris."
+                }
+              ],
+              "providerReview": []
+            }
+          ],
+          "removedWorkItems": [],
+          "answerUpdates": [],
+          "zipUpdates": [],
+          "nextQuestion": [
+            {
+              "workItemId": "windowcleaning1",
+              "field": "interior_access"
+            }
+          ],
+          "deferred": [],
+          "quoteBrief": "Homeowner requests whole-home window cleaning, inside and outside, including screens and tracks. All standard windows—no storm windows, French panes, skylights, or specialty glass. Routine cleaning only; no hard-water staining, paint, adhesive, or construction debris. Project ZIP: 37129.",
+          "action": "ask",
+          "intent": "request",
+          "intentSourceTurnId": "24d2336d-e479-4528-9644-4bcb352aaabf",
+          "intentEvidence": "Routine cleaning, with no hard-water stains, paint, adhesive, or construction debris."
+        },
+        {
+          "displayText": "Your scope and ZIP are saved. Your request is ready for TakeShape to match with local providers. Once it’s submitted, you’ll be contacted about your quote.",
+          "serviceCandidates": [
+            "Window Cleaning"
+          ],
+          "workItems": [
+            {
+              "id": "windowcleaning1",
+              "rubricId": "window_cleaning",
+              "service": "Window Cleaning",
+              "serviceName": "Window Cleaning",
+              "subtype": null,
+              "assessment": false,
+              "answers": [
+                {
+                  "field": "desired_outcome",
+                  "status": "answered",
+                  "value": "Clean all windows inside and outside",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside, including screens and tracks."
+                },
+                {
+                  "field": "target_scope",
+                  "status": "answered",
+                  "value": "All windows",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside, including screens and tracks."
+                },
+                {
+                  "field": "sides_included",
+                  "status": "answered",
+                  "value": "both",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "Clean all the windows inside and outside"
+                },
+                {
+                  "field": "extras",
+                  "status": "answered",
+                  "value": "screens and tracks included",
+                  "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+                  "evidence": "including screens and tracks"
+                },
+                {
+                  "field": "window_type_details",
+                  "status": "answered",
+                  "value": "All standard windows, no storm windows, French panes, skylights, or specialty glass",
+                  "sourceTurnId": "4fa931e7-3bd8-49ac-91c2-47b26af37dd9",
+                  "evidence": "All standard windows, no storm windows, French panes, skylights, or specialty glass."
+                },
+                {
+                  "field": "cleaning_condition",
+                  "status": "answered",
+                  "value": "Routine cleaning, no hard-water stains, paint, adhesive, or construction debris",
+                  "sourceTurnId": "24d2336d-e479-4528-9644-4bcb352aaabf",
+                  "evidence": "Routine cleaning, with no hard-water stains, paint, adhesive, or construction debris."
+                },
+                {
+                  "field": "interior_access",
+                  "status": "answered",
+                  "value": "All interior glass accessible from the floor, no lofted windows",
+                  "sourceTurnId": "6455f081-7e13-46c8-812e-bf1c23c67b8a",
+                  "evidence": "All the interior glass is accessible from the floor; no lofted windows."
+                }
+              ],
+              "providerReview": []
+            }
+          ],
+          "removedWorkItems": [],
+          "answerUpdates": [],
+          "zipUpdates": [],
+          "nextQuestion": [],
+          "deferred": [],
+          "quoteBrief": "Window cleaning for all windows, inside and outside, including screens and tracks. All standard windows—no storm windows, French panes, skylights, or specialty glass. Routine cleaning condition, no hard-water stains, paint, adhesive, or construction debris. All interior glass accessible from floor level, no lofted or hard-to-reach windows. Project ZIP: 37129.",
+          "action": "ready",
+          "intent": "request",
+          "intentSourceTurnId": "6455f081-7e13-46c8-812e-bf1c23c67b8a",
+          "intentEvidence": "All the interior glass is accessible from the floor; no lofted windows."
+        }
+      ],
+      "homeownerTurns": [
+        "Clean all the windows inside and outside, including screens and tracks. The home ZIP is 37129.",
+        "All standard windows, no storm windows, French panes, skylights, or specialty glass.",
+        "Routine cleaning, with no hard-water stains, paint, adhesive, or construction debris.",
+        "All the interior glass is accessible from the floor; no lofted windows."
+      ],
+      "structuredAnswers": [
+        {
+          "id": "windowcleaning1",
+          "rubricId": "window_cleaning",
+          "service": "Window Cleaning",
+          "serviceName": "Window Cleaning",
+          "subtype": null,
+          "assessment": false,
+          "answers": [
+            {
+              "field": "desired_outcome",
+              "status": "answered",
+              "value": "Clean all windows inside and outside",
+              "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+              "evidence": "Clean all the windows inside and outside, including screens and tracks."
+            },
+            {
+              "field": "target_scope",
+              "status": "answered",
+              "value": "All windows",
+              "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+              "evidence": "Clean all the windows inside and outside, including screens and tracks."
+            },
+            {
+              "field": "sides_included",
+              "status": "answered",
+              "value": "both",
+              "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+              "evidence": "Clean all the windows inside and outside"
+            },
+            {
+              "field": "extras",
+              "status": "answered",
+              "value": "screens and tracks included",
+              "sourceTurnId": "4c95efc5-bdfc-4cde-acfc-19b994a47793",
+              "evidence": "including screens and tracks"
+            },
+            {
+              "field": "window_type_details",
+              "status": "answered",
+              "value": "All standard windows, no storm windows, French panes, skylights, or specialty glass",
+              "sourceTurnId": "4fa931e7-3bd8-49ac-91c2-47b26af37dd9",
+              "evidence": "All standard windows, no storm windows, French panes, skylights, or specialty glass."
+            },
+            {
+              "field": "cleaning_condition",
+              "status": "answered",
+              "value": "Routine cleaning, no hard-water stains, paint, adhesive, or construction debris",
+              "sourceTurnId": "24d2336d-e479-4528-9644-4bcb352aaabf",
+              "evidence": "Routine cleaning, with no hard-water stains, paint, adhesive, or construction debris."
+            },
+            {
+              "field": "interior_access",
+              "status": "answered",
+              "value": "All interior glass accessible from the floor, no lofted windows",
+              "sourceTurnId": "6455f081-7e13-46c8-812e-bf1c23c67b8a",
+              "evidence": "All the interior glass is accessible from the floor; no lofted windows."
+            }
+          ],
+          "providerReview": []
+        }
+      ],
+      "clarificationTurns": 3,
+      "repeatedQuestionCount": 1,
+      "modelAttempts": [
+        [
+          {
+            "validated": true,
+            "review": "proposed_question"
+          },
+          {
+            "validated": true
+          }
+        ],
+        [
+          {
+            "validated": true,
+            "review": "proposed_question"
+          },
+          {
+            "validated": true
+          }
+        ],
+        [
+          {
+            "validated": false,
+            "error": "Intent must refer to the current turn"
+          },
+          {
+            "validated": true
+          }
+        ],
+        [
+          {
+            "validated": false,
+            "error": "Intent must refer to the current turn"
+          },
+          {
+            "validated": true
+          }
+        ]
+      ],
+      "latencySeconds": [
+        21.712,
+        22.393,
+        20.906,
+        23.333
+      ],
+      "replyWordCounts": [
+        42,
+        20,
+        25,
+        26
+      ],
+      "providerBrief": "Original homeowner request:\nClean all the windows inside and outside, including screens and tracks. The home ZIP is 37129.\n\nCurrent requested work (latest answers supersede earlier wording):\nWindow Cleaning — Window Cleaning\n- Desired outcome: Clean all the windows inside and outside, including screens and tracks. (homeowner: Clean all the windows inside and outside, including screens and tracks.)\n- Target scope: Clean all the windows inside and outside, including screens and tracks. (homeowner: Clean all the windows inside and outside, including screens and tracks.)\n- Sides included: both (homeowner: Clean all the windows inside and outside)\n- Extras: including screens and tracks (homeowner: including screens and tracks)\n- Window type details: All standard windows, no storm windows, French panes, skylights, or specialty glass. (homeowner: All standard windows, no storm windows, French panes, skylights, or specialty glass.)\n- Cleaning condition: Routine cleaning, with no hard-water stains, paint, adhesive, or construction debris. (homeowner: Routine cleaning, with no hard-water stains, paint, adhesive, or construction debris.)\n- Interior access: All the interior glass is accessible from the floor; no lofted windows. (homeowner: All the interior glass is accessible from the floor; no lofted windows.)\nProvider review: Window counts, dimensions, exterior height/access, visible features, and capture coverage from the model; do not ask the homeowner for the home's story count.\nQuote options: Exterior glass cleaning.; Interior glass cleaning.; Screen detailing.; Sill and track detailing.\nProvider review for all requested work: Measurements, quantities, geometry, visible condition, and capture coverage.; Material identification and concealed, structural, mechanical, or code-related conditions.; Trade-specific methods, exact specifications, permits, and price.\nProject ZIP: 37129\nModel attachment is context only; requested scope above controls inclusions. The intake agent has not viewed the scan."
+    },
+    {
+      "id": "landscaping_routing",
+      "failures": [],
+      "replies": [
+        {
+          "displayText": "Your scope and ZIP are saved. You don’t have to decide that alone—this project should start with a quote consultation so the provider can clarify the remaining choice before preparing reliable pricing.",
+          "serviceCandidates": [
+            "Landscaping"
+          ],
+          "workItems": [
+            {
+              "id": "backyard_redesign",
+              "rubricId": "landscaping",
+              "service": "Landscaping",
+              "serviceName": "Landscaping",
+              "subtype": null,
+              "assessment": true,
+              "answers": [
+                {
+                  "field": "desired_outcome",
+                  "status": "answered",
+                  "value": "Redesign the entire backyard",
+                  "sourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f",
+                  "evidence": "I need help redesigning the entire backyard"
+                },
+                {
+                  "field": "target_scope",
+                  "status": "answered",
+                  "value": "Entire backyard",
+                  "sourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f",
+                  "evidence": "redesigning the entire backyard"
+                },
+                {
+                  "field": "work_category",
+                  "status": "answered",
+                  "value": "landscape_design",
+                  "sourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f",
+                  "evidence": "I need help redesigning the entire backyard, but I don't know what changes to make"
+                },
+                {
+                  "field": "requested_work",
+                  "status": "provider_recommendation",
+                  "value": null,
+                  "sourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f",
+                  "evidence": "I don't know what changes to make. Please help me figure out a plan."
+                }
+              ],
+              "providerReview": [
+                "Homeowner wants a full backyard redesign but has no specific plan yet; requests provider/design help to develop one."
+              ]
+            }
+          ],
+          "removedWorkItems": [],
+          "answerUpdates": [],
+          "zipUpdates": [
+            {
+              "role": "project",
+              "raw": "01234",
+              "sourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f"
+            }
+          ],
+          "nextQuestion": [],
+          "deferred": [
+            "design_preferences: homeowner requested provider help since they don't have a plan"
+          ],
+          "quoteBrief": "Homeowner requests a full backyard redesign/landscape design but has no specific plan and wants provider guidance to develop one. Scope: entire backyard. ZIP 01234. This is a design-consultation request; style, materials, plant preservation, maintenance level, and site considerations (sun/shade/drainage/irrigation) still need to be gathered or discussed during consultation.",
+          "action": "consultation_required",
+          "intent": "request",
+          "intentSourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f",
+          "intentEvidence": "I need help redesigning the entire backyard, but I don't know what changes to make. Please help me figure out a plan."
+        }
+      ],
+      "homeownerTurns": [
+        "I need help redesigning the entire backyard, but I don't know what changes to make. Please help me figure out a plan. Project ZIP 01234."
+      ],
+      "structuredAnswers": [
+        {
+          "id": "backyard_redesign",
+          "rubricId": "landscaping",
+          "service": "Landscaping",
+          "serviceName": "Landscaping",
+          "subtype": null,
+          "assessment": true,
+          "answers": [
+            {
+              "field": "desired_outcome",
+              "status": "answered",
+              "value": "Redesign the entire backyard",
+              "sourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f",
+              "evidence": "I need help redesigning the entire backyard"
+            },
+            {
+              "field": "target_scope",
+              "status": "answered",
+              "value": "Entire backyard",
+              "sourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f",
+              "evidence": "redesigning the entire backyard"
+            },
+            {
+              "field": "work_category",
+              "status": "answered",
+              "value": "landscape_design",
+              "sourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f",
+              "evidence": "I need help redesigning the entire backyard, but I don't know what changes to make"
+            },
+            {
+              "field": "requested_work",
+              "status": "provider_recommendation",
+              "value": null,
+              "sourceTurnId": "dfa52f8a-6f7e-454e-8949-ecd2da39474f",
+              "evidence": "I don't know what changes to make. Please help me figure out a plan."
+            }
+          ],
+          "providerReview": [
+            "Homeowner wants a full backyard redesign but has no specific plan yet; requests provider/design help to develop one."
+          ]
+        }
+      ],
+      "clarificationTurns": 0,
+      "repeatedQuestionCount": 0,
+      "modelAttempts": [
+        [
+          {
+            "validated": true
+          }
+        ]
+      ],
+      "latencySeconds": [
+        14.448
+      ],
+      "replyWordCounts": [
+        32
+      ],
+      "providerBrief": "Original homeowner request:\nI need help redesigning the entire backyard, but I don't know what changes to make. Please help me figure out a plan. Project ZIP 01234.\n\nCurrent requested work (latest answers supersede earlier wording):\nLandscaping — Landscaping; provider assessment\n- Desired outcome: I need help redesigning the entire backyard (homeowner: I need help redesigning the entire backyard)\n- Target scope: redesigning the entire backyard (homeowner: redesigning the entire backyard)\n- Work category: landscape_design (homeowner: I need help redesigning the entire backyard, but I don't know what changes to make)\n- Requested work: provider recommendation requested (homeowner: I don't know what changes to make. Please help me figure out a plan.)\nProvider review: Manually assess model/site size, layout, visible features, access, quantities, and material coverage.; Assess soil, drainage, grading, plant health, utilities, feasibility, and construction requirements.; Outdoor construction such as patios, decks, and outdoor living spaces requires consultation before quote.; Homeowner wants a full backyard redesign but has no specific plan yet; requests provider/design help to develop one.\nProvider review for all requested work: Measurements, quantities, geometry, visible condition, and capture coverage.; Material identification and concealed, structural, mechanical, or code-related conditions.; Trade-specific methods, exact specifications, permits, and price.\nProject ZIP: 01234\nModel attachment is context only; requested scope above controls inclusions. The intake agent has not viewed the scan."
+    },
+    {
+      "id": "pause_with_scope",
+      "failures": [],
+      "replies": [
+        {
+          "displayText": "I’ve paused this request. Tell me when you’d like to continue, or send any changes.",
+          "serviceCandidates": [
+            "Painting"
+          ],
+          "workItems": [
+            {
+              "id": "paint_bedroom",
+              "rubricId": "painting",
+              "service": "Painting",
+              "serviceName": "Painting",
+              "subtype": null,
+              "assessment": false,
+              "answers": [
+                {
+                  "field": "desired_outcome",
+                  "status": "answered",
+                  "value": "Repaint bedroom walls",
+                  "sourceTurnId": "5f797f82-715a-4705-9390-1b4460b0ef5e",
+                  "evidence": "only considering repainting my bedroom walls"
+                },
+                {
+                  "field": "target_scope",
+                  "status": "answered",
+                  "value": "Bedroom walls",
+                  "sourceTurnId": "5f797f82-715a-4705-9390-1b4460b0ef5e",
+                  "evidence": "repainting my bedroom walls"
+                }
+              ],
+              "providerReview": []
+            }
+          ],
+          "removedWorkItems": [],
+          "answerUpdates": [],
+          "zipUpdates": [
+            {
+              "role": "project",
+              "raw": "01234",
+              "sourceTurnId": "5f797f82-715a-4705-9390-1b4460b0ef5e"
+            }
+          ],
+          "nextQuestion": [],
+          "deferred": [],
+          "quoteBrief": "Homeowner is considering repainting bedroom walls only. Request is paused at homeowner's explicit instruction — do not submit or contact anyone. ZIP 01234 provided for reference.",
+          "action": "ask",
+          "intent": "pause",
+          "intentSourceTurnId": "5f797f82-715a-4705-9390-1b4460b0ef5e",
+          "intentEvidence": "Pause this request. I am only considering repainting my bedroom walls and do not want you to submit or contact anyone."
+        }
+      ],
+      "homeownerTurns": [
+        "Pause this request. I am only considering repainting my bedroom walls and do not want you to submit or contact anyone. ZIP 01234."
+      ],
+      "structuredAnswers": [
+        {
+          "id": "paint_bedroom",
+          "rubricId": "painting",
+          "service": "Painting",
+          "serviceName": "Painting",
+          "subtype": null,
+          "assessment": false,
+          "answers": [
+            {
+              "field": "desired_outcome",
+              "status": "answered",
+              "value": "Repaint bedroom walls",
+              "sourceTurnId": "5f797f82-715a-4705-9390-1b4460b0ef5e",
+              "evidence": "only considering repainting my bedroom walls"
+            },
+            {
+              "field": "target_scope",
+              "status": "answered",
+              "value": "Bedroom walls",
+              "sourceTurnId": "5f797f82-715a-4705-9390-1b4460b0ef5e",
+              "evidence": "repainting my bedroom walls"
+            }
+          ],
+          "providerReview": []
+        }
+      ],
+      "clarificationTurns": 0,
+      "repeatedQuestionCount": 0,
+      "modelAttempts": [
+        [
+          {
+            "validated": true
+          }
+        ]
+      ],
+      "latencySeconds": [
+        7.501
+      ],
+      "replyWordCounts": [
+        15
+      ],
+      "providerBrief": null
+    }
+  ]
+}

@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from . import engine, provider
 
+MAX_GENERATION_ATTEMPTS = 3
 
 async def generate_turn(state, time_zone, *, attempts=None):
     payload = engine.model_input(state, time_zone)
@@ -13,7 +14,7 @@ async def generate_turn(state, time_zone, *, attempts=None):
     # Ordinary validation gets one repair (two calls total). A proposed-question
     # review may itself introduce an invalid citation, so that path alone gets a
     # final repair call rather than surfacing a retryable failure to the homeowner.
-    for attempt in range(3):
+    for attempt in range(MAX_GENERATION_ATTEMPTS):
         result = None
         try:
             result = await provider.generate(system, payload)
@@ -26,7 +27,7 @@ async def generate_turn(state, time_zone, *, attempts=None):
             if attempt == 0 and result.action == 'ask' and validated['result']['nextQuestion']:
                 # A schema-valid question can still repeat an answered intent.
                 # Spend the remaining attempt checking it against the transcript,
-                # without relaxing provenance or the total two-call limit.
+                # without relaxing provenance; a failed review gets one repair.
                 if attempts is not None:
                     attempts.append({'validated': True, 'review': 'proposed_question'})
                 question_reviewed = True
