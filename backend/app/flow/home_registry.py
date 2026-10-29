@@ -150,7 +150,7 @@ async def load_index_async(home_id: str | None, *, refresh: bool = False) -> Hom
     return index
 
 
-def unpack_export(source: Path, workdir: Path) -> Path:
+def unpack_export(source: Path, workdir: Path, *, context_limits: bool = False) -> Path:
     """A zip or a directory -> the directory that holds ``rooms/``.
 
     Exports arrive zipped from a phone, sometimes with the ``Scans/<id>/``
@@ -164,6 +164,9 @@ def unpack_export(source: Path, workdir: Path) -> Path:
     else:
         root = workdir / "unpacked"
         with zipfile.ZipFile(source) as zf:
+            if context_limits:
+                from .context_archive import validate
+                validate(zf)
             zf.extractall(root)
     if (root / "rooms").is_dir():
         return root
@@ -376,9 +379,11 @@ async def ingest_from_storage(
     workdir = Path(tempfile.mkdtemp(prefix=f"ingest-{home_id}-", dir=_ingest_workroot()))
     try:
         archive = workdir / "export.zip"
-        if not await supabase_store.download_object(bucket, object_path, archive):
+        from .context_archive import MAX_DOWNLOAD_BYTES
+        download_options = {'max_bytes': MAX_DOWNLOAD_BYTES} if upload_revision else {}
+        if not await supabase_store.download_object(bucket, object_path, archive, **download_options):
             raise RuntimeError(f"could not download {bucket}/{object_path}")
-        bundle_dir = await asyncio.to_thread(unpack_export, archive, workdir)
+        bundle_dir = await asyncio.to_thread(unpack_export, archive, workdir, context_limits=bool(upload_revision))
         previous = await load_index_async(home_id)
         index = await asyncio.to_thread(ingest_bundle, bundle_dir, home_id, require_rooms=True)
         # Metadata refreshes must keep homeowner names and finished models.

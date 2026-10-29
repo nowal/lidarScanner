@@ -25,6 +25,7 @@ from fastapi import HTTPException
 from ..config import settings
 from ..home_index import HomeIndex
 from . import supabase_store, scan_uploads
+from .context_archive import validate, MAX_DOWNLOAD_BYTES
 
 logger = logging.getLogger(__name__)
 TTL = 30 * 86400
@@ -32,6 +33,7 @@ BUCKET = 'metashape-exports'
 CONVERTER_VERSION = 'usd25.11-glb-v2'
 _tasks: dict[str, asyncio.Task] = {}
 _slots = asyncio.Semaphore(1)
+_photo_slots = asyncio.Semaphore(1)
 
 
 def _hash(value) -> str:
@@ -96,6 +98,22 @@ async def capture(record) -> dict:
              'models': models, 'photos': [dict(label=p['fileName'], object=p['storagePath'],
                                                 thumbnail=p['thumbnailPath'], supplemental=True)
                                          for p in supplemental]}
+    if all(r.provider_frames is not None for r in rooms):
+        media['version'] = 2
+        versions = sorted({f.get('selectionVersion', 1) for r in rooms for f in r.provider_frames})
+        media['providerSelectionVersions'] = versions
+        if len(versions) == 1:
+            media['providerSelectionVersion'] = versions[0]
+        media['rooms'] = [{'key': r.key, 'label': r.display_name,
+                           'frameIds': [f['id'] for f in r.provider_frames]} for r in rooms]
+        # Metadata only: no ZIP download, image decoding or derivative uploads
+        # on the submission / email path. This list is immutable with the scan.
+        for room in rooms:
+            for n, frame in enumerate(room.provider_frames):
+                media['photos'].append({'roomKey': room.key, 'label': f'{room.display_name} · view {n + 1}',
+                                        'frameId': frame['id'], 'captureArea': frame['captureArea'],
+                                        'camera': camera_pose(frame)})
+        media['photosPrepared'] = True
     media['snapshotId'] = _hash(media)
     return media
 
@@ -182,37 +200,53 @@ def camera_pose(frame: dict) -> dict | None:
     return {'position': pose[12:15], 'direction': [v / length for v in direction]}
 
 
-def photo_bytes(archive: Path, media: dict) -> list[tuple[dict, bytes, bytes]]:
-    """Read selected JPEGs from durable context ZIP, rotate using camera gravity."""
+def _archive_frames(z):
+    frames = {}
+    for item in validate(z):
+        match = re.fullmatch(r'(?:[^/]+/)?rooms/(room-\d+)/rebuild/manifest\.json', item.filename)
+        if not match:
+            continue
+        manifest = json.loads(z.read(item))
+        base = item.filename.rsplit('/', 1)[0]
+        for frame in manifest.get('frames', []):
+            fid = str(frame.get('id', ''))
+            if re.fullmatch(r'[A-Za-z0-9_-]{1,80}', fid):
+                frames[(match[1], fid)] = (f'{base}/images/{fid}.jpg', frame)
+    return frames
+
+
+def _frame_lookup(frames, capture_area=None):
+    # New snapshots disambiguate by capture area. Legacy globally unique IDs
+    # retain their original behavior; ambiguous IDs fail closed.
+    lookup, ambiguous = {}, set()
+    for (area, fid), value in frames.items():
+        if capture_area and area != capture_area:
+            continue
+        if fid in lookup: ambiguous.add(fid)
+        lookup[fid] = value
+    return {fid: value for fid, value in lookup.items() if fid not in ambiguous}
+
+
+def _photo_bytes(archive: Path, media: dict):
+    """Yield one upright derivative at a time; never retain a dense image batch."""
     from PIL import Image
     from ..frame_select import upright_rotation
-    result = []
     with zipfile.ZipFile(archive) as z:
-        members = z.infolist()
-        if len(members) > 5000 or sum(i.file_size for i in members) > 128 * 1024 * 1024:
-            raise ValueError('Context package exceeds image limits')
-        frames = {}
-        for item in members:
-            if re.fullmatch(r'(?:[^/]+/)?rooms/room-\d+/rebuild/manifest\.json', item.filename):
-                manifest = json.loads(z.read(item))
-                base = item.filename.rsplit('/', 1)[0]
-                for frame in manifest.get('frames', []):
-                    fid = str(frame.get('id', ''))
-                    if re.fullmatch(r'[A-Za-z0-9_-]{1,80}', fid):
-                        frames[fid] = (f'{base}/images/{fid}.jpg', frame)
+        names = set(z.namelist())
+        frames = _frame_lookup(_archive_frames(z), media.get('captureArea'))
         # Round robin: representative first view from every in-scope area.
-        for n in range(4):
+        for n in range(max((len(r['frameIds']) for r in media['rooms']), default=0)):
             for room in media['rooms']:
                 ids = room['frameIds']
                 if n >= len(ids) or ids[n] not in frames: continue
                 name, frame = frames[ids[n]]
-                if name not in z.namelist(): continue
+                if name not in names: continue
                 try:
                     with Image.open(io.BytesIO(z.read(name))) as image:
                         if image.width * image.height > 16_000_000: continue
                         image = image.convert('RGB')
                         pose = frame.get('cameraTransform') or []
-                        turns = upright_rotation(pose) if len(pose) == 16 else 0
+                        turns = upright_rotation(pose) if camera_pose(frame) else 0
                         if turns: image = image.rotate(90 * turns, expand=True)
                         image.thumbnail((768, 768))
                         full = io.BytesIO(); image.save(full, format='JPEG', quality=88)
@@ -220,11 +254,67 @@ def photo_bytes(archive: Path, media: dict) -> list[tuple[dict, bytes, bytes]]:
                         canvas = Image.new('RGB', (360, 270), '#edf0f3')
                         canvas.paste(image, ((360 - image.width) // 2, (270 - image.height) // 2))
                         thumb = io.BytesIO(); canvas.save(thumb, format='JPEG', quality=82)
-                    result.append(({'roomKey': room['key'], 'label': f"{room['label']} · view {n + 1}",
-                                    'frameId': ids[n], 'camera': camera_pose(frame)}, full.getvalue(), thumb.getvalue()))
-                except (OSError, ValueError):
+                    yield ({'roomKey': room['key'], 'label': f"{room['label']} · view {n + 1}",
+                            'frameId': ids[n], 'camera': camera_pose(frame)}, full.getvalue(), thumb.getvalue())
+                except (OSError, ValueError, Image.DecompressionBombError):
                     continue
-    return result
+
+
+def photo_bytes(archive: Path, media: dict) -> list[tuple[dict, bytes, bytes]]:
+    return list(_photo_bytes(archive, media))
+
+
+def _camera_metadata(archive: Path) -> dict:
+    with zipfile.ZipFile(archive) as z:
+        frames = _frame_lookup(_archive_frames(z))
+        return {'frames': {fid: camera_pose(frame) for fid, (_, frame) in frames.items()}}
+
+
+async def photo_object(media: dict, photo: dict, size: str) -> str:
+    """Prepare just the requested v2 photo, with one bounded worker per process.
+
+    A durable receipt follows both uploads, so retries/restarts reuse immutable
+    derivatives. The pinned ZIP is streamed to temporary disk, never retained
+    in memory or substituted with a newer scan revision.
+    """
+    if photo.get('object'):
+        return photo['object' if size == 'full' else 'thumbnail']
+    key = _hash([media['snapshotId'], photo['captureArea'], photo['frameId'], 'upright-v3'])
+    obj = prefix(media) + f'quote-photo-{key}.jpg'
+    thumb = prefix(media) + f'quote-thumb-{key}.jpg'
+    receipt = obj + '.json'
+    try:
+        await asyncio.wait_for(_photo_slots.acquire(), timeout=5)
+    except TimeoutError as exc:
+        raise HTTPException(503, 'Photos are busy. Please try again.') from exc
+    try:
+        if not (await get_json(receipt)).get('ready'):
+            with tempfile.TemporaryDirectory(prefix='quote-photo-') as tmp:
+                archive = Path(tmp) / 'context.zip'
+                context = media['context']
+                if not await supabase_store.download_object(context['bucket'], context['object'], archive, max_bytes=MAX_DOWNLOAD_BYTES):
+                    raise RuntimeError('Context photo could not be retrieved')
+                selection = {'rooms': [{'key': photo['roomKey'], 'label': photo['label'], 'frameIds': [photo['frameId']]}],
+                             'captureArea': photo['captureArea']}
+                extracted = await asyncio.to_thread(photo_bytes, archive, selection)
+                if not extracted:
+                    raise HTTPException(404, 'This scan photo is unavailable')
+                # Avoid recreating media for a deleted / reassigned scan.
+                state = await scan_uploads.transition(media['homeId'], 'read')
+                if not state or state.get('ownerId') != media['ownerId']:
+                    raise HTTPException(404, 'This scan is no longer available')
+                _, full, small = extracted[0]
+                await put_bytes(obj, full, 'image/jpeg')
+                await put_bytes(thumb, small, 'image/jpeg')
+                await put_bytes(receipt, b'{"ready":true}', 'application/json')
+        return obj if size == 'full' else thumb
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning('Quote photo unavailable (%s)', type(exc).__name__)
+        raise HTTPException(503, 'This photo could not be prepared. Please try again.') from exc
+    finally:
+        _photo_slots.release()
 
 
 async def prepare_email(record):
@@ -238,16 +328,18 @@ async def prepare_email(record):
         try:
             with tempfile.TemporaryDirectory(prefix='quote-photos-') as tmp:
                 archive = Path(tmp) / 'context.zip'
-                if not await supabase_store.download_object(context['bucket'], context['object'], archive, max_bytes=32 * 1024 * 1024):
+                if not await supabase_store.download_object(context['bucket'], context['object'], archive, max_bytes=MAX_DOWNLOAD_BYTES):
                     raise RuntimeError('Context photos could not be retrieved')
-                photos = await asyncio.to_thread(photo_bytes, archive, media)
+                from contextlib import closing
                 entries = []
-                for info, full, thumb in photos:
-                    key = _hash([media['snapshotId'], info['frameId'], 'upright-v2'])
-                    obj = prefix(media) + f'quote-photo-{key}.jpg'
-                    small = prefix(media) + f'quote-thumb-{key}.jpg'
-                    await put_bytes(obj, full, 'image/jpeg'); await put_bytes(small, thumb, 'image/jpeg')
-                    entries.append(dict(info, object=obj, thumbnail=small))
+                with closing(_photo_bytes(archive, media)) as photos:
+                    while (photo := await asyncio.to_thread(next, photos, None)) is not None:
+                        info, full, thumb = photo
+                        key = _hash([media['snapshotId'], info['frameId'], 'upright-v2'])
+                        obj = prefix(media) + f'quote-photo-{key}.jpg'
+                        small = prefix(media) + f'quote-thumb-{key}.jpg'
+                        await put_bytes(obj, full, 'image/jpeg'); await put_bytes(small, thumb, 'image/jpeg')
+                        entries.append(dict(info, object=obj, thumbnail=small))
                 media['photos'] = list(media.get('photos', [])) + entries
                 media['photosPrepared'] = True
         except Exception as exc:
@@ -265,7 +357,7 @@ async def prepare_email(record):
 async def photos_with_camera(media: dict) -> list[dict]:
     """Backfill poses for existing emails from their original saved ZIP only."""
     photos = media.get('photos', [])
-    if all('camera' in p for p in photos) or not supabase_store.enabled():
+    if media.get('version') == 2 or all('camera' in p or p.get('supplemental') for p in photos) or not supabase_store.enabled():
         return photos
     context = media.get('context', {})
     if not context.get('object'): return photos
@@ -275,12 +367,11 @@ async def photos_with_camera(media: dict) -> list[dict]:
         if not poses:
             with tempfile.TemporaryDirectory(prefix='quote-cameras-') as tmp:
                 archive = Path(tmp) / 'context.zip'
-                if not await supabase_store.download_object(context['bucket'], context['object'], archive, max_bytes=32 * 1024 * 1024):
+                if not await supabase_store.download_object(context['bucket'], context['object'], archive, max_bytes=MAX_DOWNLOAD_BYTES):
                     return photos
-                extracted = await asyncio.to_thread(photo_bytes, archive, media)
-            poses = {'frames': {info['frameId']: info.get('camera') for info, _, _ in extracted}}
+                poses = await asyncio.to_thread(_camera_metadata, archive)
             await put_bytes(path, json.dumps(poses).encode(), 'application/json')
-        return [dict(p, camera=poses['frames'].get(p.get('frameId'))) for p in photos]
+        return [p if 'camera' in p or p.get('supplemental') else dict(p, camera=poses['frames'].get(p.get('frameId'))) for p in photos]
     except Exception as exc:
         logger.warning('Quote camera positions unavailable (%s)', type(exc).__name__)
         return photos

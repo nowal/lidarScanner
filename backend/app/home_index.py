@@ -176,6 +176,9 @@ class Room:
     door_count: int = 0
     wall_count: int = 0
     frame_ids: list[str] = field(default_factory=list)
+    # None denotes a legacy archive. Empty means provider sampling ran but
+    # found no usable images. Kept separate from the legacy agent's frame IDs.
+    provider_frames: list[dict] | None = None
     display_name: str = ""
     name_basis: str = ""           # why it got that name -- auditable
     confident: bool = False        # False -> the agent should hedge or ask
@@ -247,6 +250,7 @@ class Room:
             "windowOpenings": [[round(w, 3), round(h, 3)] for w, h in self.window_openings],
             "doors": self.door_count, "walls": self.wall_count,
             "frameIds": self.frame_ids, "name": self.display_name,
+            "providerFrames": self.provider_frames,
             "nameBasis": self.name_basis, "confident": self.confident,
             "role": self.role, "storeyWord": self.storey_word,
             "namedByHomeowner": self.named_by_homeowner,
@@ -270,6 +274,7 @@ class Room:
             door_count=int(data.get("doors", 0)),
             wall_count=int(data.get("walls", 0)),
             frame_ids=list(data.get("frameIds", [])),
+            provider_frames=data.get("providerFrames"),
             display_name=data.get("name", ""), name_basis=data.get("nameBasis", ""),
             confident=bool(data.get("confident", False)),
             role=data.get("role", "unknown"), storey_word=data.get("storeyWord", ""),
@@ -921,19 +926,28 @@ def _assign_frames(base: Path, rooms: list[Room]) -> None:
     photos that were captured while walking past it.
     """
     by_key = {r.key: r for r in rooms}
+    manifests = {r.key: _load_json(base / "rooms" / r.key / "rebuild" / "manifest.json") or {} for r in rooms}
+    if any(m.get('providerSelectionVersion') in (1, 2) for m in manifests.values()):
+        for room in rooms:
+            room.provider_frames = []
     for room in rooms:
-        manifest = _load_json(base / "rooms" / room.key / "rebuild" / "manifest.json")
+        manifest = manifests[room.key]
         if not manifest:
             continue
+        selection_version = manifest.get('providerSelectionVersion')
+        provider_ids = set(manifest.get('providerSelectedFrameIds') or []) if selection_version in (1, 2) else set()
+        legacy_ids = set(manifest.get('aiSelectedFrameIds') or []) if manifest.get('aiSelectionVersion') == 1 else None
         for frame in manifest.get("frames", []) or []:
             fid = frame.get("id")
             transform = frame.get("cameraTransform") or []
-            if not fid or len(transform) < 16:
+            if not fid:
                 continue
-            x, y, z = transform[12], transform[13], transform[14]
+            valid_pose = (isinstance(transform, list) and len(transform) == 16
+                          and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in transform))
+            x, y, z = transform[12:15] if valid_pose else (0, 0, 0)
 
             def inside(candidate: Room) -> bool:
-                if not candidate.polygon:
+                if not valid_pose or not candidate.polygon:
                     return False
                 # Storey band: a camera one floor up is not in this room.
                 if not (candidate.floor_y - 0.6) <= y <= (candidate.floor_y + 3.2):
@@ -945,7 +959,12 @@ def _assign_frames(base: Path, rooms: list[Room]) -> None:
             # without this a room can lose every photo it actually took.
             own = by_key[room.key]
             placed = own if inside(own) else next((c for c in rooms if inside(c)), None)
-            (placed or own).frame_ids.append(fid)
+            target = placed or own
+            if valid_pose and (legacy_ids is None or fid in legacy_ids):
+                target.frame_ids.append(fid)
+            if target.provider_frames is not None and fid in provider_ids:
+                target.provider_frames.append({'id': fid, 'captureArea': room.key, 'selectionVersion': selection_version,
+                                               'cameraTransform': transform if valid_pose else None})
 
 
 def _cli() -> None:  # pragma: no cover -- operator convenience

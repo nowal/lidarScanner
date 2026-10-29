@@ -234,3 +234,173 @@ async def test_legacy_scan_keeps_its_existing_original_download(monkeypatch):
     assert rec.scanMedia == {}
     await media.prepare_email(rec)
     assert rec.modelLink['url'] == 'https://signed.example/original.usdz'
+
+
+def dense_archive(path, count=121):
+    photo = io.BytesIO(); Image.new('RGB', (768, 400), 'red').save(photo, 'JPEG')
+    transform = [0,1,0,0,-1,0,0,0,0,0,1,0,2,4.2,1,1]
+    with zipfile.ZipFile(path, 'w') as z:
+        for area in [1, 2]:
+            frames = [{'id': f'a{area}-f{n}', 'cameraTransform': transform} for n in range(count)]
+            z.writestr(f'rooms/room-{area}/rebuild/manifest.json', json.dumps({'frames': frames}))
+            for f in frames: z.writestr(f'rooms/room-{area}/rebuild/images/{f["id"]}.jpg', photo.getvalue())
+    return transform
+
+
+def test_dense_photos_have_no_four_frame_cap_and_keep_scope(tmp_path):
+    archive = tmp_path / 'dense.zip'; dense_archive(archive)
+    rooms = [{'key': f'room-{a}', 'label': f'Area {a}', 'frameIds': [f'a{a}-f{n}' for n in range(121)]} for a in [1,2]]
+    photos = media.photo_bytes(archive, {'rooms': rooms})
+    assert len(photos) == 242
+    assert [p[0]['frameId'] for p in photos[:6]] == ['a1-f0','a2-f0','a1-f1','a2-f1','a1-f2','a2-f2']
+    assert photos[0][0]['camera'] == {'position': [2,4.2,1], 'direction': [0,0,-1]}
+    assert Image.open(io.BytesIO(photos[0][1])).size == (400,768)
+    scoped = media.photo_bytes(archive, {'rooms': rooms[1:]})
+    assert len(scoped) == 121 and all(p[0]['roomKey'] == 'room-2' for p in scoped)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('selection_version', [1, 2])
+async def test_v2_capture_is_metadata_only_scoped_and_revision_pinned(monkeypatch, selection_version):
+    raw = index()
+    for n, room in enumerate(raw['rooms'], 1):
+        room['providerFrames'] = [{'id': f'a{n}-f{i}', 'captureArea': 'room-1', 'selectionVersion': selection_version,
+            'cameraTransform': [1,0,0,0,0,1,0,0,0,0,1,0,n,1,i,1]} for i in range(12)]
+    state = {'revision': REV, 'ownerId': OWNER, 'publishedIndex': raw}
+    async def transition(*a, **kw): return state
+    async def forbidden(*a, **kw): raise AssertionError('Submission must not prepare dense images')
+    monkeypatch.setattr(media.scan_uploads, 'transition', transition)
+    monkeypatch.setattr(media.supabase_store, 'download_object', forbidden)
+    monkeypatch.setattr(media, 'put_bytes', forbidden)
+    monkeypatch.setattr(media, 'queue_conversion', lambda *a: None)
+    rec = record(homeownerId=OWNER, scopeIntent='single_room', roomKey='room-2')
+    rec.scanMedia = await media.capture(rec)
+    snap = copy.deepcopy(rec.scanMedia)
+    assert snap['version'] == 2 and snap['photosPrepared']
+    assert snap['providerSelectionVersion'] == selection_version
+    assert snap['providerSelectionVersions'] == [selection_version]
+    assert len(snap['photos']) == 12
+    assert all(p['roomKey'] == 'room-2' and p['captureArea'] == 'room-1' for p in snap['photos'])
+    assert all('object' not in p for p in snap['photos'])
+    await media.prepare_email(rec)
+    assert rec.scanMedia['photos'] == snap['photos']
+    raw['rooms'][1]['providerFrames'].clear()
+    state['revision'] = 'new-revision'
+    assert rec.scanMedia['photos'] == snap['photos']
+    assert rec.scanMedia['revision'] == REV
+    assert await media.photos_with_camera(rec.scanMedia) == snap['photos']
+
+
+@pytest.mark.asyncio
+async def test_on_demand_photo_retries_reuses_receipt_and_reads_pinned_context(tmp_path, monkeypatch):
+    archive = tmp_path / 'context.zip'; dense_archive(archive, 12)
+    photo = {'frameId': 'a1-f10', 'captureArea': 'room-1', 'roomKey': 'room-2', 'label': 'Upstairs'}
+    snap = {'version': 2, 'snapshotId': 'fixed', 'homeId': HOME, 'ownerId': OWNER,
+            'context': {'bucket': media.BUCKET, 'object': 'original-context.zip'}}
+    objects, downloads = {}, []
+    fail = True
+    async def get(path): return json.loads(objects[path]) if path in objects else {}
+    async def put(path, data, content_type, **kw):
+        nonlocal fail
+        if '-thumb-' in path and fail:
+            fail = False
+            raise RuntimeError('retryable upload failure')
+        objects[path] = data
+    async def download(bucket, path, target, *, max_bytes):
+        downloads.append((path, max_bytes)); target.write_bytes(archive.read_bytes()); return True
+    async def transition(*a, **kw): return {'ownerId': OWNER, 'revision': 'later-revision'}
+    monkeypatch.setattr(media, 'get_json', get)
+    monkeypatch.setattr(media, 'put_bytes', put)
+    monkeypatch.setattr(media.supabase_store, 'download_object', download)
+    monkeypatch.setattr(media.scan_uploads, 'transition', transition)
+    with pytest.raises(Exception) as exc: await media.photo_object(snap, photo, 'full')
+    assert exc.value.status_code == 503
+    assert not any(k.endswith('.json') for k in objects)
+    full = await media.photo_object(snap, photo, 'full')
+    thumb = await media.photo_object(snap, photo, 'thumb')
+    assert len(downloads) == 2 and downloads == [('original-context.zip', 32 * 1024 * 1024)] * 2
+    assert Image.open(io.BytesIO(objects[full])).size == (400,768)
+    assert Image.open(io.BytesIO(objects[thumb])).size == (360,270)
+    assert photo == {'frameId': 'a1-f10', 'captureArea': 'room-1', 'roomKey': 'room-2', 'label': 'Upstairs'}
+    assert await media.photo_object(snap, {'object': 'homeowner.jpg', 'thumbnail': 'homeowner-thumb.jpg'}, 'full') == 'homeowner.jpg'
+
+
+@pytest.mark.asyncio
+async def test_v2_status_and_photo_authorization_without_eager_download(monkeypatch):
+    rec = await saved_snapshot(monkeypatch)
+    rec.scanMedia.update(version=2, photos=[{'label': 'Sample', 'roomKey': 'room-1', 'camera': None,
+        'frameId': 'p20', 'captureArea': 'room-1'}, {'label': 'Homeowner', 'supplemental': True,
+        'object': 'homeowner.jpg', 'thumbnail': 'homeowner-thumb.jpg'}])
+    await quote_store.save(rec)
+    exp = rec.scanMedia['expiresAt']; sig = media.signature(rec, exp)
+    path = f'/api/v1/quote-media/{rec.id}/{exp}/{sig}'
+    prepared = []
+    async def prepare(scan, photo, size): prepared.append((scan['snapshotId'], photo, size)); return 'private.jpg'
+    async def sign(*a, **kw): return 'https://storage.example/private-signed'
+    async def status(*a): return {'status': 'preparing'}
+    monkeypatch.setattr(media, 'photo_object', prepare)
+    monkeypatch.setattr(media, 'conversion_status', status)
+    monkeypatch.setattr(media.supabase_store, '_signed_storage_url', sign)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as c:
+        response = await c.get(path + '/status')
+        assert response.status_code == 200 and not prepared
+        assert response.json()['photos'][1]['supplemental']
+        assert all('captureArea' not in p and 'object' not in p for p in response.json()['photos'])
+        assert (await c.get(path + '/photos/0/full')).status_code == 307
+        assert len(prepared) == 1
+        assert response.headers['cache-control'] == 'private, no-store'
+        assert (await c.get(path + '/photos/3/full')).status_code == 404
+        assert (await c.get(path[:-1] + 'x/photos/0/full')).status_code == 403
+        assert len(prepared) == 1
+
+
+def test_missing_corrupt_oversized_and_unposed_images(tmp_path):
+    archive = tmp_path / 'images.zip'
+    small = io.BytesIO(); Image.new('RGB', (40,20), 'blue').save(small, 'JPEG')
+    large = io.BytesIO(); Image.new('L', (4001,4000)).save(large, 'JPEG')
+    with zipfile.ZipFile(archive, 'w') as z:
+        z.writestr('rooms/room-1/rebuild/manifest.json', json.dumps({'frames': [
+            {'id': name, 'cameraTransform': [1,2]} for name in ['missing','corrupt','large','unposed']]}))
+        z.writestr('rooms/room-1/rebuild/images/corrupt.jpg', b'not a JPEG')
+        z.writestr('rooms/room-1/rebuild/images/large.jpg', large.getvalue())
+        z.writestr('rooms/room-1/rebuild/images/unposed.jpg', small.getvalue())
+    photos = media.photo_bytes(archive, {'rooms': [{'key':'room-1','label':'Area','frameIds':['missing','corrupt','large','unposed']}]})
+    assert len(photos) == 1 and photos[0][0]['frameId'] == 'unposed' and photos[0][0]['camera'] is None
+
+
+def test_capture_area_disambiguates_reused_frame_ids(tmp_path):
+    archive = tmp_path / 'duplicate-ids.zip'
+    small = io.BytesIO(); Image.new('RGB', (40,20), 'blue').save(small, 'JPEG')
+    with zipfile.ZipFile(archive, 'w') as z:
+        for area in [1,2]:
+            pose = [1,0,0,0,0,1,0,0,0,0,1,0,area,1,0,1]
+            z.writestr(f'rooms/room-{area}/rebuild/manifest.json', json.dumps({'frames':[{'id':'same', 'cameraTransform':pose}]}))
+            z.writestr(f'rooms/room-{area}/rebuild/images/same.jpg', small.getvalue())
+    scope = {'rooms':[{'key':'room-2','label':'Upstairs','frameIds':['same']}], 'captureArea':'room-1'}
+    assert media.photo_bytes(archive, scope)[0][0]['camera']['position'] == [1,1,0]
+    del scope['captureArea']
+    assert media.photo_bytes(archive, scope) == []
+
+
+@pytest.mark.asyncio
+async def test_old_sparse_snapshot_recovers_only_camera_metadata(tmp_path, monkeypatch):
+    archive = tmp_path / 'sparse.zip'; dense_archive(archive, 2)
+    existing_camera = {'position':[1,2,3], 'direction':[0,0,-1]}
+    snap = {'snapshotId':'old','homeId':HOME,'ownerId':OWNER,'context':{'bucket':media.BUCKET,'object':'old-context.zip'},
+            'photos':[{'frameId':'a1-f0','object':'old.jpg'}, {'frameId':'a1-f1','camera':existing_camera},
+                      {'supplemental':True,'object':'homeowner.jpg'}]}
+    downloads = []
+    async def download(bucket, path, target, *, max_bytes):
+        downloads.append(path); target.write_bytes(archive.read_bytes()); return True
+    async def get(*a): return {}
+    async def put(*a, **kw): pass
+    def forbidden(*a, **kw): raise AssertionError('Pose backfill must not decode image pixels')
+    monkeypatch.setattr(media.supabase_store, 'enabled', lambda: True)
+    monkeypatch.setattr(media.supabase_store, 'download_object', download)
+    monkeypatch.setattr(media, 'get_json', get); monkeypatch.setattr(media, 'put_bytes', put)
+    monkeypatch.setattr(Image, 'open', forbidden)
+    photos = await media.photos_with_camera(snap)
+    assert downloads == ['old-context.zip']
+    assert len(photos) == 3 and photos[0]['camera']['position'] == [2,4.2,1]
+    assert photos[1]['camera'] == existing_camera and photos[2] == snap['photos'][2]
+    assert 'camera' not in snap['photos'][0]

@@ -140,7 +140,10 @@ async def test_small_context_ingests_without_a_model_and_failure_is_visible(stag
         z.writestr('rooms/room-1/room.json', '{}')
         z.writestr('rooms/room-1/floor.json', '{"floor": 1}')
         z.writestr('rooms/room-1/rebuild/manifest.json', '{"frames": []}')
-    async def download(bucket, path, target): shutil.copyfile(archive, target); return True
+    async def download(bucket, path, target, **kwargs):
+        assert kwargs.get('max_bytes') == 32 * 1024 * 1024
+        shutil.copyfile(archive, target)
+        return True
     monkeypatch.setattr(supabase_store, 'download_object', download)
     status = await home_registry.ingest_from_storage(HOME, 'metashape-exports', OBJECT,
                                                     enrich=False, upload_revision=REV, owner_id=OWNER)
@@ -162,7 +165,10 @@ async def test_zero_room_upload_fails_without_overwriting_home(staged, monkeypat
     original = seed(ready=True).to_json()
     archive = staged / 'bad.zip'
     with zipfile.ZipFile(archive, 'w') as z: z.writestr('meta.json', '{}')
-    async def download(bucket, path, target): shutil.copyfile(archive, target); return True
+    async def download(bucket, path, target, **kwargs):
+        assert kwargs.get('max_bytes') == 32 * 1024 * 1024
+        shutil.copyfile(archive, target)
+        return True
     monkeypatch.setattr(supabase_store, 'download_object', download)
     status = await home_registry.ingest_from_storage(HOME, 'metashape-exports', OBJECT)
     assert status['status'] == 'failed'
@@ -241,7 +247,10 @@ async def test_photo_analysis_progress_does_not_require_models(staged, monkeypat
         for n in [1, 2]:
             z.writestr(f'rooms/room-{n}/room.json', '{}')
             z.writestr(f'rooms/room-{n}/rebuild/manifest.json', '{"frames": []}')
-    async def download(bucket, path, target): shutil.copyfile(archive, target); return True
+    async def download(bucket, path, target, **kwargs):
+        assert kwargs.get('max_bytes') == 32 * 1024 * 1024
+        shutil.copyfile(archive, target)
+        return True
     seen = []
     async def analyze(bundle, home, room, **kw):
         response = await flow_api.scan_context_status(HOME, OBJECT, 'valid')
@@ -271,7 +280,10 @@ async def test_staged_exterior_keeps_appearance_packet_extent_and_upload_readine
         z.writestr('meta.json', json.dumps({'id': HOME}))
         z.writestr('rooms/room-1/room.json', '{}')
         z.writestr('rooms/room-1/rebuild/manifest.json', '{"frames": []}')
-    async def download(bucket, path, target): shutil.copyfile(archive, target); return True
+    async def download(bucket, path, target, **kwargs):
+        assert kwargs.get('max_bytes') == 32 * 1024 * 1024
+        shutil.copyfile(archive, target)
+        return True
     async def analyze(*a, **kw):
         return {'room_key': 'room-1', 'setting': 'exterior', 'structure': 'detached garage',
                 'surfaces': {'walls': 'white siding'}, 'objects': [], 'coverage': 'complete'}
@@ -307,3 +319,39 @@ async def test_staged_exterior_keeps_appearance_packet_extent_and_upload_readine
     final = home_registry.load_index(HOME)
     assert final.upload['modelsReady'] and final.upload['revision'] == REV
     assert final.rooms[0].appearance['structure'] == 'detached garage'
+
+
+@pytest.mark.parametrize('kind', ['members', 'unpacked', 'metadata', 'traversal', 'duplicate', 'symlink'])
+def test_context_archive_limits_apply_before_extraction(tmp_path, monkeypatch, kind):
+    from app.flow import context_archive
+    archive = tmp_path / 'bounded.zip'
+    with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr('rooms/room-1/room.json', '{}')
+        if kind == 'members':
+            monkeypatch.setattr(context_archive, 'MAX_MEMBERS', 1)
+            z.writestr('meta.json', '{}')
+        elif kind == 'unpacked':
+            monkeypatch.setattr(context_archive, 'MAX_UNPACKED_BYTES', 1024)
+            z.writestr('large.bin', b'0' * 1025)
+        elif kind == 'metadata':
+            monkeypatch.setattr(context_archive, 'MAX_MANIFEST_BYTES', 100)
+            z.writestr('meta.json', ' ' * 101)
+        elif kind == 'traversal':
+            z.writestr('../outside.json', '{}')
+        elif kind == 'duplicate':
+            with pytest.warns(UserWarning): z.writestr('rooms/room-1/room.json', '{}')
+        else:
+            import stat
+            item = zipfile.ZipInfo('linked'); item.external_attr = (stat.S_IFLNK | 0o777) << 16
+            z.writestr(item, '../outside')
+    with pytest.raises(ValueError): home_registry.unpack_export(archive, tmp_path / 'work', context_limits=True)
+    assert not (tmp_path / 'work/unpacked').exists()
+
+
+@pytest.mark.parametrize('selection_version', [1, 2])
+def test_dense_context_keeps_legacy_vision_budget(selection_version):
+    frames = [{'id': f'f{n}', 'cameraTransform': IDENTITY, 'intrinsics': [800,0,0,0,800,0,400,300,1],
+               'imageResolution': [800,600]} for n in range(200)]
+    manifest = {'frames': frames, 'aiSelectionVersion': 1, 'aiSelectedFrameIds': ['f0','f1','f2','f3'],
+                'providerSelectionVersion': selection_version, 'providerSelectedFrameIds': [f'f{n}' for n in range(4,200)]}
+    assert [f['id'] for f in room_context.select_context_frames({}, manifest)] == ['f0','f1','f2','f3']

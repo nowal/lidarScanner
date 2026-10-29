@@ -36,8 +36,14 @@ async def test_worker_builds_private_context_without_replacing_published_models(
     with zipfile.ZipFile(archive, 'w') as z:
         z.writestr('meta.json', json.dumps({'id': HOME}))
         z.writestr('rooms/room-1/room.json', '{}')
-        z.writestr('rooms/room-1/rebuild/manifest.json', '{"frames":[]}')
-    async def download(bucket, path, target): shutil.copyfile(archive, target); return True
+        z.writestr('rooms/room-1/rebuild/manifest.json', json.dumps({
+            'providerSelectionVersion': 2, 'providerFrameWindowSeconds': 3, 'providerSelectedFrameIds': ['p20'],
+            'aiSelectionVersion': 1, 'aiSelectedFrameIds': [],
+            'frames': [{'id': 'p20', 'cameraTransform': [1,0,0,0,0,1,0,0,0,0,1,0,2,1,0,1]}]}))
+    async def download(bucket, path, target, *, max_bytes):
+        assert max_bytes == 32 * 1024 * 1024
+        shutil.copyfile(archive, target)
+        return True
     completed = []
     async def transition(home, action, **kw):
         if action == 'read': return dict(state(ready=False), publishedIndex=before)
@@ -51,6 +57,9 @@ async def test_worker_builds_private_context_without_replacing_published_models(
     assert home_registry.load_index(HOME).to_json() == before
     assert len(completed) == 1
     assert completed[0]['homeModel']['object'] == 'old-home'
+    assert completed[0]['rooms'][0]['providerFrames'][0]['id'] == 'p20'
+    assert completed[0]['rooms'][0]['providerFrames'][0]['selectionVersion'] == 2
+    assert completed[0]['rooms'][0]['frameIds'] == []
     assert completed[0]['rooms'][0]['name'] == 'my kitchen'
     assert completed[0]['upload']['contextReady'] and not completed[0]['upload']['modelsReady']
 

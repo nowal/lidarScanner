@@ -45,7 +45,8 @@ async def status(request_id: str, exp: int, sig: str):
         models.append({'label': m['label'], 'key': m['key'], 'status': state['status'], 'index': n})
     photos = await media.photos_with_camera(scan)
     return JSONResponse({'models': models, 'photos': [{'label': p['label'], 'index': n,
-                         'roomKey': p.get('roomKey'), 'camera': p.get('camera')} for n, p in enumerate(photos)],
+                         'roomKey': p.get('roomKey'), 'camera': p.get('camera'),
+                         'supplemental': bool(p.get('supplemental'))} for n, p in enumerate(photos)],
                          'revision': scan['revision'][:8], 'expiresAt': exp,
                          'canRespond': record.status != 'closed', 'uploadToken': upload_token(sig),
                          'maxPdfBytes': provider_responses.MAX_PDF_BYTES}, headers=HEADERS)
@@ -103,7 +104,7 @@ async def photo(request_id: str, exp: int, sig: str, number: int, size: str):
     record = await media.authorized(request_id, exp, sig)
     photos = record.scanMedia['photos']
     if number < 0 or number >= len(photos) or size not in ('full', 'thumb'): raise HTTPException(404)
-    key = photos[number]['object' if size == 'full' else 'thumbnail']
+    key = await media.photo_object(record.scanMedia, photos[number], size)
     url = await supabase_store._signed_storage_url(media.BUCKET, key, expires_in=min(300, exp - int(media.time.time())))
     if not url: raise HTTPException(404, 'This scan photo is unavailable')
     return RedirectResponse(url, headers=HEADERS)

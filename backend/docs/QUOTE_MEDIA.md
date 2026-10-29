@@ -1,5 +1,188 @@
 # Quote submission media
 
+## October 29: sharpest photo per three seconds — GitHub testing branch, unreleased
+
+For Quintin's pull/test handoff, use `codex/quintin-intake-integration` in both
+`nowal/lidarScanner` and `nowal/takeshape-mobile`. Fetch origin and check out that
+branch in each repository; Python code is still under `backend/`. Use the backend
+branch with mobile context format 3 before testing new scan uploads. This branch
+is for testing, with no production deployment or TestFlight release authorized.
+
+Focused backend checks (from the repository root):
+
+```sh
+PYTHONPATH=backend .venv/bin/python -m pytest backend/tests/test_quote_media.py backend/tests/test_home_index.py backend/tests/test_staged_scan_uploads.py backend/tests/test_durable_scan_uploads.py backend/tests/test_direct_quote_requests.py -q
+```
+
+For the isolated synthetic viewer, run
+`PYTHONPATH=backend .venv/bin/python backend/tests/browser/serve_quote_media_preview.py`
+and open the freshly printed URL. The fixture disables production storage/email
+integrations. The two browser scripts under `backend/tests/browser/` accept
+`PLAYWRIGHT_MODULE` pointing to an installed Playwright package. The app's current
+hosted backend has not been updated by this source handoff; use an isolated backend
+running this branch for end-to-end upload tests. Existing sparse snapshots cannot
+supply additional frames without a new upload from the original capture archive.
+
+This supersedes the October 28 every-20th-frame sampling policy. Mobile context
+format 3 writes `providerSelectionVersion=2`, `providerFrameWindowSeconds=3`,
+`providerSamplingPolicy=sharpest-per-time-window` and the selected IDs. The old
+`providerFrameStride` field is removed. The viewer, lazy image delivery and
+revision-pinned media snapshot format (still version 2) are unchanged.
+
+Within each capture area, windows are anchored at the earliest saved ARKit
+`timestamp`: [start, start+3), [start+3, start+6), etc. Each nonempty window,
+including the partial tail, chooses the highest-sharpness readable image. A
+missing/corrupt winner falls back to the next candidate in that window; empty
+or wholly unreadable windows produce no photo. Equal scores prefer the earlier
+timestamp and then manifest order. This is approximately one photo per three
+seconds, not a minimum three-second gap between adjacent selected frames.
+
+The phone already records `sharpnessScore`, a Laplacian-variance blur proxy.
+When every candidate in a window has a valid finite nonnegative score, it ranks
+those scores and decodes only candidates needed to find a readable winner.
+If any score is missing/invalid, all candidates in that window are measured
+using the same <=320-pixel grayscale JPEG metric, one at a time; capture and
+JPEG score scales are never mixed. Sharpness is a heuristic affected by scene
+texture/noise, not a guarantee of perfect focus. There is no new AI image analysis.
+
+If an area has no usable capture timestamps, `capturedAt` supplies the clock
+(ISO-8601 or Codable reference-date seconds). Untimed frames are used only as a
+single best-photo fallback when no timed photo is usable. No frame rate or
+missing timestamps are fabricated. UUID validation and duplicate removal remain.
+
+The backend accepts both sampling versions and preserves the source version
+through semantic-room mapping into the snapshot's `providerSelectionVersions`
+(and singular `providerSelectionVersion` when all selected frames share it).
+The legacy AI still receives its unchanged up-to-four selected images. All
+resource limits, pose/intrinsics handling, scope/revision authorization and
+supplemental-photo access from the October 28 work remain in place.
+
+Format-1/2 caches are invalidated for new exports and explicit rebuilds; resumes
+keep already uploaded immutable objects and revisions. Existing links are not
+resampled. Backend-before-mobile rollout and explicit release authorization
+still apply, including accepting selection version 2 before distributing mobile
+format 3. Nothing was deployed or uploaded to TestFlight.
+
+Validation on October 29: **33 focused iOS tests passed** across exporter and
+upload coordinator suites, including real sharp/blurred JPEG comparison,
+three-second boundaries, irregular timestamps, ties, older capture dates,
+missing/corrupt images, multiple areas, pose/intrinsics preservation, cache
+upgrades, retries and legacy selection. **94 focused backend tests passed** across
+quote media, home indexing, staged/durable uploads and direct requests. Current
+Swift sources were compiled. Browser UI was unchanged; October 28's browser
+and homeowner UI results below are historical, not new runs today.
+Logs: `/tmp/takeshape-three-second-ios.log`, `/tmp/takeshape-three-second-backend.log`.
+iOS result: `/tmp/takeshape-quote-intake-build/Logs/Test/Test-LidarAI-2026.10.29_11-29-45--0400.xcresult`.
+Physical-device capture verification remains a release check.
+
+
+## October 28: denser provider scan photos — local, unreleased
+
+New mobile context format 2 carries the union of two independent selections:
+`providerSelectionVersion=1` / `providerSelectedFrameIds` / `providerFrameStride=20`,
+and the unchanged `aiSelectionVersion=1` / `aiSelectedFrameIds` (at most four).
+The stride uses the complete saved capture sequence in each area, before image
+availability checks: finite ascending capture `timestamp`, manifest order for
+ties, then missing/nonfinite timestamps in manifest order. Valid, unique UUID
+records count toward ordinals 20, 40, 60, etc. A nonempty area shorter than 20
+uses its first readable image. Missing/corrupt sampled images are skipped,
+without shifting the stride or substituting adjacent frames. Invalid/duplicate
+IDs are ignored. Pose validity does not discard a readable provider photo.
+The phone still resizes copies to 768 pixels, retaining native image rotation,
+intrinsics and their original reference resolution. Raw capture files stay intact.
+
+`HomeIndex.Room.providerFrames` is separate from legacy `frameIds`. Both use the
+same camera-position / polygon / storey mapping; an unposed provider image falls
+back to its capture area. The provider descriptor retains `captureArea` as well
+as its mapped semantic room, so an upstairs photo can be read from a different
+area's archive without moving its camera or confusing model scope. These fields
+survive durable context ingestion and model publication. The legacy selector and
+vision budget remain unchanged; Quintin's intake remains text-only.
+
+New provider-aware snapshots are version 2. They pin photo IDs, camera metadata,
+scoped rooms, context path, model paths, owner and scan revision at submission.
+Submission/email preparation writes only metadata for these photos. `/status`
+returns no storage paths and does not decode or download their images. A photo
+request prepares only that photo, then redirects to the existing private,
+short-lived signed URL. A deterministic derivative name plus durable ready
+receipt makes interrupted uploads retryable without changing the snapshot.
+One photo worker per process bounds decoding/storage work; other requests wait
+up to five seconds before a retryable 503. Completed derivatives survive restart.
+First access to each new photo downloads the pinned ZIP to temporary disk, so
+first-photo latency and repeated ZIP transfer for different photos remain tradeoffs.
+No persistent local cache, public bucket or new database migration is required.
+
+The 32 MiB ZIP download, 128 MiB total unpacked size, 5,000 ZIP-member and
+16-megapixel image limits remain. Both durable and older staged context ingestion
+now validate before extraction; traversal, symlinks, encrypted/duplicate members
+and JSON members over 4 MiB are rejected. The phone fails explicitly if its
+context exceeds the shared size/member contract; it never silently increases the
+stride. Legacy full-export ingestion retains its separate existing contract.
+Older photo preparation streams derivatives one at a time. Older snapshot pose
+backfill reads metadata only and preserves existing poses and supplemental photos.
+The old downstream four-photo cap is removed.
+
+The viewer removes the below-model scan gallery. All posed photos get compact,
+keyboard/touch-accessible markers. `Show scan photos` retains its checked state
+across area changes and measurement mode; measurements temporarily suppress the
+markers. Only the selected/hovered/focused marker has a direction arrow, with
+projection updates coalesced to animation frames. The in-viewer Photos picker
+includes supplemental homeowner photos and unposed older photos, and works
+while the model is preparing, failed or absent. Only opening a photo requests
+its full image; there are no eager gallery thumbnails. Previous/Next, arrow keys,
+Escape, Back to model, focus restoration, measurements and PDF submission remain.
+
+Existing ZIPs containing four images cannot produce missing capture frames.
+Existing submitted requests and links keep their original revision and available
+photos. On mobile, resume/retry keeps an already uploaded context object. An
+explicit rebuild creates a new revision and replaces old-format context caches;
+completed scans are never silently upgraded on reopen. An intentional new upload
+from the original local capture archive is required for denser photos, followed
+by a new request if a provider should receive the newer revision.
+
+### Validation on October 28
+
+- Full backend suite: 1,433 passed, 2 skipped; existing lifespan deprecation
+  warnings remain. Includes dense/scoped/revision-pinned snapshots, direct request
+  retries, private API access, pose/room/storey mapping, legacy sparse backfill,
+  corrupted/oversized images, bounded archives, durable upload and legacy vision
+  isolation. External storage/email integrations are mocked.
+- Both local browser scripts pass with 240 posed images in two areas plus a
+  supplemental photo and an unposed photo. Checks include no eager image requests,
+  no gallery, keyboard and pointer marker access, persistent toggle state, scoped
+  navigation, pending/failed/absent models, measurements and PDF receipt. The
+  60-frame orbit check took about one second in local Chrome. Desktop/mobile
+  screenshots were inspected; this is a synthetic stress fixture, not a claim
+  about all customer models or browsers.
+- iPhone 17 Pro / iOS 26.5 simulator: 41 focused unit tests and 3 dashboard UI
+  tests passed (automatic intake submission, upload-wait visibility, returned
+  PDFs). Xcode compiled current exporter/coordinator and homeowner view sources.
+  Result: `/tmp/takeshape-quote-intake-build/Logs/Test/Test-LidarAI-2026.10.28_14-49-05--0400.xcresult`.
+- Logs: `/tmp/takeshape-dense-backend-full-final.log`,
+  `/tmp/takeshape-dense-ios-final.log`, `/tmp/takeshape-dense-browser-form-final.log`,
+  `/tmp/takeshape-dense-browser-measure.log`.
+- No real customer submission, email, production change, Git push or TestFlight
+  upload. Physical-device capture/upload remains a release check.
+
+### Backend-before-mobile rollout (requires Noah's release authorization)
+
+1. Review and deploy the backend first, including its viewer assets, new context
+   archive module and provider metadata handling. Keep the existing private
+   storage configuration and revision transition schema; no migration is needed.
+2. In an isolated environment, verify a legacy sparse link and a format-2 capture
+   through ingest, completed model publication, scoped submission, on-demand
+   private photo loading, and PDF response. Use captured/mock email delivery.
+3. Build/test the mobile update on a physical iPhone with a new scan or intentional
+   rebuild of a locally retained archive. Confirm frame stride, portrait rotation,
+   floors, upload retries/readiness, marker visibility and homeowner intake.
+4. Release mobile/TestFlight only after separate authorization. Old saved requests
+   remain pinned. A backend rollback before this change would not understand v2
+   lazy-photo descriptors; keep backward-compatible backend support once mobile
+   format 2 is distributed.
+
+The dated deployment sections below are historical; they do not deploy this change.
+
+
 ## October 15: direct requests and complete acceptance contacts — backend deployed
 
 The hosted backend is deployed from `b8f2e14f3166ff7f410c2781c9cf5e6534507d32`.

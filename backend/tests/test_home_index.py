@@ -280,3 +280,27 @@ def test_overview_counts(house):
     assert ov["photoCount"] == 9
     assert ov["totalAreaSqFt"] > 0
     assert ov["namedConfidently"] >= 5
+
+
+@pytest.mark.parametrize('selection_version', [1, 2])
+def test_provider_sample_maps_across_rooms_and_floors_without_expanding_legacy(tmp_path, selection_version):
+    from app.home_index import HomeIndex
+    (tmp_path / 'meta.json').write_text('{}')
+    _write_room(tmp_path, 1, storey=1, label='kitchen', width=4, depth=4)
+    _write_room(tmp_path, 2, storey=2, label='bedroom', width=4, depth=4)
+    frames = [{'id': 'legacy', 'cameraTransform': _camera(0, 1.2, 0)},
+              {'id': 'p20', 'cameraTransform': _camera(0, 4.2, 0)},
+              {'id': 'p40', 'cameraTransform': _camera(0, 1.2, 0)},
+              {'id': 'unposed', 'cameraTransform': [1, 2]}]
+    manifest = {'frames': frames, 'aiSelectionVersion': 1, 'aiSelectedFrameIds': ['legacy'],
+                'providerSelectionVersion': selection_version, 'providerSelectedFrameIds': ['p20', 'p40', 'unposed']}
+    (tmp_path / 'rooms/room-1/rebuild/manifest.json').write_text(json.dumps(manifest))
+    index = load_bundle(tmp_path)
+    assert index.by_key('room-1').frame_ids == ['legacy']
+    assert index.by_key('room-2').frame_ids == []
+    assert [p['id'] for p in index.by_key('room-1').provider_frames] == ['p40', 'unposed']
+    assert [p['id'] for p in index.by_key('room-2').provider_frames] == ['p20']
+    assert index.by_key('room-2').provider_frames[0]['captureArea'] == 'room-1'
+    assert index.by_key('room-2').provider_frames[0]['selectionVersion'] == selection_version
+    assert index.by_key('room-1').provider_frames[-1]['cameraTransform'] is None
+    assert HomeIndex.from_json(index.to_json()).to_json() == index.to_json()

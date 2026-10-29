@@ -1,5 +1,5 @@
 """Isolated synthetic room for browser checks. Uses no production credentials."""
-import asyncio, io, json, time, os
+import asyncio, io, json, time, os, math
 from pathlib import Path
 from PIL import Image, ImageDraw
 from pxr import Usd, UsdGeom, Gf
@@ -44,10 +44,16 @@ Image.new('RGB',(500,650),'white').save(ROOT/'estimate.pdf','PDF')
 previous_url = ROOT / 'url.txt'
 exp = int(previous_url.read_text().split('/')[-2]) if previous_url.exists() else int(time.time()) + 3600
 if exp <= time.time(): exp = int(time.time()) + 3600
+poses = [([0,1.3,1],[0,0,-1]),([1.7,1.3,.4],[-1,0,-.4]),([-1.4,1.3,.4],[1,0,-.4])]
+for n in range(3, 240):
+ angle = n * 2.39996
+ poses.append(([2.5 * math.cos(angle), 1.1 + (n % 7) * .08, 1.5 * math.sin(angle)], [-math.cos(angle), 0, -math.sin(angle)]))
 rec=QuoteRequestRecord(id='qr_local_preview',createdAt='2026-10-13',threadId='preview',homeId='25d800a5-d2ba-4ec0-9dd2-7509a7d28ec9',scanMedia={
  'snapshotId':'preview','revision':'sample-scan','ownerId':'cdeca749-2170-4355-b92f-746e39429c61','homeId':'25d800a5-d2ba-4ec0-9dd2-7509a7d28ec9','expiresAt':exp,
  'models':[{'key':key,'label':label,'bucket':'local','object':'model.glb'} for key,label in [('home','Sample whole home'),('room-1','Sample living room')]],
- 'photos':[{'label':f'Sample living room · view {n+1}','roomKey':'room-1' if n<2 else 'room-2','object':f'photo-{n}.jpg','thumbnail':f'photo-{n}.jpg','camera':{'position':pos,'direction':direction}} for n,(pos,direction) in enumerate([([0,1.3,1],[0,0,-1]),([1.7,1.3,.4],[-1,0,-.4]),([-1.4,1.3,.4],[1,0,-.4])])]})
+ 'photos':[{'label':f'Sample scan · view {n+1}','roomKey':'room-1' if n<120 else 'room-2','object':f'photo-{n%3}.jpg','thumbnail':f'photo-{n%3}.jpg','camera':{'position':pos,'direction':direction}} for n,(pos,direction) in enumerate(poses)] + [
+ {'label':'Homeowner detail','supplemental':True,'object':'photo-0.jpg','thumbnail':'photo-0.jpg','camera':None},
+ {'label':'Older unposed scan photo','roomKey':'room-1','object':'photo-1.jpg','thumbnail':'photo-1.jpg','camera':None}]})
 asyncio.run(quote_store.save(rec))
 async def status(*a):return {'status':'ready'}
 async def signed(bucket,key,expires_in=300):return '/fixtures/'+('model.glb' if key.endswith('.glb') else key.rsplit('/',1)[-1])

@@ -5,6 +5,9 @@ const select = document.getElementById('models');
 const statusText = document.getElementById('status');
 const cameras = document.getElementById('cameras');
 const directions = document.getElementById('directions');
+const photoPicker = document.getElementById('photo-picker');
+const openPhoto = document.getElementById('open-photo');
+let directionLines = [], directionFrame = 0, directionPhoto = null;
 const dialog = document.getElementById('photo-dialog');
 const photoImage = document.getElementById('photo-image');
 const form = document.getElementById('quote-form');
@@ -15,10 +18,14 @@ let submissionId = crypto.randomUUID(), submitting = false;
 const vector = p => p.map(n => `${n}m`).join(' ');
 function modelPhotos() {
   const model = snapshot.models[selected];
-  return snapshot.photos.filter(p => !model || model.key === 'home' || p.roomKey === model.key);
+  return snapshot.photos.filter(p => p.supplemental || !p.roomKey || !model || model.key === 'home' || p.roomKey === model.key);
 }
 function showPhoto(photo, opener) {
+  if (!photo) return;
   activePhoto = photo;
+  directionPhoto = photo.index;
+  scheduleDirections();
+  photoPicker.value = photo.index;
   photoOpener = opener || photoOpener;
   document.getElementById('photo-title').textContent = `Photo ${photo.index + 1} · ${photo.label}`;
   document.getElementById('photo-error').hidden = true;
@@ -38,46 +45,75 @@ function stepPhoto(step) {
 document.getElementById('close-photo').addEventListener('click', () => dialog.close());
 document.getElementById('previous-photo').addEventListener('click', () => stepPhoto(-1));
 document.getElementById('next-photo').addEventListener('click', () => stepPhoto(1));
-dialog.addEventListener('close', () => { photoImage.removeAttribute('src'); photoOpener?.focus(); });
+dialog.addEventListener('close', () => {
+  photoImage.removeAttribute('src');
+  (photoOpener?.isConnected && photoOpener.getClientRects().length ? photoOpener : openPhoto).focus();
+});
+openPhoto.addEventListener('click', () => showPhoto(modelPhotos().find(p => p.index === Number(photoPicker.value)), openPhoto));
 dialog.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); stepPhoto(-1); }
   if (e.key === 'ArrowRight') { e.preventDefault(); stepPhoto(1); }
 });
 photoImage.addEventListener('error', () => { document.getElementById('photo-error').hidden = false; });
-function renderPhotos() {
+function validCamera(photo) {
+  return photo.camera && ['position', 'direction'].every(key =>
+    Array.isArray(photo.camera[key]) && photo.camera[key].length === 3 && photo.camera[key].every(Number.isFinite));
+}
+function renderPhotoControls() {
+  photoPicker.replaceChildren();
+  const photos = modelPhotos();
+  for (const photo of photos) {
+    const option = document.createElement('option'); option.value = photo.index;
+    const kind = photo.supplemental ? 'Homeowner photo' : !validCamera(photo) ? 'Unpositioned photo' : 'Scan photo';
+    option.textContent = `${photo.index + 1} · ${kind}: ${photo.label}`;
+    photoPicker.append(option);
+  }
+  photoPicker.disabled = openPhoto.disabled = photos.length === 0;
+  if (!photos.length) {
+    const option = document.createElement('option'); option.textContent = 'No photos available'; photoPicker.append(option);
+  }
+}
+function renderHotspots() {
   viewer.querySelectorAll('.camera-pin, .direction-point').forEach(el => el.remove());
-  directions.querySelectorAll('line').forEach(el => el.remove());
-  const gallery = document.getElementById('photos');
-  gallery.replaceChildren();
-  let count = 0;
+  directionLines.forEach(el => el.remove()); directionLines = [];
+  const pins = document.createDocumentFragment(), arrows = document.createDocumentFragment();
   for (const photo of modelPhotos()) {
-    const button = document.createElement('button'); button.type = 'button'; button.className = 'photo-card';
-    const img = document.createElement('img'); img.src = `${base}/photos/${photo.index}/thumb`; img.alt = photo.label; img.loading = 'lazy';
-    const label = document.createElement('span'); label.textContent = `${photo.index + 1} · ${photo.label}`;
-    button.append(img, label); button.addEventListener('click', () => showPhoto(photo, button)); gallery.append(button);
-    if (!photo.camera) continue;
-    count++;
+    if (!validCamera(photo)) continue;
     const pin = document.createElement('button'); pin.type = 'button'; pin.className = 'camera-pin';
     pin.slot = `hotspot-camera-${photo.index}`; pin.dataset.index = photo.index;
     pin.dataset.position = vector(photo.camera.position);
-    pin.textContent = `📷 ${photo.index + 1}`;
+    const badge = document.createElement('span'); badge.className = 'pin-label'; badge.textContent = photo.index + 1;
+    pin.append(badge);
     pin.title = `Open photo ${photo.index + 1}: ${photo.label}`; pin.setAttribute('aria-label', pin.title);
     pin.addEventListener('click', e => { e.stopPropagation(); showPhoto(photo, pin); });
-    viewer.append(pin);
+    for (const event of ['pointerenter', 'focus']) pin.addEventListener(event, () => {
+      directionPhoto = photo.index; scheduleDirections();
+    });
+    for (const event of ['pointerleave', 'blur']) pin.addEventListener(event, () => {
+      directionPhoto = activePhoto?.index ?? null; scheduleDirections();
+    });
+    pins.append(pin);
     const tip = document.createElement('span'); tip.slot = `hotspot-direction-${photo.index}`; tip.className = 'direction-point';
     tip.dataset.position = vector(photo.camera.position.map((v, i) => v + photo.camera.direction[i] * 0.6));
-    viewer.append(tip);
+    pins.append(tip);
     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line'); line.dataset.index = photo.index;
-    line.setAttribute('marker-end', 'url(#arrow)'); directions.append(line);
+    line.setAttribute('marker-end', 'url(#arrow)'); arrows.append(line); directionLines.push(line);
   }
-  cameras.disabled = count === 0;
-  if (!gallery.children.length) gallery.textContent = 'No scan photos were available for this area.';
+  viewer.append(pins); directions.append(arrows);
+  cameras.disabled = directionLines.length === 0;
   toggleCameras();
 }
+function scheduleDirections() {
+  if (!directionFrame && !directions.hidden) directionFrame = requestAnimationFrame(() => {
+    directionFrame = 0; updateDirections();
+  });
+}
 function updateDirections() {
-  if (!viewer.loaded || !viewer.queryHotspot) return;
-  for (const line of directions.querySelectorAll('line')) {
+  if (directions.hidden || !viewer.loaded || !viewer.queryHotspot) return;
+  for (const line of directionLines) {
     const n = line.dataset.index;
+    line.style.display = Number(n) === directionPhoto ? '' : 'none';
+    if (Number(n) !== directionPhoto) continue;
     const start = viewer.queryHotspot(`hotspot-camera-${n}`)?.canvasPosition;
     const end = viewer.queryHotspot(`hotspot-direction-${n}`)?.canvasPosition;
     if (!start || !end) continue;
@@ -88,16 +124,20 @@ function updateDirections() {
 function toggleCameras() {
   viewer.classList.toggle('hide-cameras', !cameras.checked);
   directions.toggleAttribute('hidden', !cameras.checked || viewer.hidden || measurements.enabled);
-  updateDirections();
+  scheduleDirections();
 }
 cameras.addEventListener('change', toggleCameras);
 viewer.addEventListener('measurement-mode-change', toggleCameras);
-viewer.addEventListener('camera-change', updateDirections);
-new ResizeObserver(updateDirections).observe(viewer);
+viewer.addEventListener('camera-change', scheduleDirections);
+new ResizeObserver(scheduleDirections).observe(viewer);
 function showModel() {
   const model = snapshot.models[selected];
   measurements.setModel(model?.key, model?.status === 'ready');
-  if (!model) { statusText.textContent = 'No textured model was available for this scope. The saved scan photos are below.'; select.hidden = true; return; }
+  if (!model) {
+    viewer.hidden = true; viewer.removeAttribute('src'); select.disabled = true;
+    statusText.textContent = 'No textured model was available for this scope. Use Photos to view the saved images.';
+    toggleCameras(); return;
+  }
   if (model.status === 'ready') {
     const url = `${base}/models/${selected}/glb`;
     if (viewer.getAttribute('src') !== url) {
@@ -108,13 +148,13 @@ function showModel() {
     viewer.hidden = true; viewer.removeAttribute('src');
     statusText.textContent = model.status === 'failed'
       ? 'The desktop preview could not be prepared. The scan photos are still available. Try again later.'
-      : 'Preparing a desktop version of this scan. Large homes can take a few minutes. You can view the photos below.';
+      : 'Preparing a desktop version of this scan. Large homes can take a few minutes. Use Photos to view the saved images.';
   }
   toggleCameras();
 }
-select.addEventListener('change', () => { selected = Number(select.value); showModel(); renderPhotos(); });
-viewer.addEventListener('load', () => { statusText.textContent = 'Model ready.'; updateDirections(); });
-viewer.addEventListener('error', () => { statusText.textContent = 'This browser could not display the model. Try reloading in a current desktop browser.'; });
+select.addEventListener('change', () => { selected = Number(select.value); showModel(); renderPhotoControls(); renderHotspots(); });
+viewer.addEventListener('load', () => { statusText.textContent = 'Model ready.'; scheduleDirections(); });
+viewer.addEventListener('error', () => { statusText.textContent = 'This browser could not display the model. Use Photos to view the saved images, or reload to try again.'; });
 form.addEventListener('input', () => { if (!submitting) submissionId = crypto.randomUUID(); });
 form.addEventListener('submit', async e => {
   e.preventDefault();
@@ -154,7 +194,7 @@ async function refresh() {
       rendered = true;
       document.getElementById('revision').textContent = `Link expires ${new Date(snapshot.expiresAt * 1000).toLocaleDateString()}`;
       for (const m of snapshot.models) { const option = document.createElement('option'); option.value = m.index; option.textContent = m.label; select.appendChild(option); }
-      renderPhotos();
+      renderPhotoControls(); renderHotspots();
     }
     showModel(); attempts = 0;
     if (snapshot.models.some(m => m.status === 'preparing')) setTimeout(refresh, 5000);
