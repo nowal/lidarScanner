@@ -13,6 +13,18 @@ assert.equal(new URL(url).hostname, '127.0.0.1');
     page.on('pageerror', e => errors.push(e.message));
     await page.goto(url);
     await page.waitForFunction(() => document.getElementById('viewer').loaded);
+    async function changeArea(value) {
+      // loaded can briefly still describe the previous source. Wait for the
+      // new load event before switching again or checking restored controls.
+      await page.locator('#viewer').evaluate(v => {
+        v.dataset.testLoading = 'true';
+        v.addEventListener('load', () => { delete v.dataset.testLoading; }, {once: true});
+      });
+      await page.locator('#models').selectOption(value);
+      await page.waitForFunction(() => {
+        const v = document.getElementById('viewer'); return v.loaded && !v.dataset.testLoading;
+      });
+    }
     await page.locator('#measure').click();
     assert.equal(await page.locator('.camera-pin').first().isVisible(), false);
     await page.evaluate(async () => {
@@ -71,11 +83,9 @@ assert.equal(new URL(url).hostname, '127.0.0.1');
     await page.locator('#photo-dialog').waitFor({state: 'visible'});
     await page.keyboard.press('Escape');
     assert.equal(await page.locator('.measurement-endpoint').count(), 2);
-    await page.locator('#models').selectOption('1');
-    await page.waitForFunction(() => document.getElementById('viewer').loaded);
+    await changeArea('1');
     assert.equal(await page.locator('#measurement-list button').count(), 0);
-    await page.locator('#models').selectOption('0');
-    await page.waitForFunction(() => document.getElementById('viewer').loaded);
+    await changeArea('0');
     assert.equal(await page.locator('#measurement-list button').count(), 1);
     await page.locator('#clear-measurements').click();
     assert.equal(await page.locator('.measurement-endpoint').count(), 0);

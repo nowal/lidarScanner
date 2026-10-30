@@ -1,5 +1,41 @@
 # Quote submission media
 
+## October 30: ordered gallery, perspective cameras, and PDF-only pricing
+
+The provider viewer now shows every snapshot photo in a numbered, open gallery
+below the quote form. Snapshot order is preserved, including supplemental and
+unposed photos, and choosing a model area does not filter the gallery. Cards
+open the full image with previous/next navigation and return keyboard focus to
+the opening card or camera. Nearby thumbnails load serially as the user scrolls
+to avoid flooding the bounded private-photo worker. Failed thumbnails still
+offer the full photo. Empty galleries and pending/failed/absent models remain
+usable and explain their state.
+
+All posed photos use compact perspective-camera glyphs instead of dots and
+selection-only arrows. Each glyph projects a rectangular plane along the saved
+camera direction, remains anchored to the camera location during orbit/zoom,
+and has a 44px pointer/touch target. These illustrate direction rather than
+calibrated field of view or camera roll. Camera visibility and measurement mode
+still work independently, and measurements survive switching model areas.
+
+The form collects only the business name and PDF; pricing stays in the uploaded
+estimate/invoice. The API accepts an omitted price and preserves it as unknown,
+not zero. Older priced viewers and receipts retain their existing fingerprints
+and retry behavior. The homeowner app already displays “See PDF for pricing”
+when a PDF has no separate price. No mobile rebuild or database migration is
+needed for these viewer changes.
+
+Validation: **1,436 backend tests passed, 2 skipped**. The browser fixture covers
+242 ordered gallery photos, 240 projected camera glyphs, no eager full-image
+requests, thumbnail failure recovery, PDF submission without a price, navigation,
+focus restoration, measurements, and desktop/mobile layout. Desktop and mobile
+screenshots were inspected. These checks use synthetic data without delivery.
+
+Backend release uses `main` in `nowal/lidarScanner` and Render's automatic deploy.
+The previous backend release `f5fd8fb` was deployed on October 29; the testing-only
+release restrictions in older entries below are historical. Existing links get
+the new viewer after reloading but keep their original immutable photo selection.
+
 ## October 29: sharpest photo per three seconds — GitHub testing branch, unreleased
 
 For Quintin's pull/test handoff, use `codex/quintin-intake-integration` in both

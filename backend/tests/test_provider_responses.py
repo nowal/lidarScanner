@@ -242,18 +242,24 @@ async def test_durable_rest_receipts_use_insert_only_and_reconcile_duplicates(mo
 
 
 @pytest.mark.asyncio
-async def test_price_is_required_and_dates_are_not_collected(monkeypatch, pdf):
+async def test_pdf_only_pricing_survives_retry_and_restart_without_inventing_amount(monkeypatch, pdf):
     rec, client, path, params, headers, uploaded = await setup(monkeypatch)
     async with client:
         missing = {k: v for k, v in params.items() if k != 'price_usd'}
-        assert (await client.post(path + '/responses', params=missing, headers=headers, content=pdf)).status_code == 422
-        assert not uploaded
-        params['earliest_available_date'] = '2026-11-02'  # Stale clients cannot restore the removed field.
-        result = await client.post(path + '/responses', params=params, headers=headers, content=pdf)
+        missing['earliest_available_date'] = '2026-11-02'  # Stale clients cannot restore the removed field.
+        result = await client.post(path + '/responses', params=missing, headers=headers, content=pdf)
         assert result.status_code == 201, result.text
+        assert (await client.post(path + '/responses', params=missing, headers=headers, content=pdf)).status_code == 200
+        assert len(uploaded) == 1
+        # A stale priced retry cannot silently replace an unpriced receipt.
+        assert (await client.post(path + '/responses', params=params, headers=headers, content=pdf)).status_code == 409
         view = (await client.get(f'/api/v1/ai/quote-requests/{rec.id}')).json()
+        assert view['quotes'][0].get('priceUsd') is None
+        assert view['quotes'][0]['document']['fileName'] == 'estimate.pdf'
         assert 'earliestAvailableDate' not in view['quotes'][0]
     cold = await QuoteRequestStore().get(rec.id)
+    assert len(cold.quotes) == 1
+    assert cold.quotes[0].priceUsd is None
     assert cold.quotes[0].earliestAvailableDate is None
 
 

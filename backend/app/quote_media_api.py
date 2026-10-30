@@ -61,14 +61,18 @@ def upload_token(signature: str) -> str:
 async def upload_response(request_id: str, exp: int, sig: str, request: Request,
                           submission_id: UUID, provider_name: str = Query(min_length=1, max_length=200),
                           file_name: str = Query(min_length=1, max_length=200),
-                          price_usd: float = Query(ge=0),
+                          price_usd: float | None = Query(default=None, ge=0),
                           x_upload_token: str | None = Header(default=None)):
     record = await media.authorized(request_id, exp, sig)
     if not hmac.compare_digest(x_upload_token or '', upload_token(sig)):
         raise HTTPException(403, 'Reload the viewer before submitting your quote.')
     provider_name = ' '.join(provider_name.split())
-    if not provider_name or not math.isfinite(price_usd):
-        raise HTTPException(422, 'Enter your business name and a valid total price.')
+    if not provider_name:
+        raise HTTPException(422, 'Enter your business name.')
+    # Older open viewers can finish/retry priced submissions. New viewers keep
+    # pricing in the PDF; an absent amount must stay unknown, never become $0.
+    if price_usd is not None and not math.isfinite(price_usd):
+        raise HTTPException(422, 'The supplied price is invalid.')
     if request.headers.get('content-type', '').split(';')[0].lower() != 'application/pdf':
         raise HTTPException(415, 'Choose a PDF quote.')
     data = bytearray()

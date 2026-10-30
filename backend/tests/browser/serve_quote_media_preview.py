@@ -48,6 +48,9 @@ poses = [([0,1.3,1],[0,0,-1]),([1.7,1.3,.4],[-1,0,-.4]),([-1.4,1.3,.4],[1,0,-.4]
 for n in range(3, 240):
  angle = n * 2.39996
  poses.append(([2.5 * math.cos(angle), 1.1 + (n % 7) * .08, 1.5 * math.sin(angle)], [-math.cos(angle), 0, -math.sin(angle)]))
+# Include upward/downward cameras so frustum basis construction is exercised.
+poses[3] = (poses[3][0], [0, 1, 0])
+poses[4] = (poses[4][0], [0, -1, 0])
 rec=QuoteRequestRecord(id='qr_local_preview',createdAt='2026-10-13',threadId='preview',homeId='25d800a5-d2ba-4ec0-9dd2-7509a7d28ec9',scanMedia={
  'snapshotId':'preview','revision':'sample-scan','ownerId':'cdeca749-2170-4355-b92f-746e39429c61','homeId':'25d800a5-d2ba-4ec0-9dd2-7509a7d28ec9','expiresAt':exp,
  'models':[{'key':key,'label':label,'bucket':'local','object':'model.glb'} for key,label in [('home','Sample whole home'),('room-1','Sample living room')]],
