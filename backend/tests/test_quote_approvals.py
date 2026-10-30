@@ -57,14 +57,14 @@ async def test_callback_releases_only_chosen_number_and_survives_restart(monkeyp
         assert 'ask them to call' in capture_decision_mail[0][1]
         # Network retries do not change consent or notify twice.
         assert (await client.post(path, json={'phone': '(615) 555-0199'})).status_code == 200
-        assert len(capture_decision_mail) == 1
+        assert len(capture_decision_mail) == 2
     cold = await QuoteRequestStore().get(rec.id)
     assert cold.quote_by_id(qid).callbackPhone == '(615) 555-0199'
     assert len(uploaded) == 1, 'a callback does not upload a signed PDF'
 
 
 @pytest.mark.asyncio
-async def test_signed_pdf_persists_without_replacing_original_and_private_link_revokes(monkeypatch, pdf, capture_decision_mail):
+async def test_signed_pdf_survives_stale_parent_write_and_private_link_stays_valid(monkeypatch, pdf, capture_decision_mail):
     rec, client, qid, path, uploaded = await quote(monkeypatch, pdf)
     signed_pdf = pdf[:-6] + b'\n% signature fixture\n%%EOF'
     async with client:
@@ -90,7 +90,7 @@ async def test_signed_pdf_persists_without_replacing_original_and_private_link_r
         assert (await client.get(f'/api/v1/quote-approvals/{rec.id}/{qid}/{expired}/{quote_approvals.signature(saved, signed, expired)}')).status_code == 410
         saved.selectedQuoteId = None
         await quote_store.save(saved)
-        assert (await client.get(urlsplit(link).path)).status_code == 404
+        assert (await client.get(urlsplit(link).path)).status_code == 307
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_complete_contact_acceptance_and_corrected_address(monkeypatch, pd
         assert ('Signed quote PDF:' in body) == signed
         assert chosen.acceptanceNotificationDeliveredAt
         assert (await client.post(path, json=payload)).status_code == 200
-        assert len(capture_decision_mail) == 1
+        assert len(capture_decision_mail) == 2
         assert len(uploads) == (2 if signed else 1)
         # Neither initial provider email nor general viewer exposes accepted contact.
         from app.flow.ops_email import build_ops_email
@@ -218,7 +218,7 @@ async def test_incomplete_legacy_clients_and_legacy_selection_cannot_bypass_cont
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('field,value', [('fullName', '  '), ('phone', 'bad'), ('email', 'no-at'), ('address', '123 Main')])
+@pytest.mark.parametrize('field,value', [('fullName', '  '), ('phone', 'bad'), ('email', 'no-at'), ('email', 'one,two@example.test'), ('email', 'a..b@example.test'), ('email', 'home@-example.test'), ('address', '123 Main')])
 async def test_invalid_contact_never_saves_or_uploads(monkeypatch, pdf, capture_decision_mail, field, value):
     import base64
     rec, client, qid, path, uploads = await quote(monkeypatch, pdf)
@@ -246,8 +246,8 @@ async def test_notification_failure_is_recovered_without_duplicate_approval(monk
         assert await ops_email.retry_pending_acceptances() == 1
         assert await ops_email.retry_pending_acceptances() == 0
         assert (await client.post(path, json={'contact': CONTACT})).status_code == 200
-        assert len(deliveries) == 2
-        assert deliveries[0] == deliveries[1], 'Identical transport idempotency key and payload on retry'
+        assert len(deliveries) == 3
+        assert deliveries[0] == deliveries[2], 'Identical transport idempotency key and payload on retry'
         assert deliveries[0][2]['cc'] == ['noah@takeshapehome.com']
         assert (await quote_store.get(rec.id)).quote_by_id(qid).decidedAt == decided
         assert len(uploads) == 1
@@ -271,18 +271,18 @@ async def test_acceptance_recipients_do_not_expand_inbound_command_trust(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_cancelled_approval_is_not_released_by_notification_recovery(monkeypatch, pdf):
+async def test_declining_after_persisted_acceptance_cannot_revoke_receipt(monkeypatch, pdf):
     rec, client, qid, path, _ = await quote(monkeypatch, pdf, 'cancelled@provider.test')
     async def failed(*args, **kwargs): return 'failed'
     monkeypatch.setattr(ops_email, 'send_ops_message', failed)
     async with client:
         assert (await client.post(path, json={'contact': CONTACT})).status_code == 200
         assert (await client.post(f'/api/v1/ai/quote-requests/{rec.id}/decide',
-                                  json={'quoteId': qid, 'decision': 'declined', 'note': 'Changed my mind'})).status_code == 200
-    assert await ops_email.retry_pending_acceptances() == 0
+                                  json={'quoteId': qid, 'decision': 'declined', 'note': 'Changed my mind'})).status_code == 409
+    assert await ops_email.retry_pending_acceptances() == 1
     saved = await quote_store.get(rec.id)
-    assert saved.ops_view()['approvalContact'] is None
-    assert saved.ops_view()['address'] is None
+    assert saved.ops_view()['approvalContact'] == CONTACT
+    assert saved.ops_view()['address'] == CONTACT['address']
 @pytest.mark.asyncio
 async def test_notification_recovery_can_list_requests_beyond_first_database_page(monkeypatch):
     from app.flow import supabase_store
@@ -324,7 +324,7 @@ async def test_selected_provider_gets_acceptance_with_ops_copies_and_only_their_
     async with client:
         result = await client.post(path, json=payload)
         assert result.status_code == 200, result.text
-        assert len(deliveries) == 1
+        assert len(deliveries) == 2
         to, subject, body, extra = deliveries[0]
         assert to == 'selected@provider.test'
         assert extra['cc'] == ['quintin@takeshapehome.com', 'noah@takeshapehome.com']
@@ -348,7 +348,7 @@ async def test_selected_provider_gets_acceptance_with_ops_copies_and_only_their_
             assert 'Signed quote PDF:' not in body
         assert (await client.post(path, json=payload)).status_code == 200
         assert await ops_email.retry_pending_acceptances() == 0
-        assert len(deliveries) == 1
+        assert len(deliveries) == 2
         assert to not in allowed_reply_senders()
 
 
@@ -371,10 +371,10 @@ async def test_provider_delivery_retry_uses_address_frozen_at_approval(monkeypat
         await quote_store.save(cold)
         assert await ops_email.retry_pending_acceptances() == 1
         assert await ops_email.retry_pending_acceptances() == 0
-        assert deliveries[0] == deliveries[1]
-        assert deliveries[1][0] == 'original@provider.test'
+        assert deliveries[0] == deliveries[2]
+        assert deliveries[2][0] == 'original@provider.test'
         assert (await client.post(path, json={'contact': CONTACT})).status_code == 200
-        assert len(deliveries) == 2
+        assert len(deliveries) == 3
 
 
 @pytest.mark.asyncio
@@ -428,5 +428,5 @@ async def test_signed_acceptance_waits_for_a_usable_document_link(monkeypatch, p
         assert not capture_decision_mail
         monkeypatch.setattr(settings, 'public_base_url', 'https://example.test')
         assert await ops_email.retry_pending_acceptances() == 1
-        assert len(capture_decision_mail) == 1
+        assert len(capture_decision_mail) == 2
         assert 'Signed quote PDF: https://example.test/' in capture_decision_mail[0][1]

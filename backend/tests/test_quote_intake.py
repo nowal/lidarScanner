@@ -643,7 +643,8 @@ async def test_api_one_turn_retry_and_exactly_one_submission(direct,monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_quote_and_consultation_requests_queue_and_deliver_support_email(direct, monkeypatch):
+@pytest.mark.parametrize("handoff_type,label", [("quote_request","quote request"),("consultation_request","consultation request")])
+async def test_quote_and_consultation_requests_queue_and_deliver_support_email(direct, monkeypatch, handoff_type, label):
     client, direct_body, _, scheduled = direct
     monkeypatch.setattr(settings, 'ops_email', 'support@takeshapehome.com')
     deliveries = []
@@ -653,34 +654,33 @@ async def test_quote_and_consultation_requests_queue_and_deliver_support_email(d
         return 'sent'
 
     monkeypatch.setattr(ops_email, 'send_ops_message', send)
-    for handoff_type, label in (('quote_request', 'quote request'),
-                                ('consultation_request', 'consultation request')):
-        state = engine.apply_result(state_for(), result())
-        handoff = engine.provider_package(state)['details']
-        handoff['handoffType'] = handoff_type
-        body = dict(direct_body, submissionId=str(uuid4()), intakeDetails=handoff)
-        response = await client.post('/api/v1/ai/quote-requests/direct', json=body)
-        assert response.status_code == 201, response.text
-        record = await quote_store.get(response.json()['quoteRequestId'])
-        assert record.quoteDraft['intake']['handoffType'] == handoff_type
-        subject, text = ops_email.build_ops_email(record, [], [])
-        html = ops_email.build_ops_email_html(record, [], [])
-        assert subject.startswith(f'New {label}:')
-        if handoff_type == 'consultation_request':
-            assert 'Request type: Consultation Request' in text
-            assert 'Consultation request' in html
-        else:
-            assert 'Request type:' not in text
-        record.opsEmailPayload = dict(subject=subject, body=text, html=html,
-            to=settings.ops_email, cc=['noah@takeshapehome.com'])
-        await quote_store.save(record, require_durable=True)
-        assert await ops_email.send_ops_email(record) == 'sent'
-        delivered = await quote_store.get(record.id)
-        assert delivered.opsEmailDeliveredAt
-        assert await ops_email.send_ops_email(delivered) == 'already_sent'
+    state = engine.apply_result(state_for(), result())
+    handoff = engine.provider_package(state)['details']
+    handoff['handoffType'] = handoff_type
+    body = dict(direct_body, submissionId=str(uuid4()), intakeDetails=handoff)
+    response = await client.post('/api/v1/ai/quote-requests/direct', json=body)
+    assert response.status_code == 201, response.text
+    record = await quote_store.get(response.json()['quoteRequestId'])
+    assert record.quoteDraft['intake']['handoffType'] == handoff_type
+    subject, text = ops_email.build_ops_email(record, [], [])
+    html = ops_email.build_ops_email_html(record, [], [])
+    assert subject.startswith(f'New {label}:')
+    if handoff_type == 'consultation_request':
+        assert 'Request type: Consultation Request' in text
+        assert 'Consultation request' in html
+    else:
+        assert 'Request type:' not in text
+    record.opsEmailPayload = dict(subject=subject, body=text, html=html,
+        to=settings.ops_email, cc=['noah@takeshapehome.com'])
+    await quote_store.save(record, require_durable=True)
+    assert await ops_email.send_ops_email(record) == 'sent'
+    delivered = await quote_store.get(record.id)
+    assert delivered.opsEmailDeliveredAt
+    assert await ops_email.send_ops_email(delivered) == 'already_sent'
 
-    assert len(scheduled) == 2
-    assert [delivery['to'] for delivery in deliveries] == [settings.ops_email, settings.ops_email]
+
+    assert len(scheduled) == 1
+    assert [delivery['to'] for delivery in deliveries] == [settings.ops_email]
     assert all(delivery['cc'] == ['noah@takeshapehome.com'] for delivery in deliveries)
 
 
