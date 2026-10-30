@@ -18,7 +18,7 @@ const fs = require('fs'), path = require('path'), assert = require('node:assert/
   ['legacy',legacyOwner,'quotes_ready',{id:'legacy',homeId:legacyHome,selectedQuoteId:'legacy',quotes:[legacyQuote]}]);
  await db.query('insert into quote_intakes values($1,$2,$3,0,$4)',[legacyChat,legacyOwner,legacyHome,
   {revision:1,receipt:{quoteRequestId:'legacy'},transcript:[{receivedAt:'2026-10-01T00:00:00Z'}]}]);
- await db.exec(migration('20261030185844_quote_request_lifecycle.sql'));
+ await db.exec(migration('20261030193724_quote_request_lifecycle.sql'));
  const backfill=(await db.query("select * from flow_quote_acceptances where request_id='legacy'")).rows[0];
  assert.equal(backfill.provider_delivered,'2026-10-01T00:00:00Z');
  assert.equal(backfill.quote.homeownerConfirmationQueuedAt,undefined,'no surprise historic confirmation emails');

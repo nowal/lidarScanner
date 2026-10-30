@@ -31,7 +31,7 @@ exactly-once SMTP delivery; Resend receives a stable idempotency key.
 
 ## Upgrade and compatibility
 
-Apply `supabase/migrations/20261030185844_quote_request_lifecycle.sql` before this
+Apply `supabase/migrations/20261030193724_quote_request_lifecycle.sql` before this
 backend version. It adds private service-role tables/functions, backfills verified
 receipt links and completed approvals, and selects the latest existing saved intake
 per home. Backfill preserves existing provider delivery stamps and does not queue
@@ -50,7 +50,7 @@ new-request control prematurely and discard their local intake when it is tapped
 the new backend correctly rejects their fresh conversation, but those clients do
 not know how to restore `/active`. **Do not deploy the strict lifecycle contract
 alone while those clients are the only available app.** The new mobile version also
-requires the new routes. Mobile main/TestFlight publication is held by the user.
+requires the new routes. Mobile main/TestFlight publication was authorized on October 30, 2026.
 Prepare a coordinated app update/upgrade path before production cutover.
 
 Production was only read during this implementation. TakeShapeApp schema and
@@ -83,3 +83,7 @@ additive migration, deploy the backend with the coordinated mobile rollout, and
 verify both approval methods using isolated accounts and a captured email sink.
 Physical-device end-to-end delivery and real PostgREST concurrency remain release
 checks; fixture simulator/local database coverage does not establish those results.
+
+## Authorized release — October 30, 2026
+
+The lifecycle migration was applied to TakeShapeApp as version `20261030193724`. The migration file now uses the database-assigned version to keep local and hosted history aligned. It retained all eight intakes, linked five receipts, selected seven active homes, and backfilled two accepted requests without queueing historical homeowner messages. Real PostgreSQL transaction checks passed for active recovery, acceptance gating, immutable acceptance, successor retries, private privileges, and independent delivery claims; every synthetic row was rolled back. Backend and mobile rollout is proceeding under the user’s explicit deployment authorization.
