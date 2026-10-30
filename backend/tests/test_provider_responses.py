@@ -283,3 +283,44 @@ def test_older_quotes_and_retry_fingerprints_remain_compatible():
     assert 'earliestAvailableDate' not in quote.homeowner_view()
     assert provider_responses.fingerprint(b'pdf', 'Existing provider', None) == hashlib.sha256(
         b'pdf["Existing provider",null]').hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_provider_email_is_persisted_and_cannot_change_on_pdf_retry(monkeypatch, pdf):
+    rec, client, path, params, headers, uploaded = await setup(monkeypatch)
+    params['provider_email'] = '  Quotes@BRIGHTLINE.EXAMPLE  '
+    async with client:
+        result = await client.post(path + '/responses', params=params, headers=headers, content=pdf)
+        assert result.status_code == 201
+        assert (await client.post(path + '/responses', params=params, headers=headers, content=pdf)).status_code == 200
+        changed = dict(params, provider_email='someone-else@example.test')
+        assert (await client.post(path + '/responses', params=changed, headers=headers, content=pdf)).status_code == 409
+        view = await client.get(f'/api/v1/ai/quote-requests/{rec.id}')
+        assert 'providerEmail' not in view.text
+    cold = await QuoteRequestStore().get(rec.id)
+    assert cold.quotes[0].providerEmail == 'Quotes@brightline.example'
+    assert cold.quotes[0].acceptanceNotificationProviderEmail is None
+    assert len(uploaded) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('email', ['', 'not-an-email', 'a@example.test,b@example.test',
+    'Name <a@example.test>', 'a@example.test\r\nBcc: hidden@example.test', 'a..b@example.test'])
+async def test_provider_email_rejects_invalid_or_multiple_recipients_before_upload(monkeypatch, pdf, email):
+    _, client, path, params, headers, uploaded = await setup(monkeypatch)
+    async with client:
+        result = await client.post(path + '/responses', params=dict(params, provider_email=email), headers=headers, content=pdf)
+        assert result.status_code == 422
+    assert not uploaded
+
+
+def test_ops_quote_correction_preserves_explicit_provider_mailbox_when_omitted(monkeypatch):
+    from app.flow import partners
+    from app.flow_api import _upsert_returned_quotes
+    from app.flow_quotes import QuoteRequestRecord, ReturnedQuote
+    monkeypatch.setattr(partners, 'note_quoted', lambda *args: None)
+    record = QuoteRequestRecord(id='qr_mail', threadId='t', createdAt='2026-10-30', quotes=[
+        ReturnedQuote(id='q1', providerName='Brightline', priceUsd=100, providerEmail='quotes@example.test')])
+    _upsert_returned_quotes(record, [ReturnedQuote(providerName='Brightline', priceUsd=200)])
+    assert record.quotes[0].id == 'q1'
+    assert record.quotes[0].providerEmail == 'quotes@example.test'

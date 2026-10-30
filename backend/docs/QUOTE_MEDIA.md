@@ -1,5 +1,41 @@
 # Quote submission media
 
+## October 30: selected-provider acceptance emails
+
+The provider PDF form now collects a business email address. It is saved on that
+specific returned quote as `providerEmail`, validated as one mailbox, and included
+in the submission fingerprint. Retrying a PDF cannot change its recipient. The
+operations entry page also collects the address; the operations quotes API accepts
+`providerEmail`. Corrections that omit the field preserve an address already on
+file. Email reply parsing does not invent or infer a provider address.
+
+When the homeowner completes either approval path, the selected quote's email is
+frozen with the durable approval. Its acceptance message goes **to that provider**,
+with the configured operations recipient and Noah copied. Signature approvals
+include the existing private signed-PDF download link (valid for 30 days); callback
+approvals include the homeowner's phone number and a request to call. Only the
+selected provider receives the contact details. Declines and initial lead emails
+keep their existing recipients. Receiving a copy grants no inbound command trust.
+
+The existing acceptance worker retries failed delivery using the same recipient,
+payload and Resend idempotency key, and skips recorded successes. An SMTP partial
+recipient refusal counts as a failure rather than silently dropping the provider;
+SMTP retries can duplicate an already accepted copy, as with ambiguous SMTP sends.
+If a signed-document link cannot be generated, the notification remains pending.
+
+Older clients, quotes and PDF retry fingerprints remain compatible. A quote without
+an explicitly recorded provider email continues through the operations handoff;
+it cannot automatically notify the provider until that address is recorded before
+approval. Previously delivered approvals are not replayed or backfilled. No schema
+migration, new email credential, or iPhone rebuild is required.
+
+Validation: **1,450 backend tests passed, 2 skipped**, including both approval
+methods, provider/ops recipients, nonselected and declined providers, frozen
+recipients on retry, revoked approvals, PDF links, invalid addresses and SMTP
+partial refusals. All email transports were captured or mocked; no real provider
+or customer messages were sent by validation. The provider browser check covers
+the required email field and its PDF submission along with the gallery/viewer.
+
 ## October 30: ordered gallery, perspective cameras, and PDF-only pricing
 
 The provider viewer now shows every snapshot photo in a numbered, open gallery

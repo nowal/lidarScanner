@@ -119,11 +119,28 @@ class ApprovalContact(BaseModel):
         return self
 
 
+def normalize_provider_email(value: str | None) -> str | None:
+    """One explicit mailbox, never a display name, recipient list, or guessed match."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or any(c in value for c in '\r\n'):
+        raise ValueError('Enter one valid business email address')
+    value = value.strip()
+    pattern = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
+    local = value.split('@', 1)[0]
+    if (len(value) > 254 or len(local) > 64 or local.startswith('.') or local.endswith('.')
+            or '..' in local or not re.fullmatch(pattern, value)):
+        raise ValueError('Enter one valid business email address')
+    local, domain = value.rsplit('@', 1)
+    return local + '@' + domain.lower()
+
+
 class ReturnedQuote(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     providerName: str = Field(max_length=200)
     earliestAvailableDate: Optional[date] = None
     providerId: Optional[str] = None
+    providerEmail: Optional[str] = Field(default=None, max_length=254)
     priceUsd: Optional[float] = None
     priceLowUsd: Optional[float] = None
     priceHighUsd: Optional[float] = None
@@ -150,6 +167,14 @@ class ReturnedQuote(BaseModel):
     acceptanceNotificationQueuedAt: Optional[str] = None
     acceptanceNotificationDeliveredAt: Optional[str] = None
     acceptanceNotificationCapturedAt: Optional[str] = None
+    # Freeze the destination with the homeowner's approval. Later contact edits
+    # must not redirect an already queued private acceptance email.
+    acceptanceNotificationProviderEmail: Optional[str] = Field(default=None, max_length=254)
+
+    @field_validator('providerEmail', 'acceptanceNotificationProviderEmail', mode='before')
+    @classmethod
+    def _provider_email(cls, value):
+        return normalize_provider_email(value)
 
     @model_validator(mode="after")
     def _sane_prices(self) -> "ReturnedQuote":

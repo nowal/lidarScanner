@@ -511,7 +511,11 @@ def _send_smtp(to: str | list[str], subject: str, body: str, html: str | None = 
     with transport(settings.smtp_host, settings.smtp_port, timeout=20) as server:
         if settings.smtp_port != 465 and settings.smtp_starttls: server.starttls()
         server.login(settings.smtp_username, settings.smtp_password)
-        server.send_message(msg, to_addrs=recipients + copies)
+        refused = server.send_message(msg, to_addrs=recipients + copies)
+        if refused:
+            # SMTP may accept the ops copies while refusing the provider. That
+            # partial send is not a completed acceptance notification.
+            raise smtplib.SMTPRecipientsRefused(refused)
 
 
 def _write_outbox(record_id: str, to: str | list[str], subject: str, body: str, html: str | None = None,
@@ -548,13 +552,14 @@ async def send_ops_message(subject: str, body: str, html: str | None = None, *, 
 
 
 async def send_decision_email(record: Any, quote: Any) -> str:
-    """Tell operations what the homeowner decided about one quote.
+    """Tell the selected provider and operations about an accepted quote.
 
     Declining matters as much as approving: the comment that comes with it
     is the thing that lets operations go back to the provider or find
     another one. The address goes in only on an approval, because that is
     the release moment (SOW §12) and a decline releases nothing."""
     approved = quote.decision == "approved"
+    provider_email = getattr(quote, 'acceptanceNotificationProviderEmail', None) if approved else None
     price = _decision_price(quote)
     subject = (
         f"{'APPROVED' if approved else 'DECLINED'}: {quote.providerName}"
@@ -577,19 +582,21 @@ async def send_decision_email(record: Any, quote: Any) -> str:
         if contact:
             lines.extend([f"  Full name: {contact.fullName}", f"  Phone: {contact.phone}",
                           f"  Email: {contact.email}"])
-        lines.append(
-            "This is the address-release moment: the street address below goes to "
-            "this provider and to nobody else."
-        )
+        lines.append("Contact details for arranging this project:" if provider_email else
+                     "This is the address-release moment: the street address below goes to this provider and to nobody else.")
         lines.append(f"  Address: {contact.address if contact else record.address or 'not captured in the walk'}")
         lines.append("")
         if quote.approvalMethod == "callback":
             lines.append(f"  Callback phone: {quote.callbackPhone}")
-            lines.append("The homeowner chose a phone call. Share this number only with the selected provider and ask them to call.")
+            lines.append("The homeowner chose a phone call. Please call them to arrange the next steps." if provider_email else
+                         "The homeowner chose a phone call. Share this number only with the selected provider and ask them to call.")
         elif quote.approvalMethod == "signature":
             from .quote_approvals import document_link
-            lines.append("The homeowner signed the provider's PDF. Share the signed copy only with this provider.")
+            lines.append("The homeowner signed your quote. Open the signed PDF using the private link below." if provider_email else
+                         "The homeowner signed the provider's PDF. Share the signed copy only with this provider.")
             signed_link = document_link(record, quote)
+            if provider_email and not signed_link:
+                return 'failed'  # Retry when the private document link can be generated.
             if signed_link:
                 lines.append(f"  Signed quote PDF: {signed_link}")
                 lines.append("  Private signed-copy link expires in 30 days.")
@@ -610,6 +617,9 @@ async def send_decision_email(record: Any, quote: Any) -> str:
         # Acceptance copies do not change initial-email recipients or inbound command trust.
         extras = dict(cc=['noah@takeshapehome.com'],
                       idempotency_key=f'acceptance-{record.id}-{quote.id}-{quote.decidedAt}')
+        if provider_email:
+            extras['to'] = provider_email
+            extras['cc'] = recipient_list(recipient_list(settings.ops_email) + ['noah@takeshapehome.com'])
     return await send_ops_message(subject, "\n".join(lines), outbox_key=f"decision-{record.id}", **extras)
 
 

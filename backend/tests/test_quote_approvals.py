@@ -23,8 +23,10 @@ def capture_decision_mail(monkeypatch):
     return sent
 
 
-async def quote(monkeypatch, pdf):
+async def quote(monkeypatch, pdf, provider_email=None):
     rec, client, path, params, headers, uploaded = await setup(monkeypatch)
+    if provider_email is not None:
+        params['provider_email'] = provider_email
     response = await client.post(path + '/responses', params=params, headers=headers, content=pdf)
     assert response.status_code == 201
     quote_id = response.json()['quoteId']
@@ -270,7 +272,7 @@ async def test_acceptance_recipients_do_not_expand_inbound_command_trust(monkeyp
 
 @pytest.mark.asyncio
 async def test_cancelled_approval_is_not_released_by_notification_recovery(monkeypatch, pdf):
-    rec, client, qid, path, _ = await quote(monkeypatch, pdf)
+    rec, client, qid, path, _ = await quote(monkeypatch, pdf, 'cancelled@provider.test')
     async def failed(*args, **kwargs): return 'failed'
     monkeypatch.setattr(ops_email, 'send_ops_message', failed)
     async with client:
@@ -296,3 +298,135 @@ async def test_notification_recovery_can_list_requests_beyond_first_database_pag
     records = await supabase_store.list_quote_requests()
     assert len(records) == 1001 and records[-1]['id'] == 'qr_1000'
     assert offsets == [0, 1000]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('signed', [False, True])
+async def test_selected_provider_gets_acceptance_with_ops_copies_and_only_their_document(monkeypatch, pdf, signed):
+    import base64
+    from app.flow_quotes import ReturnedQuote
+    from app.flow.ops_reply import allowed_reply_senders
+    monkeypatch.setattr(settings, 'ops_email', 'Quintin <quintin@takeshapehome.com>')
+    monkeypatch.setattr(settings, 'resend_api_key', 'fake-test-key')
+    monkeypatch.setattr(ops_email, 'send_ops_message', REAL_SEND_OPS_MESSAGE)
+    deliveries = []
+    async def capture(to, subject, body, html=None, **kwargs): deliveries.append((to, subject, body, kwargs))
+    monkeypatch.setattr(ops_email, '_send_via_resend', capture)
+    rec, client, qid, path, uploads = await quote(monkeypatch, pdf, 'selected@provider.test')
+    current = await quote_store.get(rec.id)
+    current.quotes.append(ReturnedQuote(id='other-quote', providerName='Other Company', priceUsd=1500,
+                                       providerEmail='unselected@provider.test'))
+    await quote_store.save(current)
+    assert not deliveries, 'Submitting a quote is not homeowner consent'
+    payload = {'contact': CONTACT, 'providerEmail': 'override@provider.test'}
+    if signed:
+        payload['signedPDF'] = base64.b64encode(pdf).decode()
+    async with client:
+        result = await client.post(path, json=payload)
+        assert result.status_code == 200, result.text
+        assert len(deliveries) == 1
+        to, subject, body, extra = deliveries[0]
+        assert to == 'selected@provider.test'
+        assert extra['cc'] == ['quintin@takeshapehome.com', 'noah@takeshapehome.com']
+        assert all(value in body for value in CONTACT.values())
+        assert 'unselected@provider.test' not in str(deliveries)
+        assert 'override@provider.test' not in str(deliveries)
+        assert 'Other Company' not in body
+        cold = await QuoteRequestStore().get(rec.id)
+        chosen = cold.quote_by_id(qid)
+        assert chosen.acceptanceNotificationProviderEmail == to
+        assert chosen.acceptanceNotificationDeliveredAt
+        if signed:
+            link = quote_approvals.document_link(cold, chosen)
+            assert link in body
+            assert (await client.get(urlsplit(link).path)).status_code == 307
+            assert uploads[-1][0] == chosen.signedDocument.storagePath
+            assert chosen.signedDocument.storagePath != chosen.document.storagePath
+        else:
+            assert 'Callback phone: ' + CONTACT['phone'] in body
+            assert 'Please call them' in body
+            assert 'Signed quote PDF:' not in body
+        assert (await client.post(path, json=payload)).status_code == 200
+        assert await ops_email.retry_pending_acceptances() == 0
+        assert len(deliveries) == 1
+        assert to not in allowed_reply_senders()
+
+
+@pytest.mark.asyncio
+async def test_provider_delivery_retry_uses_address_frozen_at_approval(monkeypatch, pdf):
+    rec, client, qid, path, _ = await quote(monkeypatch, pdf, 'original@provider.test')
+    monkeypatch.setattr(settings, 'resend_api_key', 'fake-test-key')
+    monkeypatch.setattr(ops_email, 'send_ops_message', REAL_SEND_OPS_MESSAGE)
+    deliveries = []
+    async def flaky(to, subject, body, html=None, **kwargs):
+        deliveries.append((to, subject, body, kwargs))
+        if len(deliveries) == 1:
+            raise httpx.ConnectError('offline')
+    monkeypatch.setattr(ops_email, '_send_via_resend', flaky)
+    async with client:
+        assert (await client.post(path, json={'contact': CONTACT})).status_code == 200
+        cold = await QuoteRequestStore().get(rec.id)
+        assert not cold.quote_by_id(qid).acceptanceNotificationDeliveredAt
+        cold.quote_by_id(qid).providerEmail = 'changed-later@provider.test'
+        await quote_store.save(cold)
+        assert await ops_email.retry_pending_acceptances() == 1
+        assert await ops_email.retry_pending_acceptances() == 0
+        assert deliveries[0] == deliveries[1]
+        assert deliveries[1][0] == 'original@provider.test'
+        assert (await client.post(path, json={'contact': CONTACT})).status_code == 200
+        assert len(deliveries) == 2
+
+
+@pytest.mark.asyncio
+async def test_declined_provider_never_receives_callback_or_signed_copy(monkeypatch, pdf):
+    rec, client, qid, _, _ = await quote(monkeypatch, pdf, 'declined@provider.test')
+    messages = []
+    async def capture(subject, body, **kwargs): messages.append((body, kwargs)); return 'sent'
+    monkeypatch.setattr(ops_email, 'send_ops_message', capture)
+    async with client:
+        result = await client.post(f'/api/v1/ai/quote-requests/{rec.id}/decide',
+                                  json={'quoteId': qid, 'decision': 'declined'})
+        assert result.status_code == 200
+    assert len(messages) == 1
+    assert 'to' not in messages[0][1] and 'cc' not in messages[0][1]
+    assert not any(value in messages[0][0] for value in CONTACT.values())
+    assert await ops_email.retry_pending_acceptances() == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_smtp_refusal_is_not_marked_as_provider_delivery(monkeypatch):
+    import smtplib
+    monkeypatch.setattr(settings, 'resend_api_key', '')
+    monkeypatch.setattr(settings, 'smtp_host', 'smtp.example.test')
+    monkeypatch.setattr(settings, 'smtp_username', 'sender@example.test')
+    monkeypatch.setattr(settings, 'smtp_password', 'fake-test-password')
+    monkeypatch.setattr(settings, 'smtp_port', 465)
+    class SMTP:
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def login(self, *args): pass
+        def send_message(self, msg, *, to_addrs):
+            assert to_addrs == ['provider@example.test', 'ops@example.test']
+            return {'provider@example.test': (450, b'Temporarily unavailable')}
+    monkeypatch.setattr(smtplib, 'SMTP_SSL', SMTP)
+    result = await REAL_SEND_OPS_MESSAGE('Approved', 'Callback details', to='provider@example.test', cc=['ops@example.test'])
+    assert result == 'failed'
+
+
+@pytest.mark.asyncio
+async def test_signed_acceptance_waits_for_a_usable_document_link(monkeypatch, pdf, capture_decision_mail):
+    import base64
+    rec, client, qid, path, _ = await quote(monkeypatch, pdf, 'signing@provider.test')
+    monkeypatch.setattr(settings, 'public_base_url', '')
+    async with client:
+        response = await client.post(path, json={'contact': CONTACT, 'signedPDF': base64.b64encode(pdf).decode()})
+        assert response.status_code == 200
+        saved = await quote_store.get(rec.id)
+        assert saved.quote_by_id(qid).acceptanceNotificationQueuedAt
+        assert not saved.quote_by_id(qid).acceptanceNotificationDeliveredAt
+        assert not capture_decision_mail
+        monkeypatch.setattr(settings, 'public_base_url', 'https://example.test')
+        assert await ops_email.retry_pending_acceptances() == 1
+        assert len(capture_decision_mail) == 1
+        assert 'Signed quote PDF: https://example.test/' in capture_decision_mail[0][1]

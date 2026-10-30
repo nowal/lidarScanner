@@ -16,6 +16,7 @@
 </section>
 <section aria-label="Send your quote"><h2>Send your quote</h2><p>Upload your estimate or invoice as a PDF, including pricing. The homeowner can open it directly from their dashboard.</p>
 <form id="quote-form"><fieldset id="quote-fields" disabled><label for="provider-name">Business name</label><input id="provider-name" name="provider" autocomplete="organization" maxlength="200" required>
+<label for="provider-email">Business email</label><input id="provider-email" name="email" type="email" autocomplete="email" maxlength="254" aria-describedby="provider-email-hint" required><span id="provider-email-hint" class="hint">We’ll email you the signed quote or callback details when the homeowner accepts.</span>
 <label for="quote-pdf">Quote PDF <span class="hint">(up to 25 MB)</span></label><input id="quote-pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
 <button class="primary" type="submit">Send quote to homeowner</button></fieldset><p id="upload-status" role="status" aria-live="polite"></p></form></section>
 <section aria-labelledby="photos-title"><div class="gallery-heading"><h2 id="photos-title">Scan photos</h2><span id="photo-count" class="hint"></span></div><p id="gallery-status">Loading photos…</p><ol id="photo-gallery" role="list"></ol></section>

@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, File
 
 from .flow import quote_media as media, supabase_store
 from .flow import provider_responses
-from .flow_quotes import QuoteDocument, ReturnedQuote
+from .flow_quotes import QuoteDocument, ReturnedQuote, normalize_provider_email
 
 router = APIRouter()
 ROOT = '/quote-media/{request_id}/{exp}/{sig}'
@@ -62,6 +62,7 @@ async def upload_response(request_id: str, exp: int, sig: str, request: Request,
                           submission_id: UUID, provider_name: str = Query(min_length=1, max_length=200),
                           file_name: str = Query(min_length=1, max_length=200),
                           price_usd: float | None = Query(default=None, ge=0),
+                          provider_email: str | None = Query(default=None, max_length=254),
                           x_upload_token: str | None = Header(default=None)):
     record = await media.authorized(request_id, exp, sig)
     if not hmac.compare_digest(x_upload_token or '', upload_token(sig)):
@@ -73,6 +74,10 @@ async def upload_response(request_id: str, exp: int, sig: str, request: Request,
     # pricing in the PDF; an absent amount must stay unknown, never become $0.
     if price_usd is not None and not math.isfinite(price_usd):
         raise HTTPException(422, 'The supplied price is invalid.')
+    try:
+        provider_email = normalize_provider_email(provider_email)
+    except ValueError as exc:
+        raise HTTPException(422, 'Enter one valid business email address.') from exc
     if request.headers.get('content-type', '').split(';')[0].lower() != 'application/pdf':
         raise HTTPException(415, 'Choose a PDF quote.')
     data = bytearray()
@@ -84,7 +89,7 @@ async def upload_response(request_id: str, exp: int, sig: str, request: Request,
     if not data.startswith(b'%PDF-') or b'%%EOF' not in data[-1024:]:
         raise HTTPException(422, 'This file does not appear to be a complete PDF. Export it as a PDF and retry.')
     receipt_id = str(submission_id)
-    fingerprint = provider_responses.fingerprint(data, provider_name, price_usd)
+    fingerprint = provider_responses.fingerprint(data, provider_name, price_usd, provider_email=provider_email)
     existing = await provider_responses.existing(request_id, receipt_id, fingerprint)
     if existing:
         return JSONResponse({'quoteId': receipt_id, 'status': 'received'}, headers=HEADERS)
@@ -97,7 +102,7 @@ async def upload_response(request_id: str, exp: int, sig: str, request: Request,
         await media.put_bytes(path, data, 'application/pdf')
     except Exception as exc:
         raise HTTPException(503, 'The PDF could not be uploaded. Please retry.') from exc
-    quote = ReturnedQuote(id=receipt_id, providerName=provider_name, priceUsd=price_usd,
+    quote = ReturnedQuote(id=receipt_id, providerName=provider_name, providerEmail=provider_email, priceUsd=price_usd,
         document=QuoteDocument(fileName=name, byteCount=len(data), storageBucket=media.BUCKET, storagePath=path))
     await provider_responses.save(request_id, receipt_id, fingerprint, quote)
     return JSONResponse({'quoteId': receipt_id, 'status': 'received'}, status_code=201, headers=HEADERS)

@@ -210,7 +210,9 @@ form.addEventListener('submit', async e => {
   if (file.size > snapshot.maxPdfBytes) { uploadStatus.textContent = 'The PDF must be 25 MB or smaller.'; return; }
   const name = document.getElementById('provider-name').value.trim();
   if (!name) { uploadStatus.textContent = 'Enter your business name.'; return; }
-  const params = new URLSearchParams({submission_id: submissionId, provider_name: name, file_name: file.name});
+  const email = document.getElementById('provider-email');
+  if (!email.value.trim() || !email.checkValidity()) { uploadStatus.textContent = 'Enter your business email address.'; return; }
+  const params = new URLSearchParams({submission_id: submissionId, provider_name: name, provider_email: email.value.trim(), file_name: file.name});
   submitting = true; document.getElementById('quote-fields').disabled = true;
   uploadStatus.textContent = 'Uploading your quote…';
   try {

@@ -14,6 +14,16 @@ assert.equal(new URL(url).hostname, '127.0.0.1');
     page.on('request', r => { if (/\/photos\/\d+\//.test(r.url())) photoRequests.push(r.url()); });
     await page.goto(url);
     await page.waitForFunction(() => document.getElementById('viewer').loaded);
+    async function changeArea(value) {
+      await page.locator('#viewer').evaluate(v => {
+        v.dataset.testLoading = 'true';
+        v.addEventListener('load', () => { delete v.dataset.testLoading; }, {once: true});
+      });
+      await page.locator('#models').selectOption(value);
+      await page.waitForFunction(() => {
+        const v = document.getElementById('viewer'); return v.loaded && !v.dataset.testLoading;
+      });
+    }
     const content = await page.locator('body').innerText();
     for (const gone of ['Provider workspace', 'Saved scan', 'Download original', 'Download GLB', 'Drag to orbit', 'Select a camera', 'Earliest available']) {
       assert.ok(!content.includes(gone), gone);
@@ -43,8 +53,7 @@ assert.equal(new URL(url).hostname, '127.0.0.1');
     assert.equal(await page.locator('.camera-pin').first().evaluate(el => el === document.activeElement), true);
     await page.locator('#cameras').uncheck();
     assert.equal(await page.locator('.camera-pin').first().isVisible(), false);
-    await page.locator('#models').selectOption('1');
-    await page.waitForFunction(() => document.getElementById('viewer').loaded);
+    await changeArea('1');
     assert.equal(await page.locator('.camera-pin').count(), 120);
     assert.equal(await page.locator('.photo-card').count(), 242, 'The gallery includes every area regardless of the selected model');
     assert.equal(await page.locator('#cameras').isChecked(), false);
@@ -70,8 +79,11 @@ assert.equal(new URL(url).hostname, '127.0.0.1');
     await page.mouse.click(hit.x, hit.y);
     assert.equal(await page.locator('#photo-dialog').isVisible(), true);
     await page.locator('#close-photo').click();
-    await page.locator('#models').selectOption('0');
-    await page.waitForFunction(() => document.getElementById('viewer').loaded);
+    await changeArea('0');
+    // model-viewer pauses hotspot projection off-screen. Measure the actual
+    // visible interaction, after gallery navigation and focus restoration.
+    await page.locator('#viewer').scrollIntoViewIfNeeded();
+    await page.waitForFunction(() => document.getElementById('viewer').modelIsVisible);
     // Coalesced projection work remains interactive with 240 markers.
     const projection = await page.evaluate(async () => {
       const v = document.getElementById('viewer'), start = performance.now();
@@ -87,16 +99,21 @@ assert.equal(new URL(url).hostname, '127.0.0.1');
     console.log(`240 markers: 60 orbit frames in ${Math.round(projection)}ms`);
     await page.locator('#provider-name').fill('Browser Fixture Painting');
     await page.locator('#quote-pdf').setInputFiles({name: 'quote.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\n% isolated fixture\n%%EOF')});
+    await page.locator('#quote-form button[type="submit"]').click();
+    assert.equal(await page.locator('#provider-email').evaluate(el => el.validity.valueMissing), true);
+    await page.locator('#provider-email').fill('quotes@fixture.example');
     const responsePromise = page.waitForResponse(r => r.url().includes('/responses?') && r.request().method() === 'POST');
     await page.locator('#quote-form button[type="submit"]').click();
     const response = await responsePromise;
     assert.equal(response.status(), 201);
     assert.equal(new URL(response.url()).searchParams.has('price_usd'), false);
+    assert.equal(new URL(response.url()).searchParams.get('provider_email'), 'quotes@fixture.example');
     await page.waitForFunction(() => document.getElementById('upload-status').textContent.includes('Quote received'));
     const requestId = new URL(url).pathname.split('/')[4];
     const returned = await (await page.request.get(new URL(`/api/v1/ai/quote-requests/${requestId}`, url).href)).json();
     assert.ok(returned.quotes.some(q => q.providerName === 'Browser Fixture Painting' && q.priceUsd == null && q.document));
     assert.ok(returned.quotes.every(q => !('earliestAvailableDate' in q)));
+    await page.locator('section[aria-label="Send your quote"]').screenshot({path: '/tmp/takeshape-provider-email-form-desktop.png'});
     await page.locator('#photo-gallery').scrollIntoViewIfNeeded();
     await page.waitForFunction(() => document.querySelector('.photo-card.preview-ready'));
     assert.ok(photoRequests.filter(u => u.endsWith('/thumb')).length < 50, 'Off-screen thumbnails are not fetched eagerly');
@@ -105,6 +122,7 @@ assert.equal(new URL(url).hostname, '127.0.0.1');
     await page.locator('#photo-gallery').scrollIntoViewIfNeeded();
     await page.screenshot({path: '/tmp/takeshape-provider-gallery-mobile.png'});
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.locator('section[aria-label="Send your quote"]').screenshot({path: '/tmp/takeshape-provider-email-form-mobile.png'});
     // Photos remain usable while a model is pending, failed, or absent.
     for (const state of ['preparing', 'failed', 'absent']) {
       await page.route('**/status', async route => {

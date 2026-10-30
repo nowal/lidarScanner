@@ -529,6 +529,7 @@ async def _record_decision(
         quote.acceptanceNotificationQueuedAt = quote.decidedAt
         quote.acceptanceNotificationDeliveredAt = None
         quote.acceptanceNotificationCapturedAt = None
+        quote.acceptanceNotificationProviderEmail = quote.providerEmail
     elif record.selectedQuoteId == quote_id:
         record.selectedQuoteId = None
     try:
@@ -730,6 +731,8 @@ def _upsert_returned_quotes(record, quotes: list[ReturnedQuote]) -> int:
             if index is not None:
                 quote.id = record.quotes[index].id
         if index is not None:
+            if 'providerEmail' not in quote.model_fields_set:
+                quote.providerEmail = record.quotes[index].providerEmail
             record.quotes[index] = quote
         else:
             by_id[quote.id] = len(record.quotes)
@@ -1073,6 +1076,8 @@ async def ops_entry_page(request_id: str, exp: int = 0, sig: str = "") -> HTMLRe
 <h2>Quote</h2>
 <label>Provider name (as the homeowner should see it)</label>
 <input id="pname" placeholder="e.g. Summit Painting Co.">
+<label>Provider email (for signed quotes and callback details)</label>
+<input id="pemail" type="email" autocomplete="email" maxlength="254" required>
 <div class="pair">
   <div><label>Fixed price (USD)</label><input id="pfixed" type="number" min="0" step="1" placeholder="1850"></div>
   <div><label>or range low</label><input id="plow" type="number" min="0" step="1"></div>
@@ -1091,6 +1096,7 @@ document.getElementById('send').onclick = async () => {{
   const body = {{
     exp: ENTRY.exp, sig: ENTRY.sig,
     providerName: document.getElementById('pname').value.trim(),
+    providerEmail: document.getElementById('pemail').value.trim(),
     priceUsd: document.getElementById('pfixed').value ? Number(document.getElementById('pfixed').value) : null,
     priceLowUsd: document.getElementById('plow').value ? Number(document.getElementById('plow').value) : null,
     priceHighUsd: document.getElementById('phigh').value ? Number(document.getElementById('phigh').value) : null,
@@ -1098,6 +1104,7 @@ document.getElementById('send').onclick = async () => {{
     validUntil: document.getElementById('pvalid').value.trim() || null
   }};
   if (!body.providerName) {{ msg.className='err'; msg.textContent='Provider name is required.'; return; }}
+  if (!document.getElementById('pemail').reportValidity()) {{ return; }}
   if (body.priceUsd === null && (body.priceLowUsd === null || body.priceHighUsd === null)) {{
     msg.className='err'; msg.textContent='Enter a fixed price, or both a low and high.'; return;
   }}
@@ -1122,6 +1129,7 @@ class OpsEntrySubmission(BaseModel):
     exp: int
     sig: str
     providerName: str = Field(min_length=1, max_length=200)
+    providerEmail: Optional[str] = Field(default=None, max_length=254)
     priceUsd: Optional[float] = None
     priceLowUsd: Optional[float] = None
     priceHighUsd: Optional[float] = None
@@ -1137,6 +1145,7 @@ async def ops_entry_submit(request_id: str, body: OpsEntrySubmission) -> JSONRes
     try:
         quote = ReturnedQuote(
             providerName=body.providerName,
+            **({'providerEmail': body.providerEmail} if 'providerEmail' in body.model_fields_set else {}),
             priceUsd=body.priceUsd,
             priceLowUsd=body.priceLowUsd,
             priceHighUsd=body.priceHighUsd,

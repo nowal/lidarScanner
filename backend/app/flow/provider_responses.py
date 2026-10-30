@@ -94,9 +94,12 @@ async def homeowner_view(record) -> dict:
     return result
 
 
-def fingerprint(data: bytes, provider: str, price: float | None, earliest_available_date: date | None = None) -> str:
+def fingerprint(data: bytes, provider: str, price: float | None, earliest_available_date: date | None = None,
+                *, provider_email: str | None = None) -> str:
     details = [provider, price]
     # Preserve retry compatibility with submissions made before the date field.
     if earliest_available_date is not None:
         details.append(earliest_available_date.isoformat())
+    if provider_email is not None:
+        details.append({'providerEmail': provider_email})
     return hashlib.sha256(data + json.dumps(details, separators=(',', ':')).encode()).hexdigest()
