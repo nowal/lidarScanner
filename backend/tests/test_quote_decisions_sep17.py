@@ -88,7 +88,7 @@ async def test_declining_records_the_reason_and_releases_nothing(monkeypatch, tm
 
 
 @pytest.mark.asyncio
-async def test_declining_the_approved_quote_takes_the_approval_back(monkeypatch, tmp_path):
+async def test_declining_the_approved_quote_keeps_durable_acceptance(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
     record = _record()
     await quote_store.save(record)
@@ -97,12 +97,12 @@ async def test_declining_the_approved_quote_takes_the_approval_back(monkeypatch,
     record.quote_by_id("q1").approvalContact = ApprovalContact(fullName="Test Homeowner", phone="6155550199", email="home@example.test", address="123 Hidden Street, Nashville, TN 37203")
     await _record_decision(record, "q1", "approved", None)
     assert record.selectedQuoteId == "q1"
-    await _record_decision(record, "q1", "declined", "Changed my mind")
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as error:
+        await _record_decision(record, "q1", "declined", "Changed my mind")
+    assert error.value.status_code == 409
+    assert (await quote_store.get(record.id)).selectedQuoteId == 'q1'
 
-    assert record.selectedQuoteId is None, (
-        "leaving the selection on a declined quote would tell the agent the "
-        "address is out after the homeowner changed their mind"
-    )
 
 
 @pytest.mark.asyncio
@@ -143,7 +143,7 @@ async def test_operations_is_told_about_an_approval_with_the_address(
     record.quote_by_id("q1").approvalContact = ApprovalContact(fullName="Test Homeowner", phone="6155550199", email="home@example.test", address="123 Hidden Street, Nashville, TN 37203")
     await _record_decision(record, "q1", "approved", "Looks right")
 
-    subject, body = _quiet_ops_email[-1]
+    subject, body = _quiet_ops_email[0]
     assert subject.startswith("APPROVED: Brightline Painting")
     assert "qr_dec" in subject
     assert "123 Hidden Street" in body, "approval is the address-release moment"

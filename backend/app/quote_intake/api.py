@@ -16,8 +16,8 @@ from PIL import Image, ImageOps
 from ..config import settings
 from ..flow_api import require_token, _scan_upload_owner, DirectQuoteSubmission, submit_direct_quote_request
 from ..flow import quote_media, supabase_store
-from . import conversation, engine, store
-from .schema import TurnRequest, SubmitRequest
+from . import conversation, engine, store, lifecycle
+from .schema import TurnRequest, SubmitRequest, CycleRequest
 
 router = APIRouter(prefix=settings.api_prefix + '/ai/quote-intake', dependencies=[Depends(require_token)])
 
@@ -27,7 +27,7 @@ def view(identifier, home, state):
         messages=[{k: t[k] for k in ('id', 'role', 'text', 'attachments') if k in t} for t in state['transcript']],
         result=state['result'], projectZip=state['projectZip'], ready=state.get('ready', False),
         consultationReady=state.get('consultationReady', False),
-        paused=state['paused'], submissionPending=state['pendingSubmission'] is not None,
+        paused=state['paused'], submissionPending=state['pendingSubmission'] is not None or bool(state.get('legacySubmissionId') and not state['receipt']),
         receipt=state['receipt'], pendingTurn=state['pendingTurn'], pendingTurnId=(state['pendingTurn'] or {}).get('clientTurnId'),
         promptVersion=state['promptVersion'], rubricVersion=state['rubric']['rubric_version'])
 
@@ -82,6 +82,27 @@ async def store_supplemental_photos(attachments, owner: str, home: str, conversa
     return refs
 
 
+@router.post('/active')
+async def active_intake(body: CycleRequest, x_homeowner_token: str | None = Header(default=None)):
+    home = str(body.homeId)
+    owner = await _scan_upload_owner(home, x_homeowner_token)
+    if body.previousConversationId or body.quoteRequestId:
+        raise HTTPException(422, 'Use the new-chat transition for a previous request')
+    row = await lifecycle.cycle(owner, home, str(body.conversationId), legacy=body.legacyRequestId, legacy_submission=str(body.legacySubmissionId) if body.legacySubmissionId else None)
+    return view(row['id'], home, row['state'])
+
+
+@router.post('/start-next')
+async def start_next(body: CycleRequest, x_homeowner_token: str | None = Header(default=None)):
+    home = str(body.homeId)
+    owner = await _scan_upload_owner(home, x_homeowner_token)
+    if not body.previousConversationId or not body.quoteRequestId or body.legacyRequestId or body.legacySubmissionId:
+        raise HTTPException(422, 'Supply the current conversation and accepted request')
+    row = await lifecycle.cycle(owner, home, str(body.conversationId),
+        previous=str(body.previousConversationId), request=body.quoteRequestId)
+    return view(row['id'], home, row['state'])
+
+
 @router.get('/{conversation_id}')
 async def get_intake(conversation_id: UUID, homeId: UUID, x_homeowner_token: str | None = Header(default=None)):
     home = str(homeId)
@@ -94,17 +115,8 @@ async def get_intake(conversation_id: UUID, homeId: UUID, x_homeowner_token: str
 async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default=None)):
     identifier, home = str(body.conversationId), str(body.homeId)
     owner = await _scan_upload_owner(home, x_homeowner_token)
-    row = await store.read(identifier, owner, home)
-    if row is None:
-        if body.expectedRevision != 0:
-            raise HTTPException(409, 'Unknown intake revision')
-        try:
-            state = engine.initial_state()
-        except (ValueError, OSError) as exc:
-            raise HTTPException(503, 'Quote intake configuration is invalid. Please retry later.') from exc
-        version = None
-    else:
-        state, version = copy.deepcopy(row['state']), row['version']
+    row = await lifecycle.require_active(owner, home, identifier)
+    state, version = copy.deepcopy(row['state']), row['version']
     # Omit empty attachments to preserve identities from the deployed text-only
     # API. Saved fingerprints can recover already accepted photo turns without
     # storing or returning multi-megabyte base64 payloads in conversation JSON.
@@ -121,7 +133,7 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
         # Latest state avoids rolling a client back if an old retry arrives late.
         return view(identifier, home, state)
     unlocked(state)
-    if state['receipt'] or state['pendingSubmission']:
+    if state['receipt'] or state['pendingSubmission'] or state.get('legacySubmissionId'):
         raise HTTPException(409, 'This request is already being sent. Recover its receipt before starting a new request.')
     if body.expectedRevision != state['revision']:
         raise HTTPException(409, 'Intake revision changed. Reload the conversation.')
@@ -182,6 +194,8 @@ async def submit(body: SubmitRequest, x_homeowner_token: str | None = Header(def
     row, state = await load(identifier, owner, home)
     if state['receipt']:
         return view(identifier, home, state)
+    if state['pendingSubmission'] is None:
+        await lifecycle.require_active(owner, home, identifier)
     unlocked(state)
     if state['pendingSubmission'] is None:
         if (body.expectedRevision != state['revision'] or state['pendingTurn'] or state['paused']

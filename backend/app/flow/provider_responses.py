@@ -85,7 +85,8 @@ async def save(request_id: str, submission_id: str, fingerprint: str, quote: Ret
 
 async def homeowner_view(record) -> dict:
     result = record.homeowner_view()
-    for quote, view in zip(record.quotes, result['quotes']):
+    for view in result['quotes']:
+        quote = record.quote_by_id(view['id'])
         for key in ('document', 'signedDocument'):
             doc = getattr(quote, key)
             if doc and doc.storageBucket and doc.storagePath:

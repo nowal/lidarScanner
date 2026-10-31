@@ -124,3 +124,12 @@ class Handoff(StrictModel):
     rubricHash: str = Field(pattern=r'^[0-9a-f]{64}$')
     deferred: list[str] = Field(max_length=20)
     supplementalPhotos: list[SupplementalPhotoRef] = Field(default_factory=list, max_length=12)
+
+
+class CycleRequest(StrictModel):
+    conversationId: UUID = Field(strict=False)
+    homeId: UUID = Field(strict=False)
+    previousConversationId: UUID | None = Field(default=None, strict=False)
+    quoteRequestId: str | None = None
+    legacyRequestId: str | None = None
+    legacySubmissionId: UUID | None = Field(default=None, strict=False)

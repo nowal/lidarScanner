@@ -194,8 +194,12 @@ async def submit_direct_quote_request(body: DirectQuoteSubmission,
             await _require_homeowner_access(existing, x_homeowner_token)
             if existing.submissionFingerprint != fingerprint:
                 raise HTTPException(409, 'This submission was already used for a different request.')
+            from .quote_intake.lifecycle import attach_legacy_submission
+            await attach_legacy_submission(owner,home_id,str(body.submissionId),existing.homeowner_view())
             _schedule_ops_email(existing)
             return JSONResponse(existing.homeowner_view())
+        from .quote_intake.lifecycle import validate_direct_submission
+        await validate_direct_submission(owner, home_id, str(body.submissionId))
         upload = await scan_uploads.transition(home_id, 'read')
         published = (upload or {}).get('publishedIndex') or {}
         metadata = published.get('upload') or {}
@@ -243,6 +247,8 @@ async def submit_direct_quote_request(body: DirectQuoteSubmission,
             raise HTTPException(503, 'Your request could not be saved. Retry the same submission.') from exc
         if record.submissionFingerprint != fingerprint:
             raise HTTPException(409, 'This submission was already used for a different request.')
+        from .quote_intake.lifecycle import attach_legacy_submission
+        await attach_legacy_submission(owner,home_id,str(body.submissionId),record.homeowner_view())
         await deliver_to_ops(record)
         _schedule_ops_email(record)
         return JSONResponse(record.homeowner_view(), status_code=201)
@@ -305,6 +311,11 @@ async def submit_quote_request(
                 "schemaVersion": SCHEMA_VERSION, "error": "scan_upload_pending",
                 "missingSlots": ["final_model_upload"],
             })
+    if state.home_id and state.homeowner_id:
+        from .quote_intake.lifecycle import validate_direct_submission
+        from uuid import uuid5, NAMESPACE_URL
+        legacy_submission = str(uuid5(NAMESPACE_URL, 'takeshape-legacy:' + state.thread_id))
+        await validate_direct_submission(state.homeowner_id, state.home_id, legacy_submission)
     measurements = _measurements_from_context(body.homeContext)
     _add_capture_measurements(state, measurements)
     record = await create_quote_request(
@@ -313,6 +324,9 @@ async def submit_quote_request(
         measurements=measurements,
         quote_draft=None,
     )
+    if state.home_id and state.homeowner_id:
+        from .quote_intake.lifecycle import attach_legacy_submission
+        await attach_legacy_submission(state.homeowner_id,state.home_id,legacy_submission,record.homeowner_view())
     # The submission advanced the flow; bump the revision so the durable copy
     # outranks any pre-submission token a client might echo, and hand back a
     # fresh token for clients that adopt it.
@@ -509,14 +523,10 @@ async def select_quote(
 async def _record_decision(
     record: Any, quote_id: str, decision: str, note: str | None
 ) -> None:
-    """Write one verdict and tell operations about it.
-
-    Approving releases the address, which is what selecting has always
-    done. Declining the quote that was approved takes the approval back:
-    leaving ``selectedQuoteId`` pointing at a declined quote would tell the
-    agent the address is out when the homeowner has just changed their
-    mind."""
+    """Persist acceptance before delivery; an accepted historical choice is final."""
     quote = record.quote_by_id(quote_id)
+    if record.accepted and decision != "approved":
+        raise HTTPException(409, "An accepted quote cannot be declined. Start a new chat for another request.")
     if record.status == "closed" or (decision == "approved" and record.selectedQuoteId not in (None, quote_id)):
         raise HTTPException(409, "This request is closed or another quote has already been selected.")
     if decision == "approved" and (not quote.approvalContact or not quote.approvalMethod):
@@ -530,10 +540,20 @@ async def _record_decision(
         quote.acceptanceNotificationDeliveredAt = None
         quote.acceptanceNotificationCapturedAt = None
         quote.acceptanceNotificationProviderEmail = quote.providerEmail
+        quote.homeownerConfirmationQueuedAt = quote.decidedAt
     elif record.selectedQuoteId == quote_id:
         record.selectedQuoteId = None
     try:
-        await quote_store.save(record, require_durable=True)
+        if decision == 'approved':
+            from .flow import acceptances
+            await acceptances.commit(record, quote)
+            # The database commits the legacy parent inside the same row lock.
+            # Avoid replaying a stale snapshot over a concurrently added bid.
+            from .flow import supabase_store
+            if not supabase_store.enabled():
+                await quote_store.save(record)
+        else:
+            await quote_store.save(record, require_durable=True)
     except RuntimeError as exc:
         raise HTTPException(503, "Your decision could not be saved. Please try again.") from exc
     # Notify the existing operations handoff after the decision is durable.
@@ -611,7 +631,10 @@ async def approve_quote(request_id: str, quote_id: str, request: Request,
         if quote is None:
             raise HTTPException(404, "Quote not found on this request")
         if record.selectedQuoteId == quote_id and quote.approvalMethod and quote.decision == 'approved':
-            await ops_email.deliver_acceptance(record.id, quote.id)
+            try:
+                await ops_email.deliver_acceptance(record.id, quote.id)
+            except Exception:
+                logger.warning('Accepted quote email retry deferred for %s', record.id)
             return JSONResponse(await provider_responses.homeowner_view(record), headers={'Cache-Control': 'private, no-store'})
         if record.status == 'closed' or record.selectedQuoteId not in (None, quote_id):
             raise HTTPException(409, "This request is closed or another quote has already been selected.")

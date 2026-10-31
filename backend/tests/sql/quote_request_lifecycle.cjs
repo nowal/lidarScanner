@@ -1,0 +1,65 @@
+const { PGlite } = require(process.env.PGLITE_MODULE || '@electric-sql/pglite');
+const fs = require('fs'), path = require('path'), assert = require('node:assert/strict');
+(async () => {
+ const db = new PGlite();
+ await db.exec(`create role anon; create role authenticated; create role service_role bypassrls;
+ create table homeowners(id uuid primary key);
+ create table flow_quote_requests(id text primary key,thread_id text,homeowner_id uuid,status text,record jsonb,created_at timestamptz default now());
+ create table flow_provider_responses(id uuid primary key,request_id text references flow_quote_requests(id),quote jsonb);
+ grant all on homeowners,flow_quote_requests,flow_provider_responses to service_role;`);
+ const migration = name => fs.readFileSync(path.join(__dirname,'../../supabase/migrations',name),'utf8');
+ await db.exec(migration('20261019182934_quote_intake_state.sql'));
+ const legacyOwner='66666666-6666-6666-6666-666666666666',legacyHome='77777777-7777-7777-7777-777777777777',legacyChat='88888888-8888-8888-8888-888888888888';
+ const legacyQuote={id:'legacy',providerName:'Old Provider',decision:'approved',approvalMethod:'callback',
+  approvalContact:{fullName:'Old Homeowner',email:'old@example.test',phone:'6155550199',address:'123 Main Street, Nashville, TN 37203'},
+  acceptanceNotificationDeliveredAt:'2026-10-01T00:00:00Z'};
+ await db.query('insert into homeowners values($1)',[legacyOwner]);
+ await db.query('insert into flow_quote_requests(id,homeowner_id,status,record) values($1,$2,$3,$4)',
+  ['legacy',legacyOwner,'quotes_ready',{id:'legacy',homeId:legacyHome,selectedQuoteId:'legacy',quotes:[legacyQuote]}]);
+ await db.query('insert into quote_intakes values($1,$2,$3,0,$4)',[legacyChat,legacyOwner,legacyHome,
+  {revision:1,receipt:{quoteRequestId:'legacy'},transcript:[{receivedAt:'2026-10-01T00:00:00Z'}]}]);
+ await db.exec(migration('20261030193724_quote_request_lifecycle.sql'));
+ const backfill=(await db.query("select * from flow_quote_acceptances where request_id='legacy'")).rows[0];
+ assert.equal(backfill.provider_delivered,'2026-10-01T00:00:00Z');
+ assert.equal(backfill.quote.homeownerConfirmationQueuedAt,undefined,'no surprise historic confirmation emails');
+ assert.equal((await db.query('select request_id from quote_intakes where id=$1',[legacyChat])).rows[0].request_id,'legacy');
+ assert.equal((await db.query('select conversation_id from quote_active_conversations where owner_id=$1',[legacyOwner])).rows[0].conversation_id,legacyChat);
+ const o='11111111-1111-1111-1111-111111111111',h='22222222-2222-2222-2222-222222222222',c='33333333-3333-3333-3333-333333333333',n='44444444-4444-4444-4444-444444444444',other='55555555-5555-5555-5555-555555555555';
+ const initial={revision:0,transcript:[],receipt:null,pendingSubmission:null};
+ await db.query('insert into homeowners values($1)',[o]);
+ await db.exec('set role service_role');
+ const cycle=async(id,previous=null,request=null,home=h)=> (await db.query('select quote_intake_cycle($1,$2,$3,$4,$5,$6) as row',[o,home,id,initial,previous,request])).rows[0].row;
+ assert.equal((await cycle(c)).id,c);
+ await assert.rejects(()=>db.query('update quote_active_conversations set home_id=$1 where owner_id=$2',[other,o]),/owner\/home mismatch/);
+ await assert.rejects(()=>db.query('update quote_intakes set request_id=$1 where id=$2',['fake',c]),/durable receipt/);
+ assert.equal((await cycle(other)).id,c,'another device restores same conversation');
+ const q={id:'paint',providerName:'Painter',priceUsd:5,decision:'approved',approvalMethod:'callback',approvalContact:{email:'home@example.test'},acceptanceNotificationQueuedAt:'now',homeownerConfirmationQueuedAt:'now'};
+ const rec={id:'r',homeId:h,selectedQuoteId:null,quotes:[{...q,decision:null}]};
+ await db.query('insert into flow_quote_requests(id,homeowner_id,status,record) values($1,$2,$3,$4)',['r',o,'quotes_ready',rec]);
+ await db.query("update quote_intakes set state=jsonb_set(state,'{receipt}',$1) where id=$2",[{quoteRequestId:'r'},c]);
+ await assert.rejects(()=>cycle(n,c,'r'),/Accept the current quote/);
+ await assert.rejects(()=>db.query('select accept_quote_once($1,$2,$3,$4)',['r',o,other,q]),/mismatch/);
+ await assert.rejects(()=>db.query('select accept_quote_once($1,$2,$3,$4)',['r',o,h,{...q,id:'fake'}]),/does not belong/);
+ await db.query('select accept_quote_once($1,$2,$3,$4)',['r',o,h,q]);
+ await assert.rejects(()=>db.query('select accept_quote_once($1,$2,$3,$4)',['r',o,h,{...q,id:'other'}]),/Another quote/);
+ await assert.rejects(()=>db.query("update flow_quote_acceptances set quote=jsonb_set(quote,'{id}','\"other\"') where request_id='r'"),/immutable/);
+ await db.query('update flow_quote_requests set record=$1 where id=$2',[rec,'r']);
+ assert.equal((await db.query("select record->>'selectedQuoteId' as id from flow_quote_requests where id='r'")).rows[0].id,'paint','stale parent cannot revoke');
+ assert.equal((await cycle(n,c,'r')).id,n);
+ assert.equal((await cycle(other,c,'r')).id,n,'double tap/device retries return same successor');
+ assert.equal((await cycle(other)).id,n);
+ await assert.rejects(()=>cycle(other,n,'r'),/Wrong current request/);
+ const claim=async(channel,id,result=null)=>(await db.query('select quote_acceptance_delivery($1,$2,$3,$4) as ok',['r',channel,id,result])).rows[0].ok;
+ assert.equal(await claim('provider',c),true);
+ assert.equal(await claim('provider',n),false,'another worker cannot send same channel');
+ assert.equal(await claim('homeowner',n),true,'channels independent');
+ assert.equal(await claim('homeowner',n,'sent'),true);
+ assert.equal(await claim('provider',c,'failed'),true);
+ assert.equal(await claim('provider',other),true);
+ assert.equal(await claim('homeowner',other),false,'saved receipt cannot resend');
+ await db.exec('reset role');
+ const grants=await db.query("select has_table_privilege('anon','flow_quote_acceptances','select') as anon,has_function_privilege('authenticated','quote_intake_cycle(uuid,uuid,uuid,jsonb,uuid,text,text)','execute') as auth");
+ assert.equal(grants.rows[0].anon,false);assert.equal(grants.rows[0].auth,false);
+ console.log('PASS: lifecycle SQL, scope checks, atomic acceptance, stale writes, successor retries, independent delivery claims, private grants.');
+ await db.close();
+})().catch(e=>{console.error(e);process.exitCode=1;});

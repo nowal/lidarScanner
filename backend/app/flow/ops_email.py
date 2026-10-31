@@ -626,30 +626,64 @@ async def send_decision_email(record: Any, quote: Any) -> str:
 _acceptance_locks: dict[str, asyncio.Lock] = {}
 
 
+async def send_homeowner_confirmation(record: Any, quote: Any) -> str:
+    contact = quote.approvalContact
+    if not contact:
+        return 'failed'
+    lines = [f"Thank you for accepting the quote with {quote.providerName}. They’ll get in touch with you shortly.", ""]
+    if quote.approvalMethod == 'signature':
+        from .quote_approvals import document_link
+        link = document_link(record, quote)
+        if not link:
+            return 'failed'
+        lines.extend([f"Your signed quote: {link}", "This private link expires 30 days after acceptance."])
+    else:
+        lines.extend(["Your callback details:", f"Name: {contact.fullName}",
+                      f"Phone: {contact.phone}", f"Email: {contact.email}", f"Address: {contact.address}"])
+    return await send_ops_message(f"Your quote with {quote.providerName} is accepted", "\n".join(lines),
+        to=contact.email, cc=[], outbox_key=f"homeowner-acceptance-{record.id}",
+        idempotency_key=f"homeowner-acceptance-{record.id}-{quote.id}-{quote.decidedAt}")
+
+
 async def deliver_acceptance(request_id: str, quote_id: str) -> str:
-    """Durable outbox receipt; retries reload consent and never repeat a saved send."""
+    """Each recipient has its own durable claim/receipt and idempotency key."""
     from ..flow_quotes import quote_store
-    from ..models import now_utc
+    from . import acceptances
+    from uuid import uuid4
     async with _acceptance_locks.setdefault(request_id, asyncio.Lock()):
         record = await quote_store.get(request_id)
         quote = record.quote_by_id(quote_id) if record else None
         if (not quote or record.selectedQuoteId != quote_id or quote.decision != 'approved'
                 or not quote.acceptanceNotificationQueuedAt):
             return 'cancelled'
-        if quote.acceptanceNotificationDeliveredAt:
-            return 'already_sent'
-        result = await send_decision_email(record, quote)
-        # Fetch again so email receipts cannot overwrite another quote/decision.
-        latest = await quote_store.get(request_id)
-        current = latest.quote_by_id(quote_id) if latest else None
-        if current and current.decidedAt == quote.decidedAt and current.decision == 'approved':
-            if result == 'sent':
-                current.acceptanceNotificationDeliveredAt = now_utc().isoformat()
-            elif result == 'outbox':
-                current.acceptanceNotificationCapturedAt = now_utc().isoformat()
-            if result in ('sent', 'outbox'):
-                await quote_store.save(latest, require_durable=True)
-        return result
+        # Upgrade old queued acceptances without inventing a homeowner recipient.
+        if not await acceptances.read(request_id):
+            if not quote.approvalContact or not quote.approvalMethod:
+                return 'cancelled'
+            record = await acceptances.commit(record, quote)
+            quote = record.quote_by_id(quote_id)
+        outcomes = []
+        for channel, queued, delivered, captured, send in (
+            ('provider', quote.acceptanceNotificationQueuedAt, quote.acceptanceNotificationDeliveredAt,
+             quote.acceptanceNotificationCapturedAt, send_decision_email),
+            ('homeowner', quote.homeownerConfirmationQueuedAt, quote.homeownerConfirmationDeliveredAt,
+             quote.homeownerConfirmationCapturedAt, send_homeowner_confirmation)):
+            if not queued or delivered or (captured and not settings.resend_api_key and not _smtp_configured()):
+                outcomes.append('already_sent')
+                continue
+            claim = str(uuid4())
+            if not await acceptances.delivery(request_id, channel, claim):
+                outcomes.append('already_sent')
+                continue
+            result = 'failed'
+            try:
+                result = await send(record, quote)
+            except Exception:
+                logger.warning('Acceptance %s delivery failed for %s', channel, request_id)
+            finally:
+                await acceptances.delivery(request_id, channel, claim, result)
+            outcomes.append(result)
+        return outcomes[0]
 
 
 async def retry_pending_acceptances() -> int:
@@ -657,9 +691,9 @@ async def retry_pending_acceptances() -> int:
     count = 0
     for record in await quote_store.list():
         quote = record.quote_by_id(record.selectedQuoteId) if record.selectedQuoteId else None
-        if (quote and quote.decision == 'approved' and quote.acceptanceNotificationQueuedAt
-                and not quote.acceptanceNotificationDeliveredAt
-                and (settings.resend_api_key or _smtp_configured() or not quote.acceptanceNotificationCapturedAt)):
+        pending_provider = quote and quote.acceptanceNotificationQueuedAt and not quote.acceptanceNotificationDeliveredAt and (settings.resend_api_key or _smtp_configured() or not quote.acceptanceNotificationCapturedAt)
+        pending_homeowner = quote and quote.homeownerConfirmationQueuedAt and not quote.homeownerConfirmationDeliveredAt and (settings.resend_api_key or _smtp_configured() or not quote.homeownerConfirmationCapturedAt)
+        if quote and quote.decision == 'approved' and (pending_provider or pending_homeowner):
             try:
                 await deliver_acceptance(record.id, quote.id)
                 count += 1
