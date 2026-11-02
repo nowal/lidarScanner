@@ -82,9 +82,9 @@ async def current(owner, home):
 async def cycle(owner, home, identifier, *, previous=None, request=None, legacy=None, legacy_submission=None):
     # Existing conversations retain their pinned rubric even if a newly
     # installed rubric cannot initialize a fresh conversation.
-    if previous is None and not legacy_submission:
+    if previous is None:
         active = await current(owner,home)
-        if active:
+        if active and (active['state'].get('threadVersion') or not legacy_submission):
             return active
     try:
         state = engine.initial_state()
@@ -130,13 +130,13 @@ async def validate_direct_submission(owner, home, submission):
             if supabase_store.enabled():
                 response = await supabase_store._rest().get('/quote_intakes', params={
                     'owner_id':'eq.'+owner,'home_id':'eq.'+home,
-                    'state->pendingSubmission->>submissionId':'eq.'+submission,'select':'id','limit':'1'})
+                    'or':f'(state->pendingSubmission->>submissionId.eq.{submission},state->>legacySubmissionId.eq.{submission})','select':'id','limit':'1'})
                 response.raise_for_status()
                 pending = bool(response.json())
             else:
                 def pending_read():
                     with store._db() as conn:
-                        return conn.execute("SELECT 1 FROM intakes WHERE owner=? AND home=? AND json_extract(state,'$.pendingSubmission.submissionId')=? LIMIT 1", (owner,home,submission)).fetchone() is not None
+                        return conn.execute("SELECT 1 FROM intakes WHERE owner=? AND home=? AND (json_extract(state,'$.pendingSubmission.submissionId')=? OR json_extract(state,'$.legacySubmissionId')=?) LIMIT 1", (owner,home,submission,submission)).fetchone() is not None
                 pending = await asyncio.to_thread(pending_read)
             if not pending:
                 raise HTTPException(409, 'Continue the current conversation before creating another request.')
@@ -144,6 +144,24 @@ async def validate_direct_submission(owner, home, submission):
 
 async def attach_legacy_submission(owner, home, submission, receipt):
     row = await cycle(owner,home,submission)
+    if row['state'].get('legacySubmissionId') != submission:
+        # A previous thread may finish an uncertain legacy dispatch after the
+        # homeowner selected a new thread. Attach only to its original thread.
+        if supabase_store.enabled():
+            response = await supabase_store._rest().get('/quote_intakes',params={
+                'owner_id':'eq.'+owner,'home_id':'eq.'+home,'state->>legacySubmissionId':'eq.'+submission,'select':'*','limit':'1'})
+            response.raise_for_status()
+            rows = response.json()
+            row = rows[0] if rows else None
+        else:
+            def read():
+                with store._db() as conn:
+                    saved = conn.execute("SELECT id FROM intakes WHERE owner=? AND home=? AND json_extract(state,'$.legacySubmissionId')=? LIMIT 1",(owner,home,submission)).fetchone()
+                    return saved[0] if saved else None
+            identifier = await asyncio.to_thread(read)
+            row = await store.read(identifier,owner,home) if identifier else None
+        if row is None:
+            return
     state = copy.deepcopy(row['state'])
     if state.get('legacySubmissionId') != submission or state.get('receipt'):
         return

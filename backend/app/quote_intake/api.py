@@ -10,14 +10,14 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import anthropic
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from PIL import Image, ImageOps
 
 from ..config import settings
 from ..flow_api import require_token, _scan_upload_owner, DirectQuoteSubmission, submit_direct_quote_request
 from ..flow import quote_media, supabase_store
-from . import conversation, engine, store, lifecycle
-from .schema import TurnRequest, SubmitRequest, CycleRequest
+from . import conversation, engine, store, lifecycle, threads
+from .schema import TurnRequest, SubmitRequest, CycleRequest, ThreadRequest
 
 router = APIRouter(prefix=settings.api_prefix + '/ai/quote-intake', dependencies=[Depends(require_token)])
 
@@ -29,7 +29,7 @@ def view(identifier, home, state):
         consultationReady=state.get('consultationReady', False),
         paused=state['paused'], submissionPending=state['pendingSubmission'] is not None or bool(state.get('legacySubmissionId') and not state['receipt']),
         receipt=state['receipt'], pendingTurn=state['pendingTurn'], pendingTurnId=(state['pendingTurn'] or {}).get('clientTurnId'),
-        promptVersion=state['promptVersion'], rubricVersion=state['rubric']['rubric_version'])
+        promptVersion=state['promptVersion'], rubricVersion=state['rubric']['rubric_version'],threadVersion=state.get('threadVersion'))
 
 
 def unlocked(state):
@@ -103,6 +103,34 @@ async def start_next(body: CycleRequest, x_homeowner_token: str | None = Header(
     return view(row['id'], home, row['state'])
 
 
+@router.get('/threads')
+async def list_threads(offset: int = Query(default=0,ge=0), x_homeowner_token: str | None = Header(default=None)):
+    from .. import flow_api
+    sub = await flow_api.homeowner_id_from_header(x_homeowner_token)
+    if not sub:
+        raise HTTPException(401, 'A verified homeowner session is required')
+    profile = await supabase_store.resolve_homeowner(sub)
+    if not profile or not profile.get('id'):
+        raise HTTPException(403, 'No homeowner profile for this session')
+    return await threads.list_threads(str(profile['id']).lower(),offset)
+
+
+@router.post('/threads/new')
+async def new_thread(body: ThreadRequest, x_homeowner_token: str | None = Header(default=None)):
+    home = str(body.homeId)
+    owner = await _scan_upload_owner(home,x_homeowner_token)
+    row = await threads.select(owner,home,str(body.conversationId),create=True)
+    return view(row['id'],home,row['state'])
+
+
+@router.post('/threads/select')
+async def select_thread(body: ThreadRequest, x_homeowner_token: str | None = Header(default=None)):
+    home = str(body.homeId)
+    owner = await _scan_upload_owner(home,x_homeowner_token)
+    row = await threads.select(owner,home,str(body.conversationId))
+    return view(row['id'],home,row['state'])
+
+
 @router.get('/{conversation_id}')
 async def get_intake(conversation_id: UUID, homeId: UUID, x_homeowner_token: str | None = Header(default=None)):
     home = str(homeId)
@@ -115,7 +143,11 @@ async def get_intake(conversation_id: UUID, homeId: UUID, x_homeowner_token: str
 async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default=None)):
     identifier, home = str(body.conversationId), str(body.homeId)
     owner = await _scan_upload_owner(home, x_homeowner_token)
-    row = await lifecycle.require_active(owner, home, identifier)
+    # A saved thread remains independently editable when another device opens
+    # a different thread. Only first-time legacy IDs use the old active restore.
+    row = await store.read(identifier, owner, home)
+    if row is None:
+        row = await lifecycle.require_active(owner, home, identifier)
     state, version = copy.deepcopy(row['state']), row['version']
     # Omit empty attachments to preserve identities from the deployed text-only
     # API. Saved fingerprints can recover already accepted photo turns without
@@ -194,8 +226,6 @@ async def submit(body: SubmitRequest, x_homeowner_token: str | None = Header(def
     row, state = await load(identifier, owner, home)
     if state['receipt']:
         return view(identifier, home, state)
-    if state['pendingSubmission'] is None:
-        await lifecycle.require_active(owner, home, identifier)
     unlocked(state)
     if state['pendingSubmission'] is None:
         if (body.expectedRevision != state['revision'] or state['pendingTurn'] or state['paused']

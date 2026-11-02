@@ -133,3 +133,8 @@ class CycleRequest(StrictModel):
     quoteRequestId: str | None = None
     legacyRequestId: str | None = None
     legacySubmissionId: UUID | None = Field(default=None, strict=False)
+
+
+class ThreadRequest(StrictModel):
+    conversationId: UUID = Field(strict=False)
+    homeId: UUID = Field(strict=False)
