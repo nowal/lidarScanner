@@ -5,6 +5,8 @@ from pydantic import ValidationError
 
 from . import engine, provider
 
+MAX_GENERATION_ATTEMPTS = 3
+
 
 async def generate_turn(state, time_zone, *, attempts=None):
     payload = engine.model_input(state, time_zone)
@@ -13,7 +15,7 @@ async def generate_turn(state, time_zone, *, attempts=None):
     # Ordinary validation gets one repair (two calls total). A proposed-question
     # review may itself introduce an invalid citation, so that path alone gets a
     # final repair call rather than surfacing a retryable failure to the homeowner.
-    for attempt in range(3):
+    for attempt in range(MAX_GENERATION_ATTEMPTS):
         result = None
         try:
             result = await provider.generate(system, payload)
@@ -23,7 +25,7 @@ async def generate_turn(state, time_zone, *, attempts=None):
             # apply_result supplies the rubric's next question deterministically.
             # Accept that safe fallback instead of spending the only repair
             # attempt asking the model to rediscover an answer that may not exist.
-            if attempt == 0 and result.action == 'ask' and validated['result']['nextQuestion']:
+            if attempt == 0 and validated['result']['nextQuestion']:
                 # A schema-valid question can still repeat an answered intent.
                 # Spend the remaining attempt checking it against the transcript,
                 # without relaxing provenance or the total two-call limit.
@@ -40,6 +42,12 @@ async def generate_turn(state, time_zone, *, attempts=None):
                            'or turn missing information into uncertainty. Preserve all supported candidate answers. '
                            'Return the complete final object.')
                 continue
+            questions = validated['result']['nextQuestion']
+            previous = next((turn['text'] for turn in reversed(state['transcript'])
+                             if turn['role'] == 'assistant'), '')
+            if (questions and validated['result']['displayText'].strip() == previous.strip()
+                    and any(f"{q['workItemId']}.{q['field']}" in state['asked'] for q in questions)):
+                raise ValueError('Do not repeat the same question verbatim; incorporate the latest answer or restate a genuinely unresolved point')
             if attempts is not None:
                 attempts.append({'validated': True})
             return validated

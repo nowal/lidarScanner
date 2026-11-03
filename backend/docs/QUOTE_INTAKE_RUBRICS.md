@@ -17,7 +17,7 @@ Adding a service here does not automatically add it to provider routing. A non-n
 ## Common rules
 
 ```yaml
-rubric_version: quote-intake-v1.14
+rubric_version: quote-intake-v1.15
 common:
   required:
     - id: desired_outcome
@@ -193,8 +193,17 @@ decisions:
     category: timing
     unknown_outcome: needs_provider_review
     defer: [unknown]
-  - id: resale_investment_direction
+  - id: project_goal
     priority: 8
+    question: "Is this project specifically intended to prepare the home for sale?"
+    category: scope
+    unknown_outcome: ready
+    required_for_quote: false
+    values: [resale]
+    defer: []
+  - id: resale_investment_direction
+    priority: 9
+    when: {field: project_goal, equals: resale}
     question: "For the resale refresh, would you prefer a cost-conscious scope, a more premium finish, or options at both levels?"
     category: preference
     unknown_outcome: needs_provider_review
@@ -202,6 +211,7 @@ decisions:
     defer: [provider_recommendation, no_preference, unknown]
 optional:
   - "Keep versus replace decisions already named by the homeowner."
+  - "Assume no resale goal unless the homeowner explicitly says the project is preparing the home for sale; never ask whether they plan to sell."
   - "A stated budget ceiling or need to keep part of the space usable."
 provider_review:
   - "Dimensions, structural feasibility, systems relocation, permits, and whether design/assessment is needed before pricing."

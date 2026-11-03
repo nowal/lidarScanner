@@ -23,12 +23,14 @@ router = APIRouter(prefix=settings.api_prefix + '/ai/quote-intake', dependencies
 
 
 def view(identifier, home, state):
+    retry_after = max(0, int(state.get('leaseUntil', 0) - time.time()))
     return dict(conversationId=identifier, homeId=home, revision=state['revision'],
         messages=[{k: t[k] for k in ('id', 'role', 'text', 'attachments') if k in t} for t in state['transcript']],
         result=state['result'], projectZip=state['projectZip'], ready=state.get('ready', False),
         consultationReady=state.get('consultationReady', False),
         paused=state['paused'], submissionPending=state['pendingSubmission'] is not None,
         receipt=state['receipt'], pendingTurn=state['pendingTurn'], pendingTurnId=(state['pendingTurn'] or {}).get('clientTurnId'),
+        processing=retry_after > 0, retryAfterSeconds=retry_after,
         promptVersion=state['promptVersion'], rubricVersion=state['rubric']['rubric_version'])
 
 
@@ -133,7 +135,8 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
             receivedAt=datetime.now(timezone.utc).isoformat(), timeZone=body.timeZone,
             attachments=[{k: photo[k] for k in ('id','fileName','mimeType','byteCount')} for photo in refs]))
     state['ready'] = False
-    state['leaseUntil'] = time.time() + 2 * settings.anthropic_request_timeout_seconds + 30
+    state['leaseUntil'] = (time.time() + conversation.MAX_GENERATION_ATTEMPTS
+                           * settings.anthropic_request_timeout_seconds + 30)
     version = await store.save(identifier, owner, home, state, version)
     try:
         state = await conversation.generate_turn(state, body.timeZone)

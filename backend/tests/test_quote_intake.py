@@ -263,7 +263,68 @@ async def test_claimed_completion_with_omitted_common_answers_uses_application_q
     monkeypatch.setattr(provider,'generate',generate)
     applied=await conversation.generate_turn(state,'America/New_York')
     assert not applied['ready'] and applied['result']['nextQuestion']==[dict(workItemId='work',field='desired_outcome')]
-    assert len(calls)==1
+    assert len(calls)==2
+
+
+def _interior_remodel_result_for_resale_correction(state):
+    answers = [
+        answer('desired_outcome', 'replace cabinet doors', 'new cabinet doors', source='turn-1'),
+        answer('target_scope', 'kitchen cabinets', 'kitchen cabinets', source='turn-1'),
+        answer('intended_changes', 'replace cabinet doors', 'new cabinet doors', source='turn-1'),
+        answer('layout_intent', 'keep layout', 'keep the layout', source='turn-1'),
+        answer('design_direction', None, 'provider help with design', 'provider_recommendation', source='turn-1'),
+        answer('keep_replace_priorities', 'replace cabinet doors', 'replace the cabinet doors', source='turn-1'),
+        answer('selection_stage', None, 'provider help with selections', 'provider_recommendation', source='turn-1'),
+        answer('occupancy_constraints', None, 'no access constraints', 'not_applicable', source='turn-1'),
+        answer('listing_timeline', 'flexible', 'timing is flexible', source='turn-1'),
+    ]
+    return result([item('interior_remodeling', answers)], serviceCandidates=['Interior Remodeling'],
+        zipUpdates=[], action='ready', intentSourceTurnId='turn-3', intentEvidence='new cabinet doors',
+        displayText='Understood.', quoteBrief='Replace the kitchen cabinet doors.')
+
+
+@pytest.mark.parametrize('pinned_old_snapshot', [False, True])
+def test_non_resale_correction_never_repeats_resale_question(pinned_old_snapshot):
+    prior = ('We want new cabinet doors for the kitchen cabinets, keep the layout, have the '
+             'provider help with design and provider help with selections, replace the cabinet '
+             'doors, no access constraints, and timing is flexible.')
+    correction = ("Options are good. And to be clear, we're not selling our house. "
+                  'We just want new cabinet doors')
+    state = engine.initial_state()
+    if pinned_old_snapshot:
+        # Deployed conversations retain the old unconditional rubric snapshot.
+        service = next(s for s in state['rubric']['services'] if s['id'] == 'interior_remodeling')
+        service['decisions'] = [d for d in service['decisions'] if d['id'] != 'project_goal']
+        next(d for d in service['decisions'] if d['id'] == 'resale_investment_direction')['when'] = None
+    state['transcript'] = [
+        dict(id='turn-1', role='homeowner', text=prior),
+        dict(id='turn-2', role='assistant', text='For the resale refresh, would you prefer a cost-conscious scope, a more premium finish, or options at both levels?'),
+        dict(id='turn-3', role='homeowner', text=correction),
+    ]
+    state['pendingTurn'] = dict(clientTurnId='turn-3')
+    state['asked'] = ['work.resale_investment_direction']
+    applied = engine.apply_result(state, _interior_remodel_result_for_resale_correction(state))
+    assert applied['result']['nextQuestion'] == []
+    assert applied['result']['action'] == 'request_zip'
+    assert 'resale refresh' not in applied['result']['displayText'].lower()
+
+
+def test_explicit_resale_goal_activates_resale_direction_question():
+    text = ('We are preparing the home for resale with new cabinet doors for the kitchen cabinets, '
+            'keep the layout, provider help with design and provider help with selections, replace '
+            'the cabinet doors, no access constraints, and timing is flexible.')
+    state = engine.initial_state()
+    state['transcript'] = [dict(id='turn-1', role='homeowner', text=text)]
+    state['pendingTurn'] = dict(clientTurnId='turn-1')
+    proposed = _interior_remodel_result_for_resale_correction(state).model_dump()
+    for item_data in proposed['workItems']:
+        for field in item_data['answers']:
+            field['sourceTurnId'] = 'turn-1'
+        item_data['answers'].append(answer('project_goal', 'resale', 'preparing the home for resale'))
+    proposed['intentSourceTurnId'] = 'turn-1'
+    proposed['intentEvidence'] = 'preparing the home for resale'
+    applied = engine.apply_result(state, Result.model_validate(proposed))
+    assert applied['result']['nextQuestion'] == [dict(workItemId='work', field='resale_investment_direction')]
 
 
 @pytest.mark.asyncio
@@ -746,6 +807,9 @@ async def test_double_send_and_owner_scan_isolation(direct,monkeypatch):
     body=wire(original['homeId'])
     task=asyncio.create_task(client.post('/api/v1/ai/quote-intake/turn',json=body))
     await started.wait()
+    pending=await client.get(f"/api/v1/ai/quote-intake/{body['conversationId']}?homeId={body['homeId']}")
+    assert pending.json()['processing'] is True
+    assert 0 < pending.json()['retryAfterSeconds'] <= conversation.MAX_GENERATION_ATTEMPTS * settings.anthropic_request_timeout_seconds + 30
     assert (await client.post('/api/v1/ai/quote-intake/turn',json=body)).status_code==409
     gate.set(); assert (await task).status_code==200 and len(calls)==1
     async def another_owner(home,token): return str(uuid4())

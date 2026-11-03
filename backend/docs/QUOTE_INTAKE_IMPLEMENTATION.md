@@ -24,7 +24,11 @@ turn is durable before Claude is called. A failed response preserves that turn;
 retry with its unchanged ID/body. Completed retries return the latest state,
 which prevents an old retry from rolling back subsequent answers. A different
 payload with the same turn ID is rejected. Revision conflicts never overwrite
-state. A crashed worker's lease expires; stale responses cannot commit.
+state. A crashed worker's lease expires; stale responses cannot commit. Read
+responses expose only whether that lease is active and a bounded retry delay, so
+mobile recovery polls an accepted turn instead of colliding with its worker.
+The mobile request window includes headroom for all three bounded provider
+attempts (initial generation, question review and structured-output repair).
 
 Claude receives text only: this intake's full transcript (up to 100 homeowner
 turns, never an eight-message window), structured cited answers, supported
