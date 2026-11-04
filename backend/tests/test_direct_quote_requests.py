@@ -207,3 +207,24 @@ async def test_direct_email_reaches_both_ops_with_private_model_link_once(direct
     assert (await client.post('/api/v1/ai/quote-requests/direct', json=body)).status_code == 200
     assert await ops_email.send_ops_email(saved) == 'already_sent'
     assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_dense_direct_submission_pins_scope_and_retry_without_preparing_images(direct):
+    client, body, state, scheduled = direct
+    for room in state['publishedIndex']['rooms']:
+        room['providerFrames'] = [{'id': f'{room["key"]}-f{n}', 'captureArea': room['key'],
+                                  'cameraTransform': None} for n in range(30)]
+    body['roomKeys'] = ['room-2']
+    response = await client.post('/api/v1/ai/quote-requests/direct', json=body)
+    assert response.status_code == 201
+    saved = await QuoteRequestStore().get(response.json()['quoteRequestId'])
+    assert saved.scanMedia['version'] == 2
+    assert len(saved.scanMedia['photos']) == 30
+    assert all(p['roomKey'] == 'room-2' for p in saved.scanMedia['photos'])
+    assert saved.scanMedia['photosPrepared']
+    pinned = copy.deepcopy(saved.scanMedia)
+    state['publishedIndex']['rooms'][1]['providerFrames'].clear()
+    again = await client.post('/api/v1/ai/quote-requests/direct', json=body)
+    assert again.status_code == 200
+    assert (await QuoteRequestStore().get(saved.id)).scanMedia == pinned

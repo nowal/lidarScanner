@@ -511,7 +511,11 @@ def _send_smtp(to: str | list[str], subject: str, body: str, html: str | None = 
     with transport(settings.smtp_host, settings.smtp_port, timeout=20) as server:
         if settings.smtp_port != 465 and settings.smtp_starttls: server.starttls()
         server.login(settings.smtp_username, settings.smtp_password)
-        server.send_message(msg, to_addrs=recipients + copies)
+        refused = server.send_message(msg, to_addrs=recipients + copies)
+        if refused:
+            # SMTP may accept the ops copies while refusing the provider. That
+            # partial send is not a completed acceptance notification.
+            raise smtplib.SMTPRecipientsRefused(refused)
 
 
 def _write_outbox(record_id: str, to: str | list[str], subject: str, body: str, html: str | None = None,
@@ -548,13 +552,14 @@ async def send_ops_message(subject: str, body: str, html: str | None = None, *, 
 
 
 async def send_decision_email(record: Any, quote: Any) -> str:
-    """Tell operations what the homeowner decided about one quote.
+    """Tell the selected provider and operations about an accepted quote.
 
     Declining matters as much as approving: the comment that comes with it
     is the thing that lets operations go back to the provider or find
     another one. The address goes in only on an approval, because that is
     the release moment (SOW §12) and a decline releases nothing."""
     approved = quote.decision == "approved"
+    provider_email = getattr(quote, 'acceptanceNotificationProviderEmail', None) if approved else None
     price = _decision_price(quote)
     subject = (
         f"{'APPROVED' if approved else 'DECLINED'}: {quote.providerName}"
@@ -577,19 +582,21 @@ async def send_decision_email(record: Any, quote: Any) -> str:
         if contact:
             lines.extend([f"  Full name: {contact.fullName}", f"  Phone: {contact.phone}",
                           f"  Email: {contact.email}"])
-        lines.append(
-            "This is the address-release moment: the street address below goes to "
-            "this provider and to nobody else."
-        )
+        lines.append("Contact details for arranging this project:" if provider_email else
+                     "This is the address-release moment: the street address below goes to this provider and to nobody else.")
         lines.append(f"  Address: {contact.address if contact else record.address or 'not captured in the walk'}")
         lines.append("")
         if quote.approvalMethod == "callback":
             lines.append(f"  Callback phone: {quote.callbackPhone}")
-            lines.append("The homeowner chose a phone call. Share this number only with the selected provider and ask them to call.")
+            lines.append("The homeowner chose a phone call. Please call them to arrange the next steps." if provider_email else
+                         "The homeowner chose a phone call. Share this number only with the selected provider and ask them to call.")
         elif quote.approvalMethod == "signature":
             from .quote_approvals import document_link
-            lines.append("The homeowner signed the provider's PDF. Share the signed copy only with this provider.")
+            lines.append("The homeowner signed your quote. Open the signed PDF using the private link below." if provider_email else
+                         "The homeowner signed the provider's PDF. Share the signed copy only with this provider.")
             signed_link = document_link(record, quote)
+            if provider_email and not signed_link:
+                return 'failed'  # Retry when the private document link can be generated.
             if signed_link:
                 lines.append(f"  Signed quote PDF: {signed_link}")
                 lines.append("  Private signed-copy link expires in 30 days.")
@@ -610,36 +617,73 @@ async def send_decision_email(record: Any, quote: Any) -> str:
         # Acceptance copies do not change initial-email recipients or inbound command trust.
         extras = dict(cc=['noah@takeshapehome.com'],
                       idempotency_key=f'acceptance-{record.id}-{quote.id}-{quote.decidedAt}')
+        if provider_email:
+            extras['to'] = provider_email
+            extras['cc'] = recipient_list(recipient_list(settings.ops_email) + ['noah@takeshapehome.com'])
     return await send_ops_message(subject, "\n".join(lines), outbox_key=f"decision-{record.id}", **extras)
 
 
 _acceptance_locks: dict[str, asyncio.Lock] = {}
 
 
+async def send_homeowner_confirmation(record: Any, quote: Any) -> str:
+    contact = quote.approvalContact
+    if not contact:
+        return 'failed'
+    lines = [f"Thank you for accepting the quote with {quote.providerName}. They’ll get in touch with you shortly.", ""]
+    if quote.approvalMethod == 'signature':
+        from .quote_approvals import document_link
+        link = document_link(record, quote)
+        if not link:
+            return 'failed'
+        lines.extend([f"Your signed quote: {link}", "This private link expires 30 days after acceptance."])
+    else:
+        lines.extend(["Your callback details:", f"Name: {contact.fullName}",
+                      f"Phone: {contact.phone}", f"Email: {contact.email}", f"Address: {contact.address}"])
+    return await send_ops_message(f"Your quote with {quote.providerName} is accepted", "\n".join(lines),
+        to=contact.email, cc=[], outbox_key=f"homeowner-acceptance-{record.id}",
+        idempotency_key=f"homeowner-acceptance-{record.id}-{quote.id}-{quote.decidedAt}")
+
+
 async def deliver_acceptance(request_id: str, quote_id: str) -> str:
-    """Durable outbox receipt; retries reload consent and never repeat a saved send."""
+    """Each recipient has its own durable claim/receipt and idempotency key."""
     from ..flow_quotes import quote_store
-    from ..models import now_utc
+    from . import acceptances
+    from uuid import uuid4
     async with _acceptance_locks.setdefault(request_id, asyncio.Lock()):
         record = await quote_store.get(request_id)
         quote = record.quote_by_id(quote_id) if record else None
         if (not quote or record.selectedQuoteId != quote_id or quote.decision != 'approved'
                 or not quote.acceptanceNotificationQueuedAt):
             return 'cancelled'
-        if quote.acceptanceNotificationDeliveredAt:
-            return 'already_sent'
-        result = await send_decision_email(record, quote)
-        # Fetch again so email receipts cannot overwrite another quote/decision.
-        latest = await quote_store.get(request_id)
-        current = latest.quote_by_id(quote_id) if latest else None
-        if current and current.decidedAt == quote.decidedAt and current.decision == 'approved':
-            if result == 'sent':
-                current.acceptanceNotificationDeliveredAt = now_utc().isoformat()
-            elif result == 'outbox':
-                current.acceptanceNotificationCapturedAt = now_utc().isoformat()
-            if result in ('sent', 'outbox'):
-                await quote_store.save(latest, require_durable=True)
-        return result
+        # Upgrade old queued acceptances without inventing a homeowner recipient.
+        if not await acceptances.read(request_id):
+            if not quote.approvalContact or not quote.approvalMethod:
+                return 'cancelled'
+            record = await acceptances.commit(record, quote)
+            quote = record.quote_by_id(quote_id)
+        outcomes = []
+        for channel, queued, delivered, captured, send in (
+            ('provider', quote.acceptanceNotificationQueuedAt, quote.acceptanceNotificationDeliveredAt,
+             quote.acceptanceNotificationCapturedAt, send_decision_email),
+            ('homeowner', quote.homeownerConfirmationQueuedAt, quote.homeownerConfirmationDeliveredAt,
+             quote.homeownerConfirmationCapturedAt, send_homeowner_confirmation)):
+            if not queued or delivered or (captured and not settings.resend_api_key and not _smtp_configured()):
+                outcomes.append('already_sent')
+                continue
+            claim = str(uuid4())
+            if not await acceptances.delivery(request_id, channel, claim):
+                outcomes.append('already_sent')
+                continue
+            result = 'failed'
+            try:
+                result = await send(record, quote)
+            except Exception:
+                logger.warning('Acceptance %s delivery failed for %s', channel, request_id)
+            finally:
+                await acceptances.delivery(request_id, channel, claim, result)
+            outcomes.append(result)
+        return outcomes[0]
 
 
 async def retry_pending_acceptances() -> int:
@@ -647,9 +691,9 @@ async def retry_pending_acceptances() -> int:
     count = 0
     for record in await quote_store.list():
         quote = record.quote_by_id(record.selectedQuoteId) if record.selectedQuoteId else None
-        if (quote and quote.decision == 'approved' and quote.acceptanceNotificationQueuedAt
-                and not quote.acceptanceNotificationDeliveredAt
-                and (settings.resend_api_key or _smtp_configured() or not quote.acceptanceNotificationCapturedAt)):
+        pending_provider = quote and quote.acceptanceNotificationQueuedAt and not quote.acceptanceNotificationDeliveredAt and (settings.resend_api_key or _smtp_configured() or not quote.acceptanceNotificationCapturedAt)
+        pending_homeowner = quote and quote.homeownerConfirmationQueuedAt and not quote.homeownerConfirmationDeliveredAt and (settings.resend_api_key or _smtp_configured() or not quote.homeownerConfirmationCapturedAt)
+        if quote and quote.decision == 'approved' and (pending_provider or pending_homeowner):
             try:
                 await deliver_acceptance(record.id, quote.id)
                 count += 1
@@ -687,6 +731,7 @@ def _decision_price(quote: Any) -> str:
 # A queue drained by a worker owned by application startup has no such tie.
 # --------------------------------------------------------------------------
 _queue: "asyncio.Queue[Any] | None" = None
+OPS_EMAIL_RETRY_SECONDS = 60
 
 
 def queue_ops_email(record: Any) -> bool:
@@ -746,7 +791,15 @@ async def run_ops_email_worker() -> None:
     logger.info("Ops lead-email worker running")
     await requeue_undelivered()
     while True:
-        record = await _queue.get()
+        try:
+            record = await asyncio.wait_for(_queue.get(), timeout=OPS_EMAIL_RETRY_SECONDS)
+        except asyncio.TimeoutError:
+            # The durable queue is the source of truth. Retry failed deliveries
+            # while running, not only after the next process restart. Sweeping
+            # an idle queue also avoids multiplying queued copies during a slow
+            # provider-research/delivery pass.
+            await requeue_undelivered()
+            continue
         try:
             result = await send_ops_email(record)
             logger.info("Ops lead email for %s: %s", record.id, result)

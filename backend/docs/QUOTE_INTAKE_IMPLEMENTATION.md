@@ -1,5 +1,9 @@
 # Quote intake implementation and rollout
 
+For the October 27 consultation/photo integration and current release gates,
+see [Quintin integration](QUINTIN_INTEGRATION.md). The records below describe
+the original October 19 implementation and its historical validation.
+
 Implemented October 19, 2026 in `takeshape-backend-staged-upload` and the active
 `takeshape-mobile` checkout. The legacy home-guide routes, prompts, schema,
 rubrics, conversation state and global provider selection remain independent.

@@ -107,10 +107,11 @@ async def ingest(home_id: str, bucket: str, object_path: str, revision: str,
     pulse = asyncio.create_task(heartbeat())
     work = Path(tempfile.mkdtemp(prefix='scan-context-'))
     try:
+        from .context_archive import MAX_DOWNLOAD_BYTES
         archive = work / 'context.zip'
-        if not await supabase_store.download_object(bucket, object_path, archive):
+        if not await supabase_store.download_object(bucket, object_path, archive, max_bytes=MAX_DOWNLOAD_BYTES):
             raise RuntimeError('The saved context package could not be downloaded.')
-        bundle = await asyncio.to_thread(home_registry.unpack_export, archive, work)
+        bundle = await asyncio.to_thread(home_registry.unpack_export, archive, work, context_limits=True)
         index = await asyncio.to_thread(load_bundle, bundle)
         if not index.rooms:
             raise ValueError('The scan export has no saved rooms')

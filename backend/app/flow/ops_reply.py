@@ -421,6 +421,7 @@ async def process_reply(reply: OpsReply) -> str:
             # A correction keeps paperwork already on file unless this
             # reply brings new paperwork of its own.
             quote.document = existing.document
+            quote.providerEmail = existing.providerEmail
             record.quotes[record.quotes.index(existing)] = quote
         else:
             record.quotes.append(quote)

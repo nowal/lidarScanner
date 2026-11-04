@@ -112,11 +112,28 @@ class ApprovalContact(BaseModel):
             raise ValueError('Enter your full name')
         if not 7 <= len(re.sub(r'\D', '', self.phone)) <= 15 or not re.fullmatch(r'\+?[0-9(). \-]+', self.phone):
             raise ValueError('Enter a valid phone number')
-        if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', self.email):
+        self.email = normalize_provider_email(self.email)
+        if not self.email:
             raise ValueError('Enter a valid email')
         if not re.search(r'\b[0-9]{5}(?:-[0-9]{4})?\b', self.address) or not any(c.isalpha() for c in self.address):
             raise ValueError('Enter your full street address, city, state and ZIP')
         return self
+
+
+def normalize_provider_email(value: str | None) -> str | None:
+    """One explicit mailbox, never a display name, recipient list, or guessed match."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or any(c in value for c in '\r\n'):
+        raise ValueError('Enter one valid business email address')
+    value = value.strip()
+    pattern = r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+"
+    local = value.split('@', 1)[0]
+    if (len(value) > 254 or len(local) > 64 or local.startswith('.') or local.endswith('.')
+            or '..' in local or not re.fullmatch(pattern, value)):
+        raise ValueError('Enter one valid business email address')
+    local, domain = value.rsplit('@', 1)
+    return local + '@' + domain.lower()
 
 
 class ReturnedQuote(BaseModel):
@@ -124,6 +141,7 @@ class ReturnedQuote(BaseModel):
     providerName: str = Field(max_length=200)
     earliestAvailableDate: Optional[date] = None
     providerId: Optional[str] = None
+    providerEmail: Optional[str] = Field(default=None, max_length=254)
     priceUsd: Optional[float] = None
     priceLowUsd: Optional[float] = None
     priceHighUsd: Optional[float] = None
@@ -150,6 +168,17 @@ class ReturnedQuote(BaseModel):
     acceptanceNotificationQueuedAt: Optional[str] = None
     acceptanceNotificationDeliveredAt: Optional[str] = None
     acceptanceNotificationCapturedAt: Optional[str] = None
+    homeownerConfirmationQueuedAt: Optional[str] = None
+    homeownerConfirmationDeliveredAt: Optional[str] = None
+    homeownerConfirmationCapturedAt: Optional[str] = None
+    # Freeze the destination with the homeowner's approval. Later contact edits
+    # must not redirect an already queued private acceptance email.
+    acceptanceNotificationProviderEmail: Optional[str] = Field(default=None, max_length=254)
+
+    @field_validator('providerEmail', 'acceptanceNotificationProviderEmail', mode='before')
+    @classmethod
+    def _provider_email(cls, value):
+        return normalize_provider_email(value)
 
     @model_validator(mode="after")
     def _sane_prices(self) -> "ReturnedQuote":
@@ -243,12 +272,20 @@ class QuoteRequestRecord(BaseModel):
             "status": self.status,
             "expectations": EXPECTATIONS,
             "serviceType": self.serviceType,
-            "quotes": [q.homeowner_view() for q in self.quotes],
+            "quotes": [q.homeowner_view() for q in self.quotes if not self.accepted or q.id == self.selectedQuoteId],
+            "accepted": self.accepted,
+            "homeId": self.homeId,
             # The homeowner's own choice: without it the app could not show
             # which quote was picked after a relaunch, nor the agent know the
             # address was already released (Sep 15 audit).
             "selectedQuoteId": self.selectedQuoteId,
         }
+
+    @property
+    def accepted(self) -> bool:
+        quote = self.quote_by_id(self.selectedQuoteId) if self.selectedQuoteId else None
+        return bool(quote and quote.decision == 'approved' and quote.approvalMethod
+                    and quote.approvalContact)
 
     def quote_by_id(self, quote_id: str) -> Optional["ReturnedQuote"]:
         return next((q for q in self.quotes if q.id == quote_id), None)
@@ -407,6 +444,8 @@ class QuoteRequestStore:
         return await self._with_provider_responses(record) if record and include_provider_responses else record
 
     async def _with_provider_responses(self, record: QuoteRequestRecord) -> QuoteRequestRecord:
+        from .flow import acceptances
+        record = acceptances.apply(record, await acceptances.read(record.id))
         from .flow.provider_responses import responses
         # Independent immutable rows survive stale saves of the parent request.
         # A decision saved on the parent takes precedence for that quote ID.

@@ -29,6 +29,13 @@ def _local_read(identifier):
 
 def _local_cas(row, previous):
     with _db() as connection:
+        receipt = (row['state'].get('receipt') or {}).get('quoteRequestId')
+        if receipt and connection.execute("SELECT 1 FROM intakes WHERE id<>? AND json_extract(state,'$.receipt.quoteRequestId')=?",(row['id'],receipt)).fetchone():
+            raise HTTPException(409, 'This request belongs to another conversation')
+        existing = connection.execute('SELECT state FROM intakes WHERE id=?',(row['id'],)).fetchone()
+        old_receipt = (json.loads(existing[0]).get('receipt') or {}).get('quoteRequestId') if existing else None
+        if old_receipt and receipt != old_receipt:
+            raise HTTPException(409, 'The saved request receipt is immutable')
         if previous is None:
             cursor = connection.execute('INSERT OR IGNORE INTO intakes VALUES(?,?,?,?,?)',
                 (row['id'], row['owner_id'], row['home_id'], row['version'], json.dumps(row['state'])))
@@ -55,6 +62,11 @@ async def read(identifier: str, owner: str, home: str):
 
 
 async def save(identifier: str, owner: str, home: str, state: dict, previous: int | None) -> int:
+    if not supabase_store.enabled() and (state.get('receipt') or {}).get('quoteRequestId'):
+        from ..flow_quotes import quote_store
+        record = await quote_store.get(state['receipt']['quoteRequestId'])
+        if not record or record.homeownerId != owner or record.homeId != home:
+            raise HTTPException(409, 'Intake receipt does not belong to this homeowner and home')
     version = 0 if previous is None else previous + 1
     row = dict(id=identifier, owner_id=owner, home_id=home, version=version, state=state)
     try:
@@ -71,6 +83,8 @@ async def save(identifier: str, owner: str, home: str, state: dict, previous: in
             changed = bool(response.json())
         else:
             changed = await asyncio.to_thread(_local_cas, row, previous)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(503, 'Could not save this intake. Retry the same turn.') from exc
     if not changed:

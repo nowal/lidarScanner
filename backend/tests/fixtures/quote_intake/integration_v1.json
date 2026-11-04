@@ -1,0 +1,79 @@
+{
+  "version": "quote-intake-integration-v1",
+  "cases": [
+    {
+      "id": "complete_painting",
+      "turns": [
+        "Please repaint just the guest bedroom walls, a full repaint. Leave the ceiling and trim alone. I would like the painter to recommend a finish. Project ZIP 01234."
+      ],
+      "maxClarifications": 0,
+      "expectedReady": true,
+      "expectedZip": "01234",
+      "expectedService": "Painting"
+    },
+    {
+      "id": "consultation_then_zip",
+      "persona": {
+        "opening": "I want the living room painted, but I don't know whether the walls or ceiling should be included. Please have someone help me work that out.",
+        "projectZip": "01234",
+        "maxTurns": 5,
+        "answersByField": {
+          "included_surfaces": "I'm not sure which surfaces should be painted; I need someone to help me decide.",
+          "extent": "I need the painter to help decide whether a full repaint or touch ups would make sense.",
+          "finish_preference": "Please have the painter recommend a finish."
+        }
+      },
+      "maxClarifications": 3,
+      "expectedReady": false,
+      "expectedZip": "01234",
+      "expectedService": "Painting",
+      "expectedAction": "consultation_required"
+    },
+    {
+      "id": "window_cleaning_clarifies_specialty_scope",
+      "maxClarifications": 3,
+      "expectedReady": true,
+      "expectedZip": "37129",
+      "expectedService": "Window Cleaning",
+      "persona": {
+        "opening": "Clean all the windows inside and outside, including screens and tracks. The home ZIP is 37129.",
+        "projectZip": "37129",
+        "maxTurns": 5,
+        "answersByField": {
+          "window_type_details": "All standard windows, no storm windows, French panes, skylights, or specialty glass.",
+          "cleaning_condition": "Routine cleaning, with no hard-water stains, paint, adhesive, or construction debris.",
+          "interior_access": "All the interior glass is accessible from the floor; no lofted windows."
+        }
+      }
+    },
+    {
+      "id": "landscaping_routing",
+      "maxClarifications": 4,
+      "expectedReady": false,
+      "expectedZip": "01234",
+      "expectedService": "Landscaping",
+      "expectedAction": "consultation_required",
+      "persona": {
+        "opening": "I need help redesigning the entire backyard, but I don't know what changes to make. Please help me figure out a plan. Project ZIP 01234.",
+        "projectZip": "01234",
+        "maxTurns": 6,
+        "answersByField": {
+          "existing_landscape_scope": "Please have the provider recommend what existing plants or materials should be removed.",
+          "ongoing_maintenance": "I want a low-maintenance result. I do not need ongoing maintenance included.",
+          "landscape_materials_and_features": "Please recommend materials and plants; preserve the existing oak tree.",
+          "landscape_site_and_timing": "I'm not sure about the site conditions or irrigation. Timing is flexible.",
+          "design_preferences": "I would like the provider to recommend a design."
+        }
+      }
+    },
+    {
+      "id": "pause_with_scope",
+      "turns": [
+        "Pause this request. I am only considering repainting my bedroom walls and do not want you to submit or contact anyone. ZIP 01234."
+      ],
+      "maxClarifications": 0,
+      "expectedReady": false,
+      "expectedPaused": true
+    }
+  ]
+}

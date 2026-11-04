@@ -185,6 +185,7 @@ async def test_entry_page_and_quote_submission_flow():
                 "exp": exp,
                 "sig": sig,
                 "providerName": "Summit Painting",
+                "providerEmail": "quotes@summit.example",
                 "priceUsd": 1850,
                 "notes": "Walls and trim, two coats.",
             },
@@ -222,6 +223,7 @@ async def test_entry_page_and_quote_submission_flow():
         ("Harpeth Painting", 2400),
     ]
     assert updated.quotes[0].id == first_id
+    assert updated.quotes[0].providerEmail == 'quotes@summit.example'
 
 
 @pytest.mark.asyncio

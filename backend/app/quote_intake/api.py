@@ -10,14 +10,14 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 import anthropic
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from PIL import Image, ImageOps
 
 from ..config import settings
 from ..flow_api import require_token, _scan_upload_owner, DirectQuoteSubmission, submit_direct_quote_request
 from ..flow import quote_media, supabase_store
-from . import conversation, engine, store
-from .schema import TurnRequest, SubmitRequest
+from . import conversation, engine, store, lifecycle, threads
+from .schema import TurnRequest, SubmitRequest, CycleRequest, ThreadRequest
 
 router = APIRouter(prefix=settings.api_prefix + '/ai/quote-intake', dependencies=[Depends(require_token)])
 
@@ -28,10 +28,11 @@ def view(identifier, home, state):
         messages=[{k: t[k] for k in ('id', 'role', 'text', 'attachments') if k in t} for t in state['transcript']],
         result=state['result'], projectZip=state['projectZip'], ready=state.get('ready', False),
         consultationReady=state.get('consultationReady', False),
-        paused=state['paused'], submissionPending=state['pendingSubmission'] is not None,
+        paused=state['paused'], submissionPending=state['pendingSubmission'] is not None or bool(state.get('legacySubmissionId') and not state['receipt']),
         receipt=state['receipt'], pendingTurn=state['pendingTurn'], pendingTurnId=(state['pendingTurn'] or {}).get('clientTurnId'),
         processing=retry_after > 0, retryAfterSeconds=retry_after,
-        promptVersion=state['promptVersion'], rubricVersion=state['rubric']['rubric_version'])
+        promptVersion=state['promptVersion'], rubricVersion=state['rubric']['rubric_version'],
+        threadVersion=state.get('threadVersion'))
 
 
 def unlocked(state):
@@ -54,6 +55,9 @@ async def store_supplemental_photos(attachments, owner: str, home: str, conversa
             if not raw or len(raw) > 6_000_000:
                 raise ValueError
             with Image.open(io.BytesIO(raw)) as source:
+                if (source.format not in ('JPEG', 'PNG', 'HEIF') or source.width < 16
+                        or source.height < 16 or source.width * source.height > 40_000_000):
+                    raise ValueError
                 source.verify()
             with Image.open(io.BytesIO(raw)) as source:
                 image = ImageOps.exif_transpose(source).convert('RGB')
@@ -65,7 +69,7 @@ async def store_supplemental_photos(attachments, owner: str, home: str, conversa
                 canvas = Image.new('RGB', (360, 270), '#edf0f3')
                 canvas.paste(image, ((360-image.width)//2, (270-image.height)//2))
                 thumb = io.BytesIO(); canvas.save(thumb, format='JPEG', quality=82)
-        except (ValueError, OSError, base64.binascii.Error):
+        except (ValueError, OSError, base64.binascii.Error, Image.DecompressionBombError):
             raise HTTPException(422, f'{attachment.fileName} is not a valid supported photo')
         digest = hashlib.sha256(full.getvalue()).hexdigest()
         root = f'{owner}/{home}/quote-intake/{conversation}'
@@ -81,6 +85,55 @@ async def store_supplemental_photos(attachments, owner: str, home: str, conversa
     return refs
 
 
+@router.post('/active')
+async def active_intake(body: CycleRequest, x_homeowner_token: str | None = Header(default=None)):
+    home = str(body.homeId)
+    owner = await _scan_upload_owner(home, x_homeowner_token)
+    if body.previousConversationId or body.quoteRequestId:
+        raise HTTPException(422, 'Use the new-chat transition for a previous request')
+    row = await lifecycle.cycle(owner, home, str(body.conversationId), legacy=body.legacyRequestId, legacy_submission=str(body.legacySubmissionId) if body.legacySubmissionId else None)
+    return view(row['id'], home, row['state'])
+
+
+@router.post('/start-next')
+async def start_next(body: CycleRequest, x_homeowner_token: str | None = Header(default=None)):
+    home = str(body.homeId)
+    owner = await _scan_upload_owner(home, x_homeowner_token)
+    if not body.previousConversationId or not body.quoteRequestId or body.legacyRequestId or body.legacySubmissionId:
+        raise HTTPException(422, 'Supply the current conversation and accepted request')
+    row = await lifecycle.cycle(owner, home, str(body.conversationId),
+        previous=str(body.previousConversationId), request=body.quoteRequestId)
+    return view(row['id'], home, row['state'])
+
+
+@router.get('/threads')
+async def list_threads(offset: int = Query(default=0,ge=0), x_homeowner_token: str | None = Header(default=None)):
+    from .. import flow_api
+    sub = await flow_api.homeowner_id_from_header(x_homeowner_token)
+    if not sub:
+        raise HTTPException(401, 'A verified homeowner session is required')
+    profile = await supabase_store.resolve_homeowner(sub)
+    if not profile or not profile.get('id'):
+        raise HTTPException(403, 'No homeowner profile for this session')
+    return await threads.list_threads(str(profile['id']).lower(),offset)
+
+
+@router.post('/threads/new')
+async def new_thread(body: ThreadRequest, x_homeowner_token: str | None = Header(default=None)):
+    home = str(body.homeId)
+    owner = await _scan_upload_owner(home,x_homeowner_token)
+    row = await threads.select(owner,home,str(body.conversationId),create=True)
+    return view(row['id'],home,row['state'])
+
+
+@router.post('/threads/select')
+async def select_thread(body: ThreadRequest, x_homeowner_token: str | None = Header(default=None)):
+    home = str(body.homeId)
+    owner = await _scan_upload_owner(home,x_homeowner_token)
+    row = await threads.select(owner,home,str(body.conversationId))
+    return view(row['id'],home,row['state'])
+
+
 @router.get('/{conversation_id}')
 async def get_intake(conversation_id: UUID, homeId: UUID, x_homeowner_token: str | None = Header(default=None)):
     home = str(homeId)
@@ -93,21 +146,21 @@ async def get_intake(conversation_id: UUID, homeId: UUID, x_homeowner_token: str
 async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default=None)):
     identifier, home = str(body.conversationId), str(body.homeId)
     owner = await _scan_upload_owner(home, x_homeowner_token)
+    # A saved thread remains independently editable when another device opens
+    # a different thread. Only first-time legacy IDs use the old active restore.
     row = await store.read(identifier, owner, home)
     if row is None:
-        if body.expectedRevision != 0:
-            raise HTTPException(409, 'Unknown intake revision')
-        try:
-            state = engine.initial_state()
-        except (ValueError, OSError) as exc:
-            raise HTTPException(503, 'Quote intake configuration is invalid. Please retry later.') from exc
-        version = None
-    else:
-        state, version = copy.deepcopy(row['state']), row['version']
-    request = body.model_dump(mode='json')
-    request['attachments'] = [dict(id=str(a.id), fileName=a.fileName, mimeType=a.mimeType,
-                                   sha256=hashlib.sha256(a.dataBase64.encode()).hexdigest())
-                              for a in body.attachments]
+        row = await lifecycle.require_active(owner, home, identifier)
+    state, version = copy.deepcopy(row['state']), row['version']
+    # Omit empty attachments to preserve identities from the deployed text-only
+    # API. Saved fingerprints can recover already accepted photo turns without
+    # storing or returning multi-megabyte base64 payloads in conversation JSON.
+    request = body.model_dump(mode='json', exclude={'attachments'})
+    if body.attachments:
+        request['attachments'] = [dict(id=str(a.id), fileName=a.fileName, mimeType=a.mimeType,
+                                       sha256=hashlib.sha256(a.dataBase64.encode()).hexdigest()
+                                       if a.dataBase64 is not None else a.sha256)
+                                  for a in body.attachments]
     turn_id = str(body.clientTurnId)
     if turn_id in state['completed']:
         if state['completed'][turn_id]['request'] != request:
@@ -115,7 +168,7 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
         # Latest state avoids rolling a client back if an old retry arrives late.
         return view(identifier, home, state)
     unlocked(state)
-    if state['receipt'] or state['pendingSubmission']:
+    if state['receipt'] or state['pendingSubmission'] or state.get('legacySubmissionId'):
         raise HTTPException(409, 'This request is already being sent. Recover its receipt before starting a new request.')
     if body.expectedRevision != state['revision']:
         raise HTTPException(409, 'Intake revision changed. Reload the conversation.')
@@ -126,17 +179,25 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
     if state['pendingTurn'] is None:
         if len(state['transcript']) >= 200:
             raise HTTPException(422, 'This conversation is full. Start another request.')
-        refs = await store_supplemental_photos(body.attachments, owner, home, identifier) if body.attachments else []
+        if any(a.dataBase64 is None for a in body.attachments):
+            raise HTTPException(422, 'New photos require image bytes, not saved references.')
+        ids = [str(a.id) for a in body.attachments]
         known = {photo['id']: photo for photo in state.get('supplementalPhotos', [])}
+        if len(set(ids)) != len(ids) or set(ids) & known.keys():
+            raise HTTPException(422, 'Each new photo must have a new attachment identity.')
+        if len(known) + len(ids) > 12:
+            raise HTTPException(422, 'A request supports up to twelve supplemental photos.')
+        refs = await store_supplemental_photos(body.attachments, owner, home, identifier) if body.attachments else []
         known.update({photo['id']: photo for photo in refs})
         state['supplementalPhotos'] = list(known.values())
+        state['readyBeforePendingTurn'] = state.get('ready', False)
         state['pendingTurn'] = request
         state['transcript'].append(dict(id=turn_id, role='homeowner', text=body.text,
             receivedAt=datetime.now(timezone.utc).isoformat(), timeZone=body.timeZone,
             attachments=[{k: photo[k] for k in ('id','fileName','mimeType','byteCount')} for photo in refs]))
     state['ready'] = False
-    state['leaseUntil'] = (time.time() + conversation.MAX_GENERATION_ATTEMPTS
-                           * settings.anthropic_request_timeout_seconds + 30)
+    state['consultationReady'] = False
+    state['leaseUntil'] = time.time() + conversation.MAX_GENERATION_ATTEMPTS * settings.anthropic_request_timeout_seconds + 30
     version = await store.save(identifier, owner, home, state, version)
     try:
         state = await conversation.generate_turn(state, body.timeZone)
@@ -144,6 +205,7 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
         state['transcript'].append(dict(id=turn_id + '-reply', role='assistant', text=state['result']['displayText']))
         state['completed'][turn_id] = {'request': request}
         state['pendingTurn'] = None
+        state.pop('readyBeforePendingTurn', None)
         state['leaseUntil'] = 0
         await store.save(identifier, owner, home, state, version)
         return view(identifier, home, state)

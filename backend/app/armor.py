@@ -182,7 +182,10 @@ class MaxBodyMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         declared = request.headers.get("content-length")
-        if declared and declared.isdigit() and int(declared) > settings.max_request_bytes:
+        limit = (settings.quote_intake_max_request_bytes
+                 if request.url.path == settings.api_prefix + '/ai/quote-intake/turn'
+                 else settings.max_request_bytes)
+        if declared and declared.isdigit() and int(declared) > limit:
             logger.warning("Body of %s bytes refused on %s", declared, request.url.path)
             return JSONResponse(status_code=413, content={"detail": "Request body too large"})
         return await call_next(request)

@@ -23,6 +23,15 @@ PRESENCE_CLOCK = "2026-09-15T12:00:00+00:00"
 
 
 @pytest.fixture(autouse=True)
+def isolated_rate_limits(monkeypatch):
+    # ASGI clients share the same test IP. Keep each test's request budget
+    # independent without disabling the limiter (including its own tests).
+    from app import armor
+    monkeypatch.setattr(armor, '_address_window', armor.SlidingWindow())
+    monkeypatch.setattr(armor, '_identity_window', armor.SlidingWindow())
+
+
+@pytest.fixture(autouse=True)
 def no_live_services(monkeypatch):
     # Inbound auth is env-dependent too: a developer .env with
     # LIDARAI_AUTH_TOKEN set made 18 tests 401 while CI (no .env) was green.
