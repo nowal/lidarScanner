@@ -420,19 +420,19 @@ def build_ops_email_html(
         project += row("Materials", ", ".join(record.materials))
     facts = "".join(f'<li style="margin:4px 0">{e(fact)}</li>' for fact in _scan_facts(record))
     media_url = media_link(record)
-    viewer = (f'<a href="{e(media_url)}" style="display:inline-block;background:#2E7D53;color:#FFFFFF;'
+    viewer = (f'<a href="{e(media_url)}" style="display:inline-block;background:#980612;color:#FFFFFF;'
               'border-radius:8px;padding:12px 18px;font-size:14px;font-weight:600;text-decoration:none">'
               'Open scan gallery &amp; 3D viewer</a>'
               '<p style="font-size:12px;color:#8794A0;margin:12px 0 0">Private link expires in 30 days.</p>') if media_url else ""
-    return f"""<!doctype html><html><body style="margin:0;padding:0;background:#F2F4F6">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F2F4F6;padding:28px 12px"><tr><td align="center">
+    return f"""<!doctype html><html><body style="margin:0;padding:0;background:#F5EFE4">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5EFE4;padding:28px 12px"><tr><td align="center">
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#FFFFFF;border-radius:14px;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-system,sans-serif">
-<tr><td style="padding:22px 28px;border-bottom:1px solid #EDF0F3"><span style="font-size:17px;font-weight:700;color:#17212B">TakeShape</span></td></tr>
+<tr><td style="padding:22px 28px;border-bottom:1px solid #EADFD4"><span style="font-size:17px;font-weight:700;color:#980612">TakeShape</span></td></tr>
 <tr><td style="padding:24px 28px 8px"><div style="font-size:21px;font-weight:700;color:#17212B;margin-bottom:6px">{e(record.serviceType or "Home project")} in {e(record.zip or "—")}</div>
 <div style="font-size:13px;color:#5A6772">{(e(request_kind) + " · ") if request_kind else ""}Submitted {e(str(record.createdAt)[:16].replace("T", " at "))}</div></td></tr>
-<tr><td style="padding:14px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:6px">Homeowner</div><table role="presentation" cellpadding="0" cellspacing="0">{homeowner}</table></td></tr>
-<tr><td style="padding:18px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#2E7D53;margin-bottom:6px">Project</div><table role="presentation" cellpadding="0" cellspacing="0">{project}</table>
-<div style="margin-top:12px;padding:14px;background:#F7F9FA;border-radius:8px;color:#3D4852;font-size:13.5px;line-height:1.55;white-space:pre-line">{e(record.synopsis)}</div>
+<tr><td style="padding:14px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#980612;margin-bottom:6px">Homeowner</div><table role="presentation" cellpadding="0" cellspacing="0">{homeowner}</table></td></tr>
+<tr><td style="padding:18px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#980612;margin-bottom:6px">Project</div><table role="presentation" cellpadding="0" cellspacing="0">{project}</table>
+<div style="margin-top:12px;padding:14px;background:#FBF7F0;border:1px solid #EADFD4;border-radius:8px;color:#3D4852;font-size:13.5px;line-height:1.55;white-space:pre-line">{e(record.synopsis)}</div>
 <div style="margin-top:18px;color:#17212B;font-size:14px;font-weight:600">From the scan</div><ul style="padding-left:18px;color:#5A6772;font-size:13px;line-height:1.5">{facts}</ul></td></tr>
 <tr><td style="padding:18px 28px 28px">{viewer}</td></tr></table></td></tr></table></body></html>"""
 

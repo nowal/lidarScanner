@@ -1071,23 +1071,24 @@ async def ops_entry_page(request_id: str, exp: int = 0, sig: str = "") -> HTMLRe
 <meta name="robots" content="noindex">
 <title>Quote entry — {e(record.id)}</title>
 <style>
-  body {{ font-family: 'Segoe UI', system-ui, sans-serif; background:#0F151C; color:#E9EEF3;
+  body {{ font-family: 'Segoe UI', system-ui, sans-serif; background:#F5EFE4; color:#17212B;
          margin:0; padding:24px; display:flex; justify-content:center; }}
   main {{ max-width:640px; width:100%; }}
-  h1 {{ font-size:20px; }} h2 {{ font-size:15px; margin:22px 0 8px; color:#8FC4A2; }}
+  h1 {{ font-size:20px; }} h2 {{ font-size:15px; margin:22px 0 8px; color:#980612; }}
   table {{ border-collapse:collapse; width:100%; font-size:14px; }}
-  th {{ text-align:left; color:#97A5B2; font-weight:600; padding:4px 12px 4px 0; white-space:nowrap; vertical-align:top; }}
+  th {{ text-align:left; color:#6F665F; font-weight:600; padding:4px 12px 4px 0; white-space:nowrap; vertical-align:top; }}
   td {{ padding:4px 0; }}
-  .syn {{ font-size:14px; color:#C6D0DA; background:#171F29; border-radius:10px; padding:12px 14px; }}
-  label {{ display:block; font-size:13px; color:#97A5B2; margin:12px 0 4px; }}
-  input, textarea {{ width:100%; box-sizing:border-box; background:#171F29; color:#E9EEF3;
-    border:1px solid #2A3642; border-radius:8px; padding:9px 11px; font-size:14px; }}
+  .syn {{ font-size:14px; color:#3D4852; background:#FFFDFA; border:1px solid #EADFD4; border-radius:10px; padding:12px 14px; }}
+  label {{ display:block; font-size:13px; color:#6F665F; margin:12px 0 4px; }}
+  input, textarea {{ width:100%; box-sizing:border-box; background:#FFFDFA; color:#17212B;
+    border:1px solid #DED2C5; border-radius:8px; padding:9px 11px; font-size:14px; }}
+  input:focus-visible, textarea:focus-visible, button:focus-visible {{ outline:3px solid #C97A84; outline-offset:2px; }}
   .pair {{ display:flex; gap:10px; }} .pair > div {{ flex:1; }}
-  button {{ margin-top:18px; background:#8FC4A2; color:#0F151C; font-weight:700; border:none;
+  button {{ margin-top:18px; background:#980612; color:#FFFFFF; font-weight:700; border:none;
     border-radius:9px; padding:11px 22px; font-size:15px; cursor:pointer; }}
-  .muted {{ color:#97A5B2; font-size:13px; }}
+  .muted {{ color:#6F665F; font-size:13px; }}
   #msg {{ margin-top:14px; font-size:14px; }}
-  #msg.ok {{ color:#8FC4A2; }} #msg.err {{ color:#E58C8C; }}
+  #msg.ok {{ color:#453B33; }} #msg.err {{ color:#980612; }}
 </style></head><body><main>
 <h1>Enter the checked quote</h1>
 <p class="muted">Request {e(record.id)} · what you enter here is what the homeowner sees in the app.</p>
