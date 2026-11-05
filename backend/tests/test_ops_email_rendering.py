@@ -159,8 +159,8 @@ async def test_the_composition_path_never_includes_the_address(monkeypatch, tmp_
     captured = json.loads((tmp_path / "ops_outbox" / "qr_sample_urban.json").read_text(encoding="utf-8"))
     for part in (captured["body"], captured["html"], captured["subject"]):
         assert ADDRESS not in part and "Withheld Street" not in part
-    assert "withheld until homeowner selects a quote" in captured["body"]
-    assert "Withheld until homeowner selects a quote" in captured["html"]
+    assert "withheld until the homeowner selects a quote" in captured["body"]
+    assert "withheld until the homeowner selects a quote" in captured["html"]
     assert "dana@example.com" not in captured["body"]
     assert "Ranked by review and social presence" not in captured["body"]
 

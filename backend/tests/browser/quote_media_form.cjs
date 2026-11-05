@@ -29,6 +29,9 @@ assert.equal(new URL(url).hostname, '127.0.0.1');
       assert.ok(!content.includes(gone), gone);
     }
     assert.match(content, /Link expires/);
+    assert.match(content, /Ceiling smoothing \+ Door repair/);
+    assert.equal(await page.locator('#project-brief').isVisible(), true);
+    assert.equal(await page.locator('.scope-card').count(), 2);
     assert.equal(await page.locator('#quote-date').count(), 0);
     assert.equal(await page.locator('#quote-price, #photo-picker, #open-photo, #directions').count(), 0);
     assert.match(content, /up to 25 MB/);

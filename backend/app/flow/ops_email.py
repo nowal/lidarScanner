@@ -355,34 +355,28 @@ def build_ops_email(
     ranked: list[dict] | None = None,
 ) -> tuple[str, str]:
     """The provider-facing lead, with the same content in both MIME parts."""
-    from ..flow_quotes import scope_label
     from .quote_media import link as media_link
+    from .provider_brief import build as provider_brief
 
-    service = record.serviceType or "Home project"
-    intake = (getattr(record, "quoteDraft", None) or {}).get("intake") or {}
-    consultation = intake.get("handoffType") == "consultation_request"
-    request_kind = "consultation request" if consultation else "quote request"
+    brief = provider_brief(record, _scan_facts(record))
+    request_kind = brief['requestKind'].lower()
     where = record.zip or "zip unknown"
-    title = f"{service} in {where}"
+    title = f"{brief['title']} in {where}"
     lines = ["TakeShape", title]
-    if consultation:
-        lines.append("Request type: Consultation Request")
-    lines.extend([f"Submitted {record.createdAt}", "", "HOMEOWNER",
-             f"  Name: {record.firstName or '—'}", f"  ZIP code: {record.zip or '—'}",
-             "  Address and contact details: withheld until homeowner selects a quote.",
-             "", "PROJECT", f"  Scope of work: {scope_label(record)}"])
-    if getattr(record, "roomName", None):
-        lines.append(f"  Room: {record.roomName}")
-    if record.scopeOptions:
-        lines.append("  Scope: " + "; ".join(record.scopeOptions))
-    if record.materials:
-        lines.append("  Materials: " + ", ".join(record.materials))
-    lines.extend(["", record.synopsis, "", "FROM THE SCAN"])
-    lines.extend("  " + fact for fact in _scan_facts(record))
+    lines.extend([f"{brief['requestKind']} · Submitted {record.createdAt}", "", "WHAT THE HOMEOWNER NEEDS",
+                  brief['summary']])
+    for n, item in enumerate(brief['items'], 1):
+        lines.extend(["", f"{n}. {item['title']}", f"  {item['summary']}"])
+        lines.extend(f"  {detail['label']}: {detail['value']}" for detail in item['details'])
+    lines.extend(["", "PLEASE CONFIRM", f"  {brief['confirmationPrompt']}"])
+    lines.extend(f"  {detail['label']}: {detail['value']}" for detail in brief['confirmations'])
+    if brief['scanFacts']:
+        lines.extend(["", "SCAN SNAPSHOT"])
+        lines.extend("  " + fact for fact in brief['scanFacts'])
+    lines.extend(["", "Address and contact details are withheld until the homeowner selects a quote."])
     media_url = media_link(record)
     if media_url:
-        lines.extend(["", "Open scan gallery & 3D viewer", media_url,
-                      "Private link expires in 30 days."])
+        lines.extend(["", "Review scan and submit quote", media_url, "Private link expires in 30 days."])
     return f"New {request_kind}: {title}", "\n".join(lines)
 
 
@@ -399,42 +393,32 @@ def build_ops_email_html(
     ranked: list[dict] | None = None,
 ) -> str:
     """Compact, email-client-safe provider brief. No external logo or previews."""
-    from ..flow_quotes import scope_label
     from .quote_media import link as media_link
+    from .provider_brief import build as provider_brief
     e = _esc
-
-    def row(label: str, value: Any) -> str:
-        return (f'<tr><td style="padding:4px 14px 4px 0;color:#5A6772;font-size:13px;vertical-align:top">{e(label)}</td>'
-                f'<td style="padding:4px 0;color:#17212B;font-size:14px">{e(value)}</td></tr>')
-
-    intake = (getattr(record, "quoteDraft", None) or {}).get("intake") or {}
-    request_kind = "Consultation request" if intake.get("handoffType") == "consultation_request" else None
-    homeowner = row("Name", record.firstName) + row("ZIP code", record.zip)
-    homeowner += row("Address & contact", "Withheld until homeowner selects a quote")
-    project = row("Scope of work", scope_label(record))
-    if getattr(record, "roomName", None):
-        project += row("Room", record.roomName)
-    if record.scopeOptions:
-        project += row("Scope", "; ".join(record.scopeOptions))
-    if record.materials:
-        project += row("Materials", ", ".join(record.materials))
-    facts = "".join(f'<li style="margin:4px 0">{e(fact)}</li>' for fact in _scan_facts(record))
+    brief = provider_brief(record, _scan_facts(record))
+    facts = "".join(f'<li style="margin:4px 0">{e(fact)}</li>' for fact in brief['scanFacts'])
+    items = ""
+    for n, item in enumerate(brief['items'], 1):
+        details = "".join(f'<div style="margin:6px 0"><strong>{e(d["label"])}:</strong> {e(d["value"])}</div>' for d in item['details'])
+        items += (f'<div style="padding:18px 0;border-top:1px solid #EADFD4"><div style="font-size:16px;font-weight:700;color:#17212B">{n}. {e(item["title"])}</div>'
+                  f'<div style="margin-top:7px;color:#3D4852;font-size:14px;line-height:1.5">{e(item["summary"])}{details}</div></div>')
+    confirmations = "".join(f'<li style="margin:4px 0"><strong>{e(d["label"])}:</strong> {e(d["value"])}</li>' for d in brief['confirmations'])
     media_url = media_link(record)
     viewer = (f'<a href="{e(media_url)}" style="display:inline-block;background:#980612;color:#FFFFFF;'
               'border-radius:8px;padding:12px 18px;font-size:14px;font-weight:600;text-decoration:none">'
-              'Open scan gallery &amp; 3D viewer</a>'
+              'Review scan and submit quote</a>'
               '<p style="font-size:12px;color:#8794A0;margin:12px 0 0">Private link expires in 30 days.</p>') if media_url else ""
     return f"""<!doctype html><html><body style="margin:0;padding:0;background:#F5EFE4">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5EFE4;padding:28px 12px"><tr><td align="center">
 <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#FFFFFF;border-radius:14px;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-system,sans-serif">
 <tr><td style="padding:22px 28px;border-bottom:1px solid #EADFD4"><span style="font-size:17px;font-weight:700;color:#980612">TakeShape</span></td></tr>
-<tr><td style="padding:24px 28px 8px"><div style="font-size:21px;font-weight:700;color:#17212B;margin-bottom:6px">{e(record.serviceType or "Home project")} in {e(record.zip or "—")}</div>
-<div style="font-size:13px;color:#5A6772">{(e(request_kind) + " · ") if request_kind else ""}Submitted {e(str(record.createdAt)[:16].replace("T", " at "))}</div></td></tr>
-<tr><td style="padding:14px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#980612;margin-bottom:6px">Homeowner</div><table role="presentation" cellpadding="0" cellspacing="0">{homeowner}</table></td></tr>
-<tr><td style="padding:18px 28px 0"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#980612;margin-bottom:6px">Project</div><table role="presentation" cellpadding="0" cellspacing="0">{project}</table>
-<div style="margin-top:12px;padding:14px;background:#FBF7F0;border:1px solid #EADFD4;border-radius:8px;color:#3D4852;font-size:13.5px;line-height:1.55;white-space:pre-line">{e(record.synopsis)}</div>
-<div style="margin-top:18px;color:#17212B;font-size:14px;font-weight:600">From the scan</div><ul style="padding-left:18px;color:#5A6772;font-size:13px;line-height:1.5">{facts}</ul></td></tr>
-<tr><td style="padding:18px 28px 28px">{viewer}</td></tr></table></td></tr></table></body></html>"""
+<tr><td style="padding:24px 28px 8px"><div style="font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#980612;margin-bottom:7px">New {e(brief['requestKind'])}</div><div style="font-size:21px;font-weight:700;color:#17212B;margin-bottom:6px">{e(brief['title'])}</div>
+<div style="font-size:13px;color:#5A6772">{(e(brief['room']) + " · ") if brief['room'] else ""}ZIP {e(brief['zip'] or "—")} · Submitted {e(str(record.createdAt)[:10])}</div></td></tr>
+<tr><td style="padding:14px 28px 0"><div style="padding:14px;background:#FBF7F0;border:1px solid #EADFD4;border-radius:8px;color:#17212B;font-size:14px;line-height:1.55"><strong>What the homeowner needs</strong><br>{e(brief['summary'])}</div>{items}
+<div style="padding:14px 16px;border-left:4px solid #980612;background:#FFF8F7;color:#17212B;font-size:13.5px;line-height:1.5"><strong>Please confirm in your quote</strong><br>{e(brief['confirmationPrompt'])}<ul style="padding-left:18px;margin:7px 0 0">{confirmations}</ul></div>
+{('<div style="margin-top:18px;color:#17212B;font-size:14px;font-weight:600">Scan snapshot</div><ul style="padding-left:18px;color:#5A6772;font-size:13px;line-height:1.5">' + facts + '</ul>') if facts else ''}</td></tr>
+<tr><td style="padding:18px 28px 28px">{viewer}<p style="font-size:12px;color:#8794A0;margin:12px 0 0">Address and contact details remain withheld until the homeowner selects a quote.</p></td></tr></table></td></tr></table></body></html>"""
 
 
 # --------------------------------------------------------------------------

@@ -19,5 +19,6 @@ button,input{font:inherit}button{cursor:pointer}button:disabled{cursor:default;o
 .photo-number{font-size:12px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--brand)}
 .photo-label{font-size:14px;font-weight:600;line-height:1.4;overflow-wrap:anywhere}
 .photo-kind{display:block;color:var(--muted);font-size:12px;font-weight:400;margin-top:3px}
+.brief-eyebrow{color:var(--brand);font-size:12px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}.brief-heading h2{font-size:24px;margin:5px 0 7px}.brief-heading p{margin:0}.scope-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin-top:20px}.scope-card{padding:16px;border:1px solid var(--stroke);border-radius:12px;background:#fff}.scope-card h3{font-size:16px;margin:0 0 8px}.scope-card p{font-size:14px;line-height:1.45;margin:5px 0;color:#17212b}.project-confirm{margin-top:16px;padding:14px 16px;border-left:4px solid var(--brand);background:#fff8f7;font-size:14px;line-height:1.45}.project-confirm ul{margin:7px 0 0;padding-left:19px}@media(max-width:700px){.scope-grid{grid-template-columns:1fr}}
 @media(max-width:800px){#photo-gallery{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}}
 @media(max-width:480px){#photo-gallery{grid-template-columns:minmax(0,1fr);gap:16px}.photo-caption{padding:12px}}

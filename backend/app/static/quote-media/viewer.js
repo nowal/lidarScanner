@@ -14,6 +14,32 @@ const measurements = new ModelMeasurements(viewer);
 let snapshot, selected = 0, rendered = false, attempts = 0, activePhoto, photoOpener;
 let submissionId = crypto.randomUUID(), submitting = false;
 const vector = p => p.map(n => `${n}m`).join(' ');
+function renderProjectBrief(brief) {
+  const section = document.getElementById('project-brief');
+  if (!brief || !brief.title) return;
+  document.getElementById('project-brief-title').textContent = brief.title;
+  document.getElementById('project-brief-summary').textContent = brief.summary || '';
+  const items = document.getElementById('project-work-items'); items.replaceChildren();
+  (brief.items || []).forEach((item, index) => {
+    const card = document.createElement('div'); card.className = 'scope-card';
+    const title = document.createElement('h3'); title.textContent = `${index + 1}. ${item.title}`; card.append(title);
+    const summary = document.createElement('p'); summary.textContent = item.summary || ''; card.append(summary);
+    (item.details || []).forEach(detail => {
+      const row = document.createElement('p'), label = document.createElement('strong');
+      label.textContent = detail.label + ': '; row.append(label, document.createTextNode(detail.value)); card.append(row);
+    });
+    items.append(card);
+  });
+  const confirm = document.getElementById('project-confirm'), label = document.createElement('strong');
+  label.textContent = 'Confirm before pricing: ';
+  confirm.replaceChildren(label, document.createTextNode(brief.confirmationPrompt || ''));
+  if ((brief.confirmations || []).length) {
+    const list = document.createElement('ul');
+    brief.confirmations.forEach(detail => { const row = document.createElement('li'); row.textContent = `${detail.label}: ${detail.value}`; list.append(row); });
+    confirm.append(list);
+  }
+  section.hidden = false;
+}
 function modelPhotos() {
   const model = snapshot.models[selected];
   return snapshot.photos.filter(p => p.supplemental || !p.roomKey || !model || model.key === 'home' || p.roomKey === model.key);
@@ -239,6 +265,7 @@ async function refresh() {
     if (!rendered) {
       rendered = true;
       document.getElementById('revision').textContent = `Link expires ${new Date(snapshot.expiresAt * 1000).toLocaleDateString()}`;
+      renderProjectBrief(snapshot.projectBrief);
       for (const m of snapshot.models) { const option = document.createElement('option'); option.value = m.index; option.textContent = m.label; select.appendChild(option); }
       renderGallery(); renderHotspots();
     }

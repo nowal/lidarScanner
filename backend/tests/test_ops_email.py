@@ -72,7 +72,7 @@ def test_the_seed_is_never_surfaced_as_a_partner():
 def test_ops_email_never_contains_the_address():
     subject, body = build_ops_email(_record(), find_partners("Painting", "37203"), None)
     assert ADDRESS not in body and "Hidden Lane" not in body
-    assert "withheld until homeowner selects a quote" in body
+    assert "withheld until the homeowner selects a quote" in body
     assert "dana@example.com" not in body
     assert "qr_testloop01" not in subject
     assert "https://signed.example/model.usdz" not in body

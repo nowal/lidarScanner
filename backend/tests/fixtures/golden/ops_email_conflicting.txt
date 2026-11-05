@@ -2,19 +2,18 @@ Subject: New quote request: Window Cleaning in 37203
 
 TakeShape
 Window Cleaning in 37203
-Submitted 2026-09-09T14:30:00+00:00
+Quote request · Submitted 2026-09-09T14:30:00+00:00
 
-HOMEOWNER
-  Name: Alex
-  ZIP code: 37203
-  Address and contact details: withheld until homeowner selects a quote.
-
-PROJECT
-  Scope of work: selected rooms: living room, primary bedroom
-  Room: living room
-  Scope: interior + exterior; screens
-
+WHAT THE HOMEOWNER NEEDS
 Alex wants every window in a 1920s bungalow cleaned inside and out before listing photos next month, screens included. Mentioned two second-floor windows that are hard to reach.
 
-FROM THE SCAN
+1. Window Cleaning
+  Alex wants every window in a 1920s bungalow cleaned inside and out before listing photos next month, screens included. Mentioned two second-floor windows that are hard to reach.
+
+PLEASE CONFIRM
+  Confirm what is included, the schedule, and the total price.
+
+SCAN SNAPSHOT
   14 window opening(s)
+
+Address and contact details are withheld until the homeowner selects a quote.

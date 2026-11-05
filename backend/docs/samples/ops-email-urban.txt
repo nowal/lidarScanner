@@ -2,21 +2,19 @@ Subject: New quote request: Painting in 37203
 
 TakeShape
 Painting in 37203
-Submitted 2026-09-09T14:30:00+00:00
+Quote request · Submitted 2026-09-09T14:30:00+00:00
 
-HOMEOWNER
-  Name: Dana
-  ZIP code: 37203
-  Address and contact details: withheld until homeowner selects a quote.
-
-PROJECT
-  Scope of work: one room (kitchen)
-  Room: kitchen
-  Scope: walls + trim; ceiling
-  Materials: low-VOC eggshell
-
+WHAT THE HOMEOWNER NEEDS
 Dana wants the kitchen repainted in a warm off-white with the trim in semi-gloss, ideally before the holidays. Asked whether the ceiling should be done at the same time.
 
-FROM THE SCAN
+1. Painting
+  Dana wants the kitchen repainted in a warm off-white with the trim in semi-gloss, ideally before the holidays. Asked whether the ceiling should be done at the same time.
+
+PLEASE CONFIRM
+  Confirm what is included, the schedule, and the total price.
+
+SCAN SNAPSHOT
   floor area ~214 sq ft
   2 window opening(s)
+
+Address and contact details are withheld until the homeowner selects a quote.

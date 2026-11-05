@@ -52,7 +52,7 @@ async def test_direct_without_contact_or_chat_preserves_narrative_and_snapshot(d
     from app.flow.ops_email import build_ops_email_html
     import html
     rendered = build_ops_email_html(saved, [], [])
-    assert html.escape(body['description']) in rendered
+    assert html.escape('Paint only the new walls. Keep the original trim & color.') in rendered
     assert 'Home project' in rendered
     assert saved.contactEmail is None and saved.address is None and saved.serviceType is None
     assert saved.homeownerId == OWNER and saved.scopeIntent == 'whole_home'
@@ -190,7 +190,7 @@ async def test_direct_email_reaches_both_ops_with_private_model_link_once(direct
     to, subject, text, html, options = attempts[-1]
     assert ops_email.recipient_list(to) == ['quintin@takeshapehome.com']
     assert options['cc'] == ['noah@takeshapehome.com']
-    assert body['description'] in text and '01234' in subject
+    assert 'Paint only the new walls. Keep the original trim & color.' in text and '01234' in subject
     link = quote_media.link(restored)
     assert link in text and link in html
     assert '/api/v1/quote-media/' in link

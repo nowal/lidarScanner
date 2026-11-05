@@ -727,7 +727,7 @@ async def test_quote_and_consultation_requests_queue_and_deliver_support_email(d
     html = ops_email.build_ops_email_html(record, [], [])
     assert subject.startswith(f'New {label}:')
     if handoff_type == 'consultation_request':
-        assert 'Request type: Consultation Request' in text
+        assert 'Consultation request · Submitted' in text
         assert 'Consultation request' in html
     else:
         assert 'Request type:' not in text

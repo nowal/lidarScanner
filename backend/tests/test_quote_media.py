@@ -37,6 +37,27 @@ def record(**kw):
         firstName='Test', address='123 Hidden Street', **kw)
 
 
+def test_provider_brief_simplifies_structured_intake_without_internal_review_prose():
+    from app.flow.provider_brief import build
+    rec = record(zip='37130', synopsis='Raw provider package', quoteDraft={'intake': {'workItems': [
+        {'serviceName': 'Ceiling smoothing', 'service': 'Painting', 'answers': [
+            {'field': 'desired_outcome', 'status': 'answered', 'evidence': 'Remove the popcorn texture and make it smooth.'},
+            {'field': 'target_scope', 'status': 'answered', 'evidence': 'Just the scanned room.'},
+            {'field': 'finish_preference', 'status': 'provider_recommendation', 'evidence': 'I am not sure about sheen.'}]},
+        {'serviceName': 'Door repair', 'service': 'Handyman', 'answers': [
+            {'field': 'desired_outcome', 'status': 'answered', 'evidence': 'Repair one interior door.'},
+            {'field': 'task_specific_details', 'status': 'answered', 'evidence': 'The handle does not work and it is hard to latch.'}]},
+    ], 'sharedAnswers': [], 'handoffType': 'quote_request'}})
+    brief = build(rec, ['Floor area: ~227 sq ft'])
+    assert brief['title'] == 'Ceiling smoothing + Door repair'
+    assert [item['title'] for item in brief['items']] == ['Ceiling smoothing', 'Door repair']
+    assert brief['items'][0]['details'] == [
+        {'label': 'Area', 'value': 'Just the scanned room.'},
+        {'label': 'Finish', 'value': 'Provider recommendation requested'}]
+    assert 'provider review' not in json.dumps(brief).lower()
+    assert brief['scanFacts'] == ['Floor area: ~227 sq ft']
+
+
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'storage_dir', str(tmp_path))
@@ -113,6 +134,7 @@ async def test_read_only_capability_expiry_scope_and_short_storage_links(monkeyp
         assert (await c.get(path)).status_code == 200
         status_result = await c.get(path + '/status')
         assert status_result.json()['models'][0]['status'] == 'failed'
+        assert status_result.json()['projectBrief']['title'] == 'Home project'
         assert 'object' not in status_result.text and settings.flow_token_secret not in status_result.text
         assert (await c.get(path + '/photos/0/thumb')).status_code == 307
         assert signed[-1] == (media.BUCKET, 'private/thumb.jpg', 300)
@@ -145,7 +167,7 @@ async def test_email_html_escapes_media_and_handles_missing(monkeypatch):
     assert 'Download original USDZ' not in html
     assert 'Private link expires in 30 days.' in html
     rec.scanMedia['photos'] = []
-    assert 'Open scan gallery' in ops_email.build_ops_email_html(rec, [], None)
+    assert 'Review scan and submit quote' in ops_email.build_ops_email_html(rec, [], None)
     rec.synopsis = '<script>alert("x")</script>'
     assert '&lt;script&gt;' in ops_email.build_ops_email_html(rec, [], None)
 

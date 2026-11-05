@@ -44,12 +44,15 @@ async def status(request_id: str, exp: int, sig: str):
         state = await media.conversion_status(scan, m)
         models.append({'label': m['label'], 'key': m['key'], 'status': state['status'], 'index': n})
     photos = await media.photos_with_camera(scan)
+    from .flow.ops_email import _scan_facts
+    from .flow.provider_brief import build as provider_brief
     return JSONResponse({'models': models, 'photos': [{'label': p['label'], 'index': n,
                          'roomKey': p.get('roomKey'), 'camera': p.get('camera'),
                          'supplemental': bool(p.get('supplemental'))} for n, p in enumerate(photos)],
                          'revision': scan['revision'][:8], 'expiresAt': exp,
                          'canRespond': record.status != 'closed', 'uploadToken': upload_token(sig),
-                         'maxPdfBytes': provider_responses.MAX_PDF_BYTES}, headers=HEADERS)
+                         'maxPdfBytes': provider_responses.MAX_PDF_BYTES,
+                         'projectBrief': provider_brief(record, _scan_facts(record))}, headers=HEADERS)
 
 
 def upload_token(signature: str) -> str:

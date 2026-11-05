@@ -73,6 +73,17 @@ rec.scopeIntent = 'single_room'
 rec.synopsis = 'Quentin is interested in painting the bedroom. Walls and trim were discussed, with options for a fresh neutral finish.'
 rec.scopeOptions = ['Walls and trim']
 rec.measurements = {'floorAreaSquareFeet': 214, 'paintableWallSquareFeet': 410, 'windowCount': 2}
+rec.quoteDraft = {'intake': {'handoffType': 'quote_request', 'sharedAnswers': [], 'workItems': [
+ {'serviceName':'Ceiling smoothing','service':'Painting','answers':[
+  {'field':'desired_outcome','status':'answered','evidence':'Remove the popcorn texture and leave a smooth ceiling.'},
+  {'field':'target_scope','status':'answered','evidence':'The single scanned room.'},
+  {'field':'finish_preference','status':'provider_recommendation','evidence':'I would like help choosing the sheen.'}]},
+ {'serviceName':'Door repair','service':'Handyman','answers':[
+  {'field':'desired_outcome','status':'answered','evidence':'Repair one interior door.'},
+  {'field':'task_specific_details','status':'answered','evidence':'The handle does not work correctly and the door is difficult to latch.'},
+  {'field':'supply_responsibility','status':'answered','evidence':'The provider should supply any required parts.'}]}
+]}}
+asyncio.run(quote_store.save(rec))
 from app.flow.ops_email import build_ops_email_html
 (ROOT / 'email.html').write_text(build_ops_email_html(rec, [], None))
 app=FastAPI()
