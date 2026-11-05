@@ -44,9 +44,11 @@ quote-request JSON records hold the additive fields. Previously pinned v1
 rubrics remain readable without changing stored questions, hashes or prompts.
 Empty attachment lists and new default handoff fields do not change old turn
 or submission fingerprints, so interrupted requests can recover after rollout.
-New conversations use rubric `quote-intake-v1.14` and prompt
-`quote-intake-v1.15`; the prompt explicitly distinguishes automatic consultation
-requests from quote requests and from booked appointments.
+New conversations use rubric and prompt `quote-intake-v1.16`. The prompt
+explicitly distinguishes automatic consultation requests from quote requests
+and booked appointments, and treats provider-supplied products, parts,
+materials, tools, and supplies as the default unless the homeowner raises an
+exception.
 
 ## Request and photo behavior
 

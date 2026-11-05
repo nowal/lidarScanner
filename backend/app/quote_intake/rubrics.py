@@ -16,7 +16,7 @@ from .catalog import KNOWN_SERVICE_TYPES
 DOCS = Path(__file__).resolve().parents[2] / 'docs'
 RUBRIC_PATH = DOCS / 'QUOTE_INTAKE_RUBRICS.md'
 PROMPT_PATH = DOCS / 'QUOTE_INTAKE_SYSTEM_PROMPT.md'
-PROMPT_VERSION = 'quote-intake-v1.15'
+PROMPT_VERSION = 'quote-intake-v1.16'
 Status = Literal['answered', 'unknown', 'no_preference', 'provider_recommendation', 'not_applicable', 'provider_review']
 UnknownOutcome = Literal['ready', 'needs_provider_review', 'consultation_required']
 DecisionCategory = Literal['scope', 'service_level', 'preference', 'design', 'logistics', 'timing', 'routing']

@@ -17,7 +17,7 @@ Adding a service here does not automatically add it to provider routing. A non-n
 ## Common rules
 
 ```yaml
-rubric_version: quote-intake-v1.15
+rubric_version: quote-intake-v1.16
 common:
   required:
     - id: desired_outcome
@@ -269,9 +269,10 @@ decisions:
   - id: supply_install_scope
     priority: 6
     when: {field: work_type, one_of: [replace, new_opening]}
-    question: "Should the provider supply and install the products, or are you purchasing them separately?"
+    question: "You mentioned supplying a product yourself. What have you already selected or purchased?"
     category: logistics
     unknown_outcome: needs_provider_review
+    required_for_quote: false
     values: [provider_supply_and_install, homeowner_supplied, undecided]
     defer: [provider_recommendation, unknown]
   - id: performance_priorities
@@ -295,7 +296,7 @@ decisions:
     unknown_outcome: needs_provider_review
     defer: [unknown]
 optional:
-  - "Whether the homeowner intends supply-and-install or installation of a product they already own."
+  - "Provider supply and installation is the default. Record an exception when the homeowner says they own, selected, ordered, or want to purchase the product, or asks about sourcing."
   - "Operational symptoms if repair is requested; do not repeat symptoms already described."
 provider_review:
   - "Opening sizes and counts, frame condition, fit, structural changes, and product suitability."
@@ -318,9 +319,10 @@ decisions:
     defer: []
   - id: supply_responsibility
     priority: 2
-    question: "Do you already have the item or parts, or should the provider supply them?"
+    question: "You mentioned having an item or part already. What should the provider use or source?"
     category: logistics
     unknown_outcome: needs_provider_review
+    required_for_quote: false
     defer: [not_applicable, provider_recommendation, unknown]
   - id: completion_details
     priority: 3
@@ -336,6 +338,7 @@ decisions:
     defer: [provider_recommendation, unknown]
 optional:
   - "A short list of additional tasks already requested by the homeowner; do not upsell."
+  - "Provider-supplied parts and materials are the default. Record homeowner-supplied items only when volunteered or when the homeowner asks about sourcing."
   - "For trim repair, assume the replacement should match the existing profile and finish unless the homeowner asks for a change."
 provider_review:
   - "Dimensions, mounting substrate, compatibility, safe/code-compliant wire routing, and whether a licensed specialist is required."

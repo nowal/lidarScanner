@@ -190,6 +190,31 @@ def test_remaining_service_rubrics_include_material_quote_decisions(rubric_id, e
     assert expected_fields <= actual
 
 
+def test_provider_supplies_materials_by_default_without_an_intake_question():
+    snapshot = rubrics.current_snapshot()
+    windows = {field.id: field for field in snapshot.service('windows_doors').decisions}
+    handyman = {field.id: field for field in snapshot.service('handyman').decisions}
+
+    assert not windows['supply_install_scope'].required_for_quote
+    assert not handyman['supply_responsibility'].required_for_quote
+    assert 'homeowner_supplied' in windows['supply_install_scope'].values
+    assert 'provider will source and bring' in rubrics.current_prompt()
+    assert 'Do not ask who will supply them merely to confirm that default' in rubrics.current_prompt()
+
+    replacement = item('windows_doors', [
+        answer('target_scope', 'living room windows', 'living room windows'),
+        answer('desired_outcome', 'replace old foggy windows', 'replace old foggy windows'),
+        answer('subtype', 'windows', 'windows'),
+        answer('work_type', 'replace', 'replace'),
+        answer('product_preference', None, 'provider can recommend', 'provider_recommendation'),
+        answer('operation_and_grid_preferences', None, 'no preference', 'no_preference'),
+        answer('performance_priorities', None, 'no preference', 'no_preference'),
+        answer('trim_finish_scope', None, 'provider can recommend', 'provider_recommendation'),
+        answer('known_opening_damage', None, 'not sure', 'unknown'),
+    ], subtype='windows')
+    assert 'supply_install_scope' not in engine.missing_fields(replacement, snapshot)
+
+
 def test_house_wash_asks_addons_and_cleaning_level_but_not_concrete_finish():
     house = item('power_washing', [
         answer('desired_outcome', 'wash house', 'house power washed'),
