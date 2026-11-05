@@ -535,6 +535,113 @@ async def send_ops_message(subject: str, body: str, html: str | None = None, *, 
         return 'failed'
 
 
+def _acceptance_project(record: Any) -> dict[str, Any]:
+    """A concise project label for acceptance mail, without another AI call."""
+    from .provider_brief import build as provider_brief
+
+    return provider_brief(record, _scan_facts(record))
+
+
+def _acceptance_reference(record: Any) -> str:
+    suffix = re.sub(r'[^A-Za-z0-9]', '', str(record.id))[-6:].upper()
+    return f"TS-{suffix or 'PROJECT'}"
+
+
+def _acceptance_shell(*, badge: str, title: str, lede: str, content: str, footer: str) -> str:
+    """Email-client-safe TakeShape shell shared by acceptance confirmations."""
+    e = _esc
+    return f'''<!doctype html><html><body style="margin:0;padding:0;background:#F5EFE4">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5EFE4;padding:28px 12px"><tr><td align="center">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#FFFDF9;border:1px solid #EADFD4;border-radius:14px;overflow:hidden;font-family:'Segoe UI',system-ui,-apple-system,sans-serif">
+<tr><td style="padding:22px 28px;border-bottom:1px solid #EADFD4"><span style="font-size:19px;font-weight:800;color:#980612">TakeShape</span></td></tr>
+<tr><td style="padding:28px 28px 10px"><span style="display:inline-block;padding:5px 10px;border-radius:999px;background:#F4DFE1;color:#81000F;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase">{e(badge)}</span>
+<div style="margin-top:15px;font-size:25px;line-height:1.2;font-weight:750;color:#20262D">{e(title)}</div>
+<div style="margin-top:9px;color:#4E5964;font-size:15px;line-height:1.55">{lede}</div></td></tr>
+<tr><td style="padding:10px 28px 30px">{content}</td></tr>
+<tr><td style="padding:18px 28px 22px;border-top:1px solid #EADFD4;background:#FAF7F2;color:#7A746D;font-size:11px;line-height:1.5">{footer}</td></tr>
+</table></td></tr></table></body></html>'''
+
+
+def _acceptance_button(url: str, label: str) -> str:
+    return (f'<a href="{_esc(url)}" style="display:inline-block;background:#AA0014;color:#FFFFFF;'
+            'border-radius:9px;padding:13px 20px;font-size:14px;font-weight:700;text-decoration:none">'
+            f'{_esc(label)}</a>')
+
+
+def _provider_acceptance_html(record: Any, quote: Any, signed_link: str | None) -> str:
+    e = _esc
+    contact = quote.approvalContact
+    brief = _acceptance_project(record)
+    project_lines = ''.join(
+        f'<li style="margin:4px 0">{e(item["summary"])}</li>' for item in brief['items'][:4]
+    )
+    if not project_lines:
+        project_lines = f'<li style="margin:4px 0">{e(brief["summary"])}</li>'
+    contact_rows = ''.join(
+        f'<tr><td style="padding:4px 12px 4px 0;color:#66717D;vertical-align:top">{e(label)}</td>'
+        f'<td style="padding:4px 0;color:#20262D;font-weight:650">{e(value)}</td></tr>'
+        for label, value in (
+            ('Name', contact.fullName), ('Phone', contact.phone), ('Email', contact.email),
+            ('Project address', contact.address),
+        )
+    ) if contact else ''
+    action = ('Contact the homeowner to confirm scheduling and any final project details.'
+              if quote.approvalMethod == 'signature'
+              else 'Call the homeowner to confirm scheduling and any final project details.')
+    document = ''
+    if signed_link:
+        document = (_acceptance_button(signed_link, 'View signed quote PDF') +
+                    '<div style="margin-top:11px;color:#7B858E;font-size:11.5px">Private document link · Expires 30 days after acceptance</div>')
+    content = f'''
+<div style="padding:16px 18px;border-left:4px solid #AA0014;border-radius:0 10px 10px 0;background:#F6F0E6;color:#20262D;font-size:14px;line-height:1.5"><strong style="font-size:15px">Next step</strong><br>{e(action)}</div>
+<div style="margin-top:22px;color:#81000F;font-size:11.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Homeowner contact</div>
+<div style="margin-top:9px;padding:14px 16px;border:1px solid #E8DED0;border-radius:10px;background:#FBF7F1"><table role="presentation" cellpadding="0" cellspacing="0" style="font-size:13.5px;line-height:1.45">{contact_rows}</table></div>
+<div style="margin-top:22px;color:#81000F;font-size:11.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Project at a glance</div>
+<div style="margin-top:9px;padding:15px 17px;border:1px solid #E8DED0;border-radius:10px;background:#FBF7F1;color:#20262D;font-size:13.5px;line-height:1.5"><strong style="font-size:15px">{e(brief['title'])}</strong><ul style="padding-left:18px;margin:8px 0 0">{project_lines}</ul></div>
+{f'<div style="margin-top:22px">{document}</div>' if document else ''}'''
+    lede = f'The homeowner accepted {"and signed " if signed_link else ""}the quote from <strong>{e(quote.providerName)}</strong>.'
+    return _acceptance_shell(
+        badge='Quote accepted', title="You've been selected for this project", lede=lede, content=content,
+        footer=f'TakeShape project reference: {e(_acceptance_reference(record))} · Keep private project details and document links confidential.',
+    )
+
+
+def _homeowner_acceptance_html(record: Any, quote: Any, signed_link: str | None) -> str:
+    e = _esc
+    brief = _acceptance_project(record)
+    signed_step = ('<strong style="display:block;color:#20262D">Keep your signed copy</strong>'
+                   'Use the private button below to review or save it during the next 30 days.') if signed_link else (
+                   '<strong style="display:block;color:#20262D">Confirm the appointment</strong>'
+                   'Review the timing and final project details directly with the provider.')
+    button = ''
+    if signed_link:
+        button = (_acceptance_button(signed_link, 'View my signed quote') +
+                  '<div style="margin-top:11px;color:#7B858E;font-size:11.5px">Private document link · Expires 30 days after acceptance</div>')
+    steps = [
+        ('The provider receives your details', f'{e(quote.providerName)} now has the contact information you approved.'),
+        ('The provider contacts you', "They'll reach out to confirm scheduling and final project details."),
+    ]
+    step_html = ''.join(
+        f'<tr><td style="width:34px;vertical-align:top;padding:0 10px 15px 0"><span style="display:inline-block;width:28px;height:28px;line-height:28px;text-align:center;border-radius:50%;background:#F3DCDF;color:#AA0014;font-weight:800">{n}</span></td>'
+        f'<td style="padding:0 0 15px;color:#4E5964;font-size:13.5px;line-height:1.5"><strong style="display:block;color:#20262D">{e(label)}</strong>{text}</td></tr>'
+        for n, (label, text) in enumerate(steps, 1)
+    )
+    step_html += (f'<tr><td style="width:34px;vertical-align:top;padding:0 10px 0 0"><span style="display:inline-block;width:28px;height:28px;line-height:28px;text-align:center;border-radius:50%;background:#F3DCDF;color:#AA0014;font-weight:800">3</span></td>'
+                  f'<td style="padding:0;color:#4E5964;font-size:13.5px;line-height:1.5">{signed_step}</td></tr>')
+    content = f'''
+<div style="color:#81000F;font-size:11.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase">What happens next</div>
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:12px;width:100%">{step_html}</table>
+<div style="margin-top:22px;color:#81000F;font-size:11.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase">Selected provider</div>
+<div style="margin-top:9px;padding:15px 17px;border:1px solid #E8DED0;border-radius:10px;background:#FBF7F1;color:#20262D;font-size:13.5px;line-height:1.5"><strong style="font-size:15px">{e(quote.providerName)}</strong><br>{e(brief['title'])}</div>
+{f'<div style="margin-top:22px">{button}</div>' if button else ''}'''
+    lede = (f'You accepted {"and signed " if signed_link else ""}the quote from <strong>{e(quote.providerName)}</strong>.'
+            + (' Your signed copy is ready below.' if signed_link else ' The provider will contact you about the next steps.'))
+    return _acceptance_shell(
+        badge='Project confirmed', title='Your project is moving forward', lede=lede, content=content,
+        footer=f'TakeShape project reference: {e(_acceptance_reference(record))} · This confirms your accepted quote.',
+    )
+
+
 async def send_decision_email(record: Any, quote: Any) -> str:
     """Tell the selected provider and operations about an accepted quote.
 
@@ -545,10 +652,10 @@ async def send_decision_email(record: Any, quote: Any) -> str:
     approved = quote.decision == "approved"
     provider_email = getattr(quote, 'acceptanceNotificationProviderEmail', None) if approved else None
     price = _decision_price(quote)
-    subject = (
-        f"{'APPROVED' if approved else 'DECLINED'}: {quote.providerName}"
-        f"{f' · {price}' if price else ''} — {record.id}"
-    )
+    brief = _acceptance_project(record) if approved else None
+    subject = ((f"A homeowner accepted your quote — {brief['title']}" if provider_email else
+                f"APPROVED: {quote.providerName} · {brief['title']}") if approved else
+               f"DECLINED: {quote.providerName}{f' · {price}' if price else ''} — {record.id}")
     lines = [
         f"The homeowner {'approved' if approved else 'declined'} a quote on {record.id}.",
         "",
@@ -561,6 +668,7 @@ async def send_decision_email(record: Any, quote: Any) -> str:
         lines.append("  They said:")
         lines.extend(f"    {ln}" for ln in quote.decisionNote.splitlines())
     lines.append("")
+    signed_link = None
     if approved:
         contact = getattr(quote, 'approvalContact', None)
         if contact:
@@ -604,7 +712,8 @@ async def send_decision_email(record: Any, quote: Any) -> str:
         if provider_email:
             extras['to'] = provider_email
             extras['cc'] = recipient_list(recipient_list(settings.ops_email) + ['noah@takeshapehome.com'])
-    return await send_ops_message(subject, "\n".join(lines), outbox_key=f"decision-{record.id}", **extras)
+    html = _provider_acceptance_html(record, quote, signed_link) if approved else None
+    return await send_ops_message(subject, "\n".join(lines), html=html, outbox_key=f"decision-{record.id}", **extras)
 
 
 _acceptance_locks: dict[str, asyncio.Lock] = {}
@@ -614,17 +723,26 @@ async def send_homeowner_confirmation(record: Any, quote: Any) -> str:
     contact = quote.approvalContact
     if not contact:
         return 'failed'
-    lines = [f"Thank you for accepting the quote with {quote.providerName}. They’ll get in touch with you shortly.", ""]
+    brief = _acceptance_project(record)
+    lines = [f"Your project is confirmed with {quote.providerName}.", "",
+             "What happens next:",
+             f"1. {quote.providerName} now has the contact information you approved.",
+             "2. The provider will contact you to confirm scheduling and final project details."]
+    link = None
     if quote.approvalMethod == 'signature':
         from .quote_approvals import document_link
         link = document_link(record, quote)
         if not link:
             return 'failed'
-        lines.extend([f"Your signed quote: {link}", "This private link expires 30 days after acceptance."])
+        lines.extend(["3. Keep your signed copy for your records.", "", f"View your signed quote: {link}",
+                      "This private link expires 30 days after acceptance."])
     else:
-        lines.extend(["Your callback details:", f"Name: {contact.fullName}",
+        lines.extend(["3. Confirm the appointment and remaining details directly with the provider.", "",
+                      "Your callback details:", f"Name: {contact.fullName}",
                       f"Phone: {contact.phone}", f"Email: {contact.email}", f"Address: {contact.address}"])
-    return await send_ops_message(f"Your quote with {quote.providerName} is accepted", "\n".join(lines),
+    lines.extend(["", f"Project: {brief['title']}", f"TakeShape reference: {_acceptance_reference(record)}"])
+    html = _homeowner_acceptance_html(record, quote, link)
+    return await send_ops_message(f"Your quote with {quote.providerName} is confirmed", "\n".join(lines), html=html,
         to=contact.email, cc=[], outbox_key=f"homeowner-acceptance-{record.id}",
         idempotency_key=f"homeowner-acceptance-{record.id}-{quote.id}-{quote.decidedAt}")
 

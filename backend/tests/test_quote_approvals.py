@@ -353,6 +353,51 @@ async def test_selected_provider_gets_acceptance_with_ops_copies_and_only_their_
 
 
 @pytest.mark.asyncio
+async def test_signed_acceptance_uses_branded_audience_specific_html(monkeypatch, pdf):
+    import base64
+    monkeypatch.setattr(settings, 'ops_email', 'Quintin <quintin@takeshapehome.com>')
+    monkeypatch.setattr(settings, 'resend_api_key', 'fake-test-key')
+    monkeypatch.setattr(ops_email, 'send_ops_message', REAL_SEND_OPS_MESSAGE)
+    deliveries = []
+
+    async def capture(to, subject, body, html=None, **kwargs):
+        deliveries.append((to, subject, body, html, kwargs))
+
+    monkeypatch.setattr(ops_email, '_send_via_resend', capture)
+    rec, client, qid, path, _ = await quote(monkeypatch, pdf, 'selected@provider.test')
+    async with client:
+        response = await client.post(path, json={
+            'contact': CONTACT,
+            'signedPDF': base64.b64encode(pdf).decode(),
+        })
+        assert response.status_code == 200, response.text
+
+    assert len(deliveries) == 2
+    provider, homeowner = deliveries
+    assert provider[0] == 'selected@provider.test'
+    assert provider[1].startswith('A homeowner accepted your quote — ')
+    assert rec.id not in provider[1]
+    assert homeowner[0] == CONTACT['email']
+    assert homeowner[1] == 'Your quote with Brightline Painting is confirmed'
+
+    for message in (provider, homeowner):
+        html = message[3]
+        assert '<!doctype html>' in html
+        assert 'TakeShape' in html and '#AA0014' in html and '#F5EFE4' in html
+        assert 'href="https://example.test/' in html
+        assert '>https://example.test/' not in html
+        assert 'Expires 30 days after acceptance' in html
+
+    provider_html, homeowner_html = provider[3], homeowner[3]
+    assert 'selected for this project' in provider_html
+    assert 'View signed quote PDF' in provider_html
+    assert all(value in provider_html for value in CONTACT.values())
+    assert 'Your project is moving forward' in homeowner_html
+    assert 'View my signed quote' in homeowner_html
+    assert CONTACT['address'] not in homeowner_html
+
+
+@pytest.mark.asyncio
 async def test_provider_delivery_retry_uses_address_frozen_at_approval(monkeypatch, pdf):
     rec, client, qid, path, _ = await quote(monkeypatch, pdf, 'original@provider.test')
     monkeypatch.setattr(settings, 'resend_api_key', 'fake-test-key')

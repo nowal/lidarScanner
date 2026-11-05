@@ -61,7 +61,8 @@ async def test_paint_accept_next_flooring_history_late_bids_and_two_devices(dire
     assert approved.json()['accepted'] is True
     assert len(messages)==2
     homeowner=next(m for m in messages if m[2].get('to')==CONTACT['email'])
-    assert homeowner[2]['cc']==[] and 'They’ll get in touch with you shortly.' in homeowner[1]
+    assert homeowner[2]['cc']==[]
+    assert 'The provider will contact you to confirm scheduling and final project details.' in homeowner[1]
     assert homeowner[2]['idempotency_key'] != messages[0][2]['idempotency_key']
     accepted=await quote_store.get(request)
     link=quote_approvals.document_link(accepted,accepted.quote_by_id('paint')) if signed else None
