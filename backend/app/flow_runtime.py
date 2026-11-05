@@ -751,6 +751,11 @@ def _room_phrase(message: str, word: str) -> str:
     return phrase if lead in _ROOM_MODIFIERS else word
 
 
+# Spaces a scan takes in without walls of their own. In a home with an area
+# the scan did not divide into rooms, one of these is somewhere inside it.
+_PART_OF_AREA = {"foyer", "entry", "hallway", "hall", "landing", "mudroom", "pantry", "office", "study"}
+
+
 # Telling us what a space is, as opposed to asking about it. "I scanned my
 # front porch" names the area; "did you get the attic?" does not, and only
 # the first may write a name into the index.
@@ -798,6 +803,7 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
         room = index.small_unnamed_room(request.message or "")
     state.unnamed_room_phrase = None
     state.unnamed_room_key = None
+    state.part_room_phrase = None
     if room is None and unresolved:
         # "I scanned my front porch": the index holds areas the photos could
         # not name, and their word is the name. Telling them the porch they
@@ -842,6 +848,12 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
                     # inference is not something the homeowner can undo.
                     logger.info("Homeowner's word '%s' must mean the one unnamed area %s, "
                                 "thread-scoped (home=%s)", phrase, candidates[0].key, state.home_id)
+        elif unresolved in _PART_OF_AREA and any(r.role == "open_plan" for r in index.rooms):
+            # "the foyer" in a home whose ground floor came back as one
+            # undivided area: it is in there, not missing. Nothing is
+            # renamed -- the foyer is part of that area, not all of it.
+            state.part_room_phrase = phrase
+            unresolved = None
 
     # "that space you called unnamed area 1 is the mudroom": the room the
     # message names is the one being named, not whichever was in focus.
@@ -871,8 +883,9 @@ def _reconcile_home(state: FlowState, request: HomeAIChatRequest):
             else 1
         )
         state.unresolved_room_phrase = unresolved
-    elif state.unnamed_room_phrase:
-        # It IS in the scan, as one of the areas the photos could not name.
+    elif state.unnamed_room_phrase or state.part_room_phrase:
+        # It IS in the scan, as one of the areas the photos could not name,
+        # or as part of one the scan did not divide.
         # Leaving a stale phrase here put both directives in one prompt:
         # "NEVER say it is not in the scan" next to "which is NOT in the
         # scan", about the same space.
@@ -1341,6 +1354,42 @@ def _home_directives(state: FlowState, index) -> list[str]:
         "fixtures. Use the name naturally, but if the conversation turns on "
         "which room it is, ask rather than asserting.",
     ]
+    if index.storey_count > 1 or len({r.storey for r in index.rooms}) > 1:
+        # Quintin, Oct 14: the upstairs was in the list as "bathroom", with
+        # nothing to say it was a floor up, and the agent told him four
+        # times that it had no upstairs.
+        lines.append(
+            "- FLOORS: this walk covered more than one floor, and the list above "
+            "is grouped floor by floor. 'Upstairs', 'the second floor' and the "
+            "like mean the areas under that floor's heading: you DO have them, "
+            "so answer from those."
+        )
+    # "It may just be a syncing gap on my end... worth checking back in a
+    # bit", about a floor that was in the scan all along (Oct 14), and then
+    # three replies defending the scan's split against the homeowner.
+    lines.append(
+        "- The list above is everything this scan holds. NEVER put a missing "
+        "space down to syncing or uploading, and never tell them to check back "
+        "later for it. If they say they scanned something you cannot find in "
+        "the list, believe them: it most likely came through as part of one of "
+        "the areas above, so say which, or ask. If they correct how their home "
+        "is laid out (where the stairs are, that two spaces are separate), "
+        "accept it at once and use their version from then on. The scan's "
+        "split into areas is a machine's guess; they live there."
+    )
+    if state.part_room_phrase:
+        opens = [r.display_name for r in index.rooms if r.role == "open_plan"]
+        where = (
+            f"the {opens[0]}" if len(opens) == 1
+            else "one of the open areas above (" + ", ".join(opens) + ")"
+        )
+        lines.append(
+            f"- They mentioned the {state.part_room_phrase}. The scan did not split "
+            f"it out as its own room: it is part of {where}. NEVER say it is not in "
+            "the scan or that you cannot see it. If they tell you where it is or "
+            f"what is in it, that is a fact about their home; use it, and call it "
+            f"the {state.part_room_phrase}."
+        )
     if state.unnamed_room_phrase:
         named = index.by_key(state.unnamed_room_key) if state.unnamed_room_key else None
         if named is not None:
