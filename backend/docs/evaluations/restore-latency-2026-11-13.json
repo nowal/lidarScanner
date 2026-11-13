@@ -1003,5 +1003,14 @@
     "Quintin installed build and exact incident time unknown.",
     "Physical-device long-idle test pending."
   ],
-  "submissionCalls": 0
+  "submissionCalls": 0,
+  "mobileTests": {
+    "intakeUnitTests": 25,
+    "parameterizedExecutions": 27,
+    "failed": 0,
+    "fixtureUIFlows": 6,
+    "affectedUIFlowsRepeatedOnFinalCode": 2,
+    "unfinishedTurnRetryVerified": true,
+    "physicalDeviceIdleResumeVerified": false
+  }
 }
