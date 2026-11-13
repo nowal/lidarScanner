@@ -63,6 +63,17 @@ class Result(StrictModel):
     intentEvidence: str = Field(min_length=1, max_length=1000)
 
 
+class QuestionReview(StrictModel):
+    unchanged: bool = Field(description='True only if the candidate extracts all supported answers and its proposed question is genuinely unanswered. In that case revisedResponse must be null.')
+    revisedResponse: Result | None = Field(description='The complete corrected result when unchanged is false. Preserve supported answers and exact citations. Null when unchanged is true.')
+
+    @model_validator(mode='after')
+    def consistent_review(self):
+        if self.unchanged != (self.revisedResponse is None):
+            raise ValueError('Return either unchanged=true with no revision, or unchanged=false with a complete revision')
+        return self
+
+
 class SupplementalPhotoUpload(StrictModel):
     id: UUID = Field(strict=False)
     fileName: str = Field(min_length=1, max_length=180)

@@ -4,9 +4,11 @@ import json
 from pydantic import ValidationError
 
 from . import engine, provider
+from .timing import timed
 
 MAX_GENERATION_ATTEMPTS = 3
 
+@timed("generation")
 async def generate_turn(state, time_zone, *, attempts=None):
     payload = engine.model_input(state, time_zone)
     system = state['prompt'] + '\n\n' + state['wireInstructions']
@@ -33,7 +35,7 @@ async def generate_turn(state, time_zone, *, attempts=None):
                 question_reviewed = True
                 payload = json.dumps({**json.loads(payload), 'questionReview': {
                     'candidateResponse': result.model_dump(),
-                    'proposedQuestions': validated['result']['nextQuestion']}}, ensure_ascii=False)
+                    'proposedQuestions': validated['result']['nextQuestion']}}, ensure_ascii=False, separators=(',', ':'))
                 system += ('\nReview the proposed question in questionReview against the entire homeowner transcript. '
                            'Check whether existing words already answer it or an equivalent field. '
                            'If answered, extract the cited answer and continue readiness without asking again. '
@@ -57,7 +59,7 @@ async def generate_turn(state, time_zone, *, attempts=None):
                 raise
             if result is not None:
                 payload = json.dumps({**json.loads(payload), 'validationFeedback': {
-                    'error': str(exc)[:500], 'previousInvalidResponse': result.model_dump()}}, ensure_ascii=False)
+                    'error': str(exc)[:500], 'previousInvalidResponse': result.model_dump()}}, ensure_ascii=False, separators=(',', ':'))
             system += ('\nThe previous response failed application validation: '
                        + str(exc)[:500] + '. The previous object, if available, is in validationFeedback as data. '
                        'Preserve its supported answers and correct the invalid fields. Return a complete object.')
