@@ -458,7 +458,7 @@ class QuoteRequestStore:
                     record.status = 'quotes_ready'
         return record
 
-    async def list(self, status: str | None = None) -> list[QuoteRequestRecord]:
+    async def list(self, status: str | None = None, *, include_provider_responses: bool = True) -> list[QuoteRequestRecord]:
         durable = await supabase_store.list_quote_requests()
         if durable is not None:
             records = []
@@ -467,7 +467,8 @@ class QuoteRequestStore:
                     record = QuoteRequestRecord.model_validate(raw)
                 except Exception:  # noqa: BLE001
                     continue
-                record = await self._with_provider_responses(record)
+                if include_provider_responses:
+                    record = await self._with_provider_responses(record)
                 if status is None or record.status == status:
                     records.append(record)
             return records
@@ -479,7 +480,8 @@ class QuoteRequestStore:
                 )
             except Exception:  # noqa: BLE001
                 continue
-            record = await self._with_provider_responses(record)
+            if include_provider_responses:
+                record = await self._with_provider_responses(record)
             if status is None or record.status == status:
                 records.append(record)
         return records

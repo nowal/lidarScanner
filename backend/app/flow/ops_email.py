@@ -789,9 +789,9 @@ async def deliver_acceptance(request_id: str, quote_id: str) -> str:
 
 
 async def retry_pending_acceptances() -> int:
-    from ..flow_quotes import quote_store
+    from .email_recovery import pending_acceptances
     count = 0
-    for record in await quote_store.list():
+    for record in await pending_acceptances(bool(settings.resend_api_key or _smtp_configured())):
         quote = record.quote_by_id(record.selectedQuoteId) if record.selectedQuoteId else None
         pending_provider = quote and quote.acceptanceNotificationQueuedAt and not quote.acceptanceNotificationDeliveredAt and (settings.resend_api_key or _smtp_configured() or not quote.acceptanceNotificationCapturedAt)
         pending_homeowner = quote and quote.homeownerConfirmationQueuedAt and not quote.homeownerConfirmationDeliveredAt and (settings.resend_api_key or _smtp_configured() or not quote.homeownerConfirmationCapturedAt)
@@ -859,11 +859,12 @@ async def requeue_undelivered() -> int:
     before those fields existed have neither stamp and are left alone.
     """
     from ..flow_quotes import quote_store
+    from .email_recovery import pending_leads
 
     if _queue is None:
         return 0
     try:
-        records = await quote_store.list("submitted")
+        records = await pending_leads(bool(settings.resend_api_key or _smtp_configured()))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not read quote requests to requeue lead emails: %s", exc)
         return 0

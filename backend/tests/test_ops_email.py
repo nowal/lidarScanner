@@ -309,14 +309,14 @@ async def test_captured_email_requeues_when_transport_becomes_available(tmp_path
     record = _record()
     record.opsEmailQueuedAt = '2026-09-24T12:00:00Z'
     record.opsEmailCapturedAt = '2026-09-24T12:00:01Z'
-    async def records(*a): return [record]
-    monkeypatch.setattr(quote_store, 'list', records)
+    await quote_store.save(record)
     monkeypatch.setattr(ops_email, '_queue', asyncio.Queue())
     assert await ops_email.requeue_undelivered() == 0
     monkeypatch.setattr(settings, 'resend_api_key', 'test-no-network')
     assert await ops_email.requeue_undelivered() == 1
     assert (await ops_email._queue.get()).id == record.id
     record.opsEmailDeliveredAt = '2026-09-24T12:01:00Z'
+    await quote_store.save(record)
     assert await ops_email.requeue_undelivered() == 0
 
 
@@ -331,10 +331,10 @@ async def test_legacy_disk_only_delivery_stamp_is_recovered(tmp_path, monkeypatc
     outbox = tmp_path / 'ops_outbox'
     outbox.mkdir(exist_ok=True)
     (outbox / f'{record.id}.json').write_text('{}')
-    async def records(*a): return [record]
-    monkeypatch.setattr(quote_store, 'list', records)
+    await quote_store.save(record)
     monkeypatch.setattr(ops_email, '_queue', asyncio.Queue())
     monkeypatch.setattr(settings, 'resend_api_key', 'test-no-network')
     assert await ops_email.requeue_undelivered() == 1
+    record = await quote_store.get(record.id)
     assert record.opsEmailDeliveredAt is None
     assert record.opsEmailCapturedAt == '2026-09-23T12:00:01Z'
