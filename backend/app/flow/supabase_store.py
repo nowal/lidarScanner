@@ -652,6 +652,15 @@ class _NoCloseClient:
         return None
 
 
+async def registered_scan_owner(home_id: str) -> str | None:
+    """The durable upload head owns a staged scan even before its index is ready."""
+    response = await _rest().get('/scan_upload_heads', params={
+        'home_id': 'eq.' + home_id, 'select': 'owner_id', 'limit': '1'})
+    response.raise_for_status()
+    rows = response.json()
+    return str(rows[0]['owner_id']).lower() if rows else None
+
+
 async def scan_upload_owners(home_id: str) -> set[str]:
     """Use the database's upload records when upgrading a legacy home index."""
     async with httpx.AsyncClient(timeout=20.0) as client:

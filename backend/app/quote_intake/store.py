@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import HTTPException
 from ..config import settings
 from ..flow import supabase_store
+from .timing import timed
 
 
 def _db():
@@ -45,6 +46,7 @@ def _local_cas(row, previous):
         return cursor.rowcount == 1
 
 
+@timed("store_read")
 async def read(identifier: str, owner: str, home: str):
     try:
         if supabase_store.enabled():
@@ -61,6 +63,7 @@ async def read(identifier: str, owner: str, home: str):
     return row
 
 
+@timed("store_write")
 async def save(identifier: str, owner: str, home: str, state: dict, previous: int | None) -> int:
     if not supabase_store.enabled() and (state.get('receipt') or {}).get('quoteRequestId'):
         from ..flow_quotes import quote_store

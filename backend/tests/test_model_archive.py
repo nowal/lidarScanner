@@ -57,6 +57,7 @@ async def test_preparation_and_status_require_verified_homeowner(staged, tmp_pat
         return {'revision': REV, 'progress': {'status': 'done'}}
     monkeypatch.setattr(home_registry, 'load_index_async', no_index)
     monkeypatch.setattr(supabase_store, 'enabled', lambda: True)
+    monkeypatch.setattr(supabase_store, 'registered_scan_owner', no_index)
     monkeypatch.setattr(archive, 'begin', begin)
     monkeypatch.setattr(archive, 'transition', transition)
     body = flow_api.CompressedHomeUpload(revision=REV, model=model)

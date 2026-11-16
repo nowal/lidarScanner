@@ -1,0 +1,1016 @@
+{
+  "date": "2026-11-13",
+  "baseline": {
+    "backend": "dbb2e680e7e56864c57e3f3b4fecfd504db45e8c",
+    "mobile": "8faa3d3aedb512fcd9a8bb064f2f727ae9e74896"
+  },
+  "production": {
+    "changed": false,
+    "observedActiveFailures": [
+      {
+        "date": "2026-11-06",
+        "status": 403,
+        "authStatus": 200,
+        "firstAssetSecondsLater": 1.9
+      },
+      {
+        "date": "2026-11-08",
+        "status": 403,
+        "authStatus": 200,
+        "firstAssetSecondsLater": 3.7
+      },
+      {
+        "date": "2026-11-10",
+        "status": 403,
+        "authStatus": 200,
+        "firstAssetSecondsLater": 4.2
+      },
+      {
+        "date": "2026-11-12",
+        "status": 403,
+        "authStatus": 200,
+        "firstAssetSecondsLater": 6.3
+      }
+    ],
+    "intakes": 23,
+    "transcriptMessages": {
+      "min": 0,
+      "max": 18,
+      "mean": 8.7
+    },
+    "exactReportedIdleIncidentCorrelated": false
+  },
+  "benchmarks": [
+    {
+      "run": "initial",
+      "model": "claude-sonnet-5",
+      "effort": "low",
+      "maxTokens": 8192,
+      "baseline": "dbb2e680e7e56864c57e3f3b4fecfd504db45e8c",
+      "notes": "Synthetic generation only; excludes phone, network to backend, auth, database and rendering. Cache warmth is observed in per-call token counters; no population percentiles.",
+      "samples": [
+        {
+          "repeat": 0,
+          "case": "short_clarifier",
+          "variant": "baseline",
+          "seconds": 8.565,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36271,
+              "output_tokens": 404,
+              "seconds": 4.61,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            },
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36879,
+              "output_tokens": 404,
+              "seconds": 3.94,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true,
+              "review": "proposed_question"
+            },
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "short_clarifier",
+          "variant": "optimized",
+          "seconds": 7.523,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 216,
+              "output_tokens": 472,
+              "seconds": 5.58,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 34809,
+              "review": "False"
+            },
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 691,
+              "output_tokens": 21,
+              "seconds": 1.92,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 35318,
+              "review": "True"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true,
+              "review": "proposed_question"
+            },
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "complete_scope",
+          "variant": "baseline",
+          "seconds": 6.646,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36294,
+              "output_tokens": 636,
+              "seconds": 6.63,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "complete_scope",
+          "variant": "optimized",
+          "seconds": 6.244,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 239,
+              "output_tokens": 623,
+              "seconds": 6.23,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "long_saved_thread",
+          "variant": "baseline",
+          "seconds": 7.211,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 38914,
+              "output_tokens": 671,
+              "seconds": 7.2,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "long_saved_thread",
+          "variant": "optimized",
+          "seconds": 8.053,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 2709,
+              "output_tokens": 675,
+              "seconds": 8.05,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "short_clarifier",
+          "variant": "optimized",
+          "seconds": 7.055,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 216,
+              "output_tokens": 436,
+              "seconds": 5.23,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            },
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 663,
+              "output_tokens": 21,
+              "seconds": 1.81,
+              "cache_read_tokens": 35318,
+              "cache_write_tokens": 0,
+              "review": "True"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true,
+              "review": "proposed_question"
+            },
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "short_clarifier",
+          "variant": "baseline",
+          "seconds": 8.731,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36271,
+              "output_tokens": 405,
+              "seconds": 4.77,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            },
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36880,
+              "output_tokens": 405,
+              "seconds": 3.95,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true,
+              "review": "proposed_question"
+            },
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "complete_scope",
+          "variant": "optimized",
+          "seconds": 7.0,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 239,
+              "output_tokens": 610,
+              "seconds": 6.99,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "complete_scope",
+          "variant": "baseline",
+          "seconds": 9.286,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36294,
+              "output_tokens": 615,
+              "seconds": 9.28,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "long_saved_thread",
+          "variant": "optimized",
+          "seconds": 7.089,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 2709,
+              "output_tokens": 689,
+              "seconds": 7.08,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "long_saved_thread",
+          "variant": "baseline",
+          "seconds": 7.203,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 38914,
+              "output_tokens": 680,
+              "seconds": 7.2,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        }
+      ]
+    },
+    {
+      "run": "restricted-review-final",
+      "model": "claude-sonnet-5",
+      "effort": "low",
+      "maxTokens": 8192,
+      "baseline": "dbb2e68",
+      "notes": "Synthetic generation only; excludes phone, network to backend, auth, database and rendering. Cache warmth is observed in per-call token counters; no population percentiles.",
+      "samples": [
+        {
+          "repeat": 0,
+          "case": "short_clarifier",
+          "variant": "baseline",
+          "seconds": 16.841,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36271,
+              "output_tokens": 410,
+              "seconds": 9.01,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            },
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36885,
+              "output_tokens": 410,
+              "seconds": 6.46,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true,
+              "review": "proposed_question"
+            },
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "short_clarifier",
+          "variant": "optimized",
+          "seconds": 14.439,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 216,
+              "output_tokens": 432,
+              "seconds": 7.59,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            },
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 671,
+              "output_tokens": 21,
+              "seconds": 4.35,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 35318,
+              "review": "True"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true,
+              "review": "proposed_question"
+            },
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "complete_scope",
+          "variant": "baseline",
+          "seconds": 11.045,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36294,
+              "output_tokens": 629,
+              "seconds": 10.19,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "complete_scope",
+          "variant": "optimized",
+          "seconds": 23.562,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 239,
+              "output_tokens": 642,
+              "seconds": 22.89,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "long_saved_thread",
+          "variant": "baseline",
+          "seconds": 16.688,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 38914,
+              "output_tokens": 677,
+              "seconds": 8.21,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            },
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 39730,
+              "output_tokens": 669,
+              "seconds": 7.57,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": false,
+              "error": "Intent must refer to the current turn"
+            },
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 0,
+          "case": "long_saved_thread",
+          "variant": "optimized",
+          "seconds": 15.627,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 2709,
+              "output_tokens": 674,
+              "seconds": 13.35,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "short_clarifier",
+          "variant": "optimized",
+          "seconds": 22.316,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 216,
+              "output_tokens": 449,
+              "seconds": 11.84,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            },
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 672,
+              "output_tokens": 21,
+              "seconds": 7.87,
+              "cache_read_tokens": 35318,
+              "cache_write_tokens": 0,
+              "review": "True"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true,
+              "review": "proposed_question"
+            },
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "short_clarifier",
+          "variant": "baseline",
+          "seconds": 8.786,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36271,
+              "output_tokens": 398,
+              "seconds": 4.53,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            },
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36873,
+              "output_tokens": 398,
+              "seconds": 4.25,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true,
+              "review": "proposed_question"
+            },
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "complete_scope",
+          "variant": "optimized",
+          "seconds": 7.071,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 239,
+              "output_tokens": 683,
+              "seconds": 7.07,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "complete_scope",
+          "variant": "baseline",
+          "seconds": 6.601,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 36294,
+              "output_tokens": 657,
+              "seconds": 6.59,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "long_saved_thread",
+          "variant": "optimized",
+          "seconds": 6.767,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 2709,
+              "output_tokens": 671,
+              "seconds": 6.75,
+              "cache_read_tokens": 34809,
+              "cache_write_tokens": 0,
+              "review": "False"
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        },
+        {
+          "repeat": 1,
+          "case": "long_saved_thread",
+          "variant": "baseline",
+          "seconds": 7.573,
+          "calls": [
+            {
+              "model": "claude-sonnet-5",
+              "input_tokens": 38914,
+              "output_tokens": 761,
+              "seconds": 7.56,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0
+            }
+          ],
+          "attempts": [
+            {
+              "validated": true
+            }
+          ],
+          "failures": []
+        }
+      ]
+    }
+  ],
+  "adaptiveIntegration": [
+    {
+      "run": "initial",
+      "model": "claude-sonnet-5",
+      "promptHash": "39b4f19ef6f06be5c32475b6ffb9cf1e3254429ef56b68f68bffa0a05e53263f",
+      "rubricHash": "ec0c15fd5295616733866703328cb38f715ee370b02a72bcea879fa24ebc5a49",
+      "cases": [
+        {
+          "id": "complete_painting",
+          "failures": [],
+          "clarificationTurns": 0,
+          "repeatedQuestionCount": 0,
+          "modelAttempts": [
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            8.101
+          ]
+        },
+        {
+          "id": "consultation_then_zip",
+          "failures": [],
+          "clarificationTurns": 0,
+          "repeatedQuestionCount": 0,
+          "modelAttempts": [
+            [
+              {
+                "validated": true
+              }
+            ],
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            9.344,
+            7.496
+          ]
+        },
+        {
+          "id": "window_cleaning_clarifies_specialty_scope",
+          "failures": [],
+          "clarificationTurns": 3,
+          "repeatedQuestionCount": 1,
+          "modelAttempts": [
+            [
+              {
+                "validated": true,
+                "review": "proposed_question"
+              },
+              {
+                "validated": true
+              }
+            ],
+            [
+              {
+                "validated": true,
+                "review": "proposed_question"
+              },
+              {
+                "validated": true
+              }
+            ],
+            [
+              {
+                "validated": true,
+                "review": "proposed_question"
+              },
+              {
+                "validated": true
+              }
+            ],
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            11.476,
+            19.927,
+            12.734,
+            9.628
+          ]
+        },
+        {
+          "id": "landscaping_routing",
+          "failures": [],
+          "clarificationTurns": 0,
+          "repeatedQuestionCount": 0,
+          "modelAttempts": [
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            18.19
+          ]
+        },
+        {
+          "id": "pause_with_scope",
+          "failures": [],
+          "clarificationTurns": 0,
+          "repeatedQuestionCount": 0,
+          "modelAttempts": [
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            12.011
+          ]
+        }
+      ]
+    },
+    {
+      "run": "final",
+      "model": "claude-sonnet-5",
+      "promptHash": "39b4f19ef6f06be5c32475b6ffb9cf1e3254429ef56b68f68bffa0a05e53263f",
+      "rubricHash": "ec0c15fd5295616733866703328cb38f715ee370b02a72bcea879fa24ebc5a49",
+      "cases": [
+        {
+          "id": "complete_painting",
+          "failures": [],
+          "clarificationTurns": 0,
+          "repeatedQuestionCount": 0,
+          "modelAttempts": [
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            7.835
+          ]
+        },
+        {
+          "id": "consultation_then_zip",
+          "failures": [],
+          "clarificationTurns": 0,
+          "repeatedQuestionCount": 0,
+          "modelAttempts": [
+            [
+              {
+                "validated": true,
+                "review": "proposed_question"
+              },
+              {
+                "validated": true
+              }
+            ],
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            30.814,
+            6.855
+          ]
+        },
+        {
+          "id": "window_cleaning_clarifies_specialty_scope",
+          "failures": [],
+          "clarificationTurns": 3,
+          "repeatedQuestionCount": 1,
+          "modelAttempts": [
+            [
+              {
+                "validated": true,
+                "review": "proposed_question"
+              },
+              {
+                "validated": true
+              }
+            ],
+            [
+              {
+                "validated": true,
+                "review": "proposed_question"
+              },
+              {
+                "validated": true
+              }
+            ],
+            [
+              {
+                "validated": true,
+                "review": "proposed_question"
+              },
+              {
+                "validated": true
+              }
+            ],
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            10.376,
+            11.94,
+            12.049,
+            9.764
+          ]
+        },
+        {
+          "id": "landscaping_routing",
+          "failures": [],
+          "clarificationTurns": 0,
+          "repeatedQuestionCount": 0,
+          "modelAttempts": [
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            14.155
+          ]
+        },
+        {
+          "id": "pause_with_scope",
+          "failures": [],
+          "clarificationTurns": 0,
+          "repeatedQuestionCount": 0,
+          "modelAttempts": [
+            [
+              {
+                "validated": true
+              }
+            ]
+          ],
+          "latencySeconds": [
+            8.068
+          ]
+        }
+      ]
+    }
+  ],
+  "legacyModelFixture": {
+    "cases": 15,
+    "passed": 7,
+    "failed": 8,
+    "requiredFieldMismatchesAlsoOnMain": 7,
+    "intermittentUnsupportedDiagnosis": {
+      "threeRepeatBaseline": {
+        "passed": 1,
+        "failed": 2
+      },
+      "threeRepeatOptimized": {
+        "passed": 1,
+        "failed": 2
+      }
+    },
+    "fixtureAssertionsChanged": false
+  },
+  "backendTests": {
+    "passed": 1488,
+    "skipped": 2,
+    "failed": 3,
+    "failuresReproducedOnUnmodifiedMain": true,
+    "failureTests": [
+      "test_quintin_oct6_rubrics.py::test_the_lead_package_carries_the_fields_the_scan_and_the_unknowns",
+      "test_quote_decisions_sep17.py::test_operations_is_told_about_an_approval_with_the_address",
+      "test_scan_scope.py::test_the_email_says_one_room_or_whole_home_and_still_withholds_the_address"
+    ]
+  },
+  "limitations": [
+    "Synthetic generation timing excludes backend auth/DB, phone networking and rendering.",
+    "Second benchmark overlapped Xcode rebuild; machine versus remote variation not isolated.",
+    "Initial speedup was not reproduced; no production latency percentile claimed.",
+    "Quintin installed build and exact incident time unknown.",
+    "Physical-device long-idle test pending."
+  ],
+  "submissionCalls": 0,
+  "mobileTests": {
+    "intakeUnitTests": 25,
+    "parameterizedExecutions": 27,
+    "failed": 0,
+    "fixtureUIFlows": 6,
+    "affectedUIFlowsRepeatedOnFinalCode": 2,
+    "unfinishedTurnRetryVerified": true,
+    "physicalDeviceIdleResumeVerified": false
+  }
+}

@@ -48,8 +48,10 @@ logger = logging.getLogger("lidarai.api")
 
 from .armor import MaxBodyMiddleware, RateLimitMiddleware
 from .metrics import RequestMetricsMiddleware
+from .quote_intake.timing import QuoteIntakeTimingMiddleware
 
 app = FastAPI(title="LidarAI Processor", version="1.0.0")
+app.add_middleware(QuoteIntakeTimingMiddleware)
 app.add_middleware(RequestMetricsMiddleware)
 # Outermost of the three: a refused request costs no work downstream, and
 # an oversized body is refused before anything reads it.

@@ -61,10 +61,11 @@ def model_input(state, time_zone):
             [field['id'] for field in state['rubric']['common']['required']] +
             [field['id'] for field in service['decisions']]
             for service in state['rubric']['services']},
-        workflow=dict(scanAssociated=True, scanVisibleToAgent=False, projectZip=state['projectZip'],
+        workflow=dict(currentTurnId=(state.get('pendingTurn') or {}).get('clientTurnId'),
+                      scanAssociated=True, scanVisibleToAgent=False, projectZip=state['projectZip'],
                       destinationZip=state['destinationZip'], zipAnswers=state['zipAnswers'], paused=state['paused'],
                       askedFields=state['asked'], zipClarifications=state['zipClarifications'],
-                      timeZone=time_zone, localDate=local_today)), ensure_ascii=False)
+                      timeZone=time_zone, localDate=local_today)), ensure_ascii=False, separators=(',', ':'))
 
 
 def _evidence(source, evidence, turns):

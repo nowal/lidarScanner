@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from pydantic import BaseModel, Field, field_validator
 
 from .config import settings
+from .quote_intake.timing import timed as intake_timed
 from .flow import FlowEngine
 from .flow.identity import resolve_homeowner_token
 from .flow_quotes import (
@@ -96,6 +97,7 @@ def require_ops_token(authorization: Optional[str] = Header(default=None)) -> No
         raise HTTPException(status_code=401, detail="Invalid ops token")
 
 
+@intake_timed("auth")
 async def homeowner_id_from_header(x_homeowner_token: Optional[str]) -> str | None:
     return await resolve_homeowner_token(
         x_homeowner_token,
@@ -1235,6 +1237,7 @@ async def compressed_home_status(home_id: str, revision: str,
     return JSONResponse(model_archive.status(state))
 
 
+@intake_timed("ownership")
 async def _scan_upload_owner(home_id: str, token: str | None) -> str:
     from .flow import home_registry, supabase_store
 
@@ -1247,6 +1250,17 @@ async def _scan_upload_owner(home_id: str, token: str | None) -> str:
     if not homeowner or not homeowner.get("id"):
         raise HTTPException(status_code=403, detail="No homeowner profile for this session")
     owner = str(homeowner["id"]).lower()
+    if supabase_store.enabled():
+        try:
+            registered_owner = await supabase_store.registered_scan_owner(home_id)
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Could not verify scan ownership") from exc
+        if registered_owner:
+            if registered_owner != owner:
+                raise HTTPException(status_code=403, detail="This scan belongs to another homeowner")
+            # Authorization needs the owner, not a hydrated scan index. Quote
+            # submission separately checks upload readiness and pinned revisions.
+            return owner
     index = await home_registry.load_index_async(home_id)
     if index and index.upload.get("ownerId"):
         if index.upload["ownerId"] != owner:
@@ -1258,8 +1272,15 @@ async def _scan_upload_owner(home_id: str, token: str | None) -> str:
             owners = await supabase_store.scan_upload_owners(home_id)
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Could not verify scan ownership") from exc
+        if not owners:
+            # The phone opens intake while its first scan upload is still in
+            # progress. No record is not proof of a foreign owner; keep access
+            # denied, but distinguish this recoverable prerequisite from 403.
+            raise HTTPException(status_code=409, detail={
+                "code": "scan_ownership_pending", "retryable": True,
+                "message": "The scan upload has not registered ownership yet."})
         if owners != {owner}:
-            raise HTTPException(status_code=403, detail="This scan has no matching upload ownership record")
+            raise HTTPException(status_code=403, detail="This scan belongs to another homeowner")
     return owner
 
 
