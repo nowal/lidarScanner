@@ -12,6 +12,11 @@ MAX_GENERATION_ATTEMPTS = 3
 async def generate_turn(state, time_zone, *, attempts=None):
     payload = engine.model_input(state, time_zone)
     system = state['prompt'] + '\n\n' + state['wireInstructions']
+    if state.get('mediaType') == 'walkthrough':
+        system += ('\nThis project has a walkthrough video, not a measured scan. You have not viewed it. '
+                   'Collect the same homeowner service decisions. Do not require geometry, dimensions, '
+                   'room IDs or a model; omit unavailable measurements and leave verification to the provider. '
+                   'Do not claim to see video contents.')
     question_reviewed = False
     # Ordinary validation gets one repair (two calls total). A proposed-question
     # review may itself introduce an invalid citation, so that path alone gets a

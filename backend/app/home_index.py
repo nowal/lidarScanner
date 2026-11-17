@@ -662,8 +662,10 @@ class HomeIndex:
 
     def __init__(self, rooms: list[Room], bundle_id: str = "", storey_count: int = 1,
                  home_model: dict | None = None, upload: dict | None = None,
-                 mesh_bounds: dict | None = None):
+                 mesh_bounds: dict | None = None, media_type: str = "scan", video: dict | None = None):
         # The whole-home bake (top-level ``model.usdz``), same shape as Room.model.
+        self.media_type = media_type
+        self.video = dict(video or {})
         self.home_model: dict = dict(home_model or {})
         self.upload: dict = dict(upload or {})
         # The LiDAR mesh's overall extent in metres (widthMeters, lengthMeters,
@@ -839,6 +841,8 @@ class HomeIndex:
         return room
 
     def overview(self) -> dict:
+        if self.media_type == "walkthrough":
+            return {"bundleId": self.bundle_id, "mediaType": "walkthrough", "videoAvailable": bool(self.video)}
         return {
             "bundleId": self.bundle_id,
             "models": {
@@ -856,7 +860,12 @@ class HomeIndex:
         }
 
     def to_json(self) -> dict:
+        if self.media_type == "walkthrough":
+            return {"mediaType": "walkthrough", "bundleId": self.bundle_id, "rooms": [],
+                    "video": dict(self.video), "upload": dict(self.upload)}
         return {
+            "mediaType": self.media_type,
+            "video": dict(self.video),
             "bundleId": self.bundle_id,
             "storeys": self.storey_count,
             "rooms": [r.to_json() for r in self.rooms],
@@ -888,6 +897,8 @@ class HomeIndex:
             home_model=dict(data.get("homeModel") or {}),
             upload=dict(data.get("upload") or {}),
             mesh_bounds=data.get("meshBounds") or None,
+            media_type=data.get("mediaType", "scan"),
+            video=data.get("video"),
         )
 
     # ------------------------------------------------------------- layout

@@ -32,7 +32,7 @@ async def viewer(request_id: str, exp: int, sig: str):
     page = (STATIC / 'viewer.html').read_text()
     return HTMLResponse(page, headers=dict(HEADERS, **{'Content-Security-Policy':
         "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' https: blob:; "
-        "connect-src 'self' https: blob:; worker-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"}))
+        "media-src 'self' https: blob:; connect-src 'self' https: blob:; worker-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"}))
 
 
 @router.get(ROOT + '/status')
@@ -46,7 +46,9 @@ async def status(request_id: str, exp: int, sig: str):
     photos = await media.photos_with_camera(scan)
     from .flow.ops_email import _scan_facts
     from .flow.provider_brief import build as provider_brief
-    return JSONResponse({'models': models, 'photos': [{'label': p['label'], 'index': n,
+    return JSONResponse({'mediaType': scan.get('mediaType', 'scan'),
+                         'video': {'url': 'video', 'mimeType': scan['video']['mimeType']} if scan.get('video') else None,
+                         'models': models, 'photos': [{'label': p['label'], 'index': n,
                          'roomKey': p.get('roomKey'), 'camera': p.get('camera'),
                          'supplemental': bool(p.get('supplemental'))} for n, p in enumerate(photos)],
                          'revision': scan['revision'][:8], 'expiresAt': exp,
@@ -136,4 +138,18 @@ async def model(request_id: str, exp: int, sig: str, number: int, format: str):
         bucket, path = m['bucket'], m['object']
     url = await supabase_store._signed_storage_url(bucket, path, expires_in=min(300, exp - int(media.time.time())))
     if not url: raise HTTPException(404, 'This model is unavailable')
+    return RedirectResponse(url, headers=HEADERS)
+
+
+@router.get(ROOT + '/video')
+async def video(request_id: str, exp: int, sig: str):
+    record = await media.authorized(request_id, exp, sig)
+    video = record.scanMedia.get('video') or {}
+    if record.scanMedia.get('mediaType') != 'walkthrough' or not video.get('object'):
+        raise HTTPException(404, 'This project has no walkthrough video')
+    # Storage handles byte ranges/seeking; only a short-lived private URL leaves
+    # the backend. Object names come from the immutable submission snapshot.
+    url = await supabase_store._signed_storage_url(video['bucket'], video['object'],
+        expires_in=min(3600, exp - int(media.time.time())))
+    if not url: raise HTTPException(404, 'This video is unavailable')
     return RedirectResponse(url, headers=HEADERS)
