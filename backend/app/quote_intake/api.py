@@ -176,6 +176,17 @@ async def turn(body: TurnRequest, x_homeowner_token: str | None = Header(default
         raise HTTPException(409, 'Retry the saved unfinished turn before sending another message')
     if not body.text.strip():
         raise HTTPException(422, 'Enter a message')
+    if 'mediaType' not in state:
+        from ..flow import scan_uploads
+        upload = await scan_uploads.transition(home, 'read', owner=owner)
+        index = (upload or {}).get('publishedIndex') or {}
+        is_video = index.get('mediaType') == 'walkthrough'
+        if not index and supabase_store.enabled():
+            try:
+                is_video = await supabase_store.has_walkthrough_upload(home, owner)
+            except Exception as exc:
+                raise HTTPException(503, 'Could not restore project media. Please retry.') from exc
+        state['mediaType'] = 'walkthrough' if is_video else 'scan'
     if state['pendingTurn'] is None:
         if len(state['transcript']) >= 200:
             raise HTTPException(422, 'This conversation is full. Start another request.')

@@ -207,15 +207,16 @@ async def submit_direct_quote_request(body: DirectQuoteSubmission,
         metadata = published.get('upload') or {}
         if not upload or upload.get('ownerId') != owner:
             raise HTTPException(403, 'This scan belongs to another homeowner')
+        from .flow.walkthroughs import ready as media_ready
         if (upload.get('revision') != str(body.revision) or metadata.get('revision') != str(body.revision)
-                or not metadata.get('modelsReady')):
+                or not media_ready(published)):
             raise HTTPException(409, 'Your latest scan is still uploading. Please wait and try again.')
         index = HomeIndex.from_json(published)
         keys = set(body.roomKeys)
         rooms = [r for r in index.rooms if not keys or r.key in keys]
         if keys and keys != {r.key for r in rooms}:
             raise HTTPException(422, 'An explicitly selected area is not in this scan.')
-        measurements = _measurements_from_context(body.homeContext) if not keys else {}
+        measurements = _measurements_from_context(body.homeContext) if not keys and index.media_type != 'walkthrough' else {}
         # Scope comes from this submission only, never a conversation's active room.
         measurements['rooms'] = []
         for room in rooms:
@@ -233,6 +234,8 @@ async def submit_direct_quote_request(body: DirectQuoteSubmission,
             if total or keys:
                 measurements[key] = round(total, 1)
         measurements['windowOpenings'] = [opening for r in measurements['rooms'] for opening in r['windowOpenings']]
+        if index.media_type == 'walkthrough':
+            measurements = {}
         record = QuoteRequestRecord(id=request_id, createdAt=now_utc().isoformat(),
             threadId=f'direct_{body.submissionId}', homeownerId=owner, homeId=home_id,
             zip=body.zip, synopsis=body.description, submissionMode='direct',
@@ -1184,6 +1187,26 @@ async def ops_entry_submit(request_id: str, body: OpsEntrySubmission) -> JSONRes
     await quote_store.save(record)
     logger.info("Ops entry page added quote to %s", request_id)
     return JSONResponse({"schemaVersion": SCHEMA_VERSION, "status": record.status, "quoteId": quote.id})
+
+
+class WalkthroughUpload(BaseModel):
+    revision: UUID
+    generation: int = Field(gt=0)
+    bucket: Literal['metashape-exports'] = 'metashape-exports'
+    objectPath: str = Field(min_length=1, max_length=500)
+    bytes: int = Field(gt=0)
+    mimeType: Literal['video/quicktime', 'video/mp4']
+    durationSeconds: float = Field(gt=0, allow_inf_nan=False)
+
+
+@router.post('/ai/homes/{home_id}/uploads/walkthrough', dependencies=[Depends(require_token)])
+async def upload_walkthrough(home_id: str, body: WalkthroughUpload,
+                             x_homeowner_token: Optional[str] = Header(default=None)):
+    from .flow import walkthroughs, supabase_store
+    owner = await _scan_upload_owner(home_id, x_homeowner_token)
+    if not supabase_store.enabled():
+        raise HTTPException(503, 'Video upload storage is unavailable')
+    return await walkthroughs.publish(home_id, body, owner)
 
 
 # Staged on-device uploads. Legacy /ingest remains available to old builds;

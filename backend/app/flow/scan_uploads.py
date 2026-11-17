@@ -78,6 +78,8 @@ def visible_index(state: dict) -> dict | None:
 async def begin(home_id: str, body, owner: str, background) -> dict:
     from . import home_registry
     previous = await home_registry.load_index_async(home_id)
+    if previous and previous.media_type == 'walkthrough':
+        raise HTTPException(409, 'This project uses walkthrough video. Start a new project for a scan.')
     state = await transition(home_id, 'begin', revision=body.revision, owner=owner, payload={
         'objectPath': body.objectPath, 'generation': body.generation,
         'previous_index': previous.to_json() if previous else None})

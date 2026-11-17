@@ -718,3 +718,12 @@ async def delete_scan_uploads(home_id: str, owner_id: str) -> bool:
     except Exception as exc:
         logger.warning("Could not delete staged scan uploads for %s: %s", home_id, exc)
         return False
+
+
+async def has_walkthrough_upload(home_id: str, owner: str) -> bool:
+    """Media kind before publication, after the phone's owned upload ledger exists."""
+    response = await _rest().get('/home_assets', params={
+        'homeowner_id': 'eq.' + owner, 'asset_type': 'eq.walkthrough_video',
+        'storage_path': f'like.{owner}/{home_id}/*', 'select': 'id', 'limit': '1'})
+    response.raise_for_status()
+    return bool(response.json())

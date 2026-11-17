@@ -62,7 +62,8 @@ def model_input(state, time_zone):
             [field['id'] for field in service['decisions']]
             for service in state['rubric']['services']},
         workflow=dict(currentTurnId=(state.get('pendingTurn') or {}).get('clientTurnId'),
-                      scanAssociated=True, scanVisibleToAgent=False, projectZip=state['projectZip'],
+                      scanAssociated=state.get('mediaType') != 'walkthrough', scanVisibleToAgent=False,
+                      mediaType=state.get('mediaType', 'scan'), mediaVisibleToAgent=False, projectZip=state['projectZip'],
                       destinationZip=state['destinationZip'], zipAnswers=state['zipAnswers'], paused=state['paused'],
                       askedFields=state['asked'], zipClarifications=state['zipClarifications'],
                       timeZone=time_zone, localDate=local_today)), ensure_ascii=False, separators=(',', ':'))
@@ -531,7 +532,7 @@ def provider_package(state):
             lines += ['Consolidated homeowner scope statements:']
             lines += [f"- {transcript[source]}" for source in source_ids if source in transcript]
         lines += ['Provider review: ' + '; '.join(snapshot.service(item['rubricId']).provider_review + item['providerReview'])]
-        if snapshot.service(item['rubricId']).provider_model_review:
+        if state.get('mediaType') != 'walkthrough' and snapshot.service(item['rubricId']).provider_model_review:
             lines += ['Provider model review: ' + '; '.join(snapshot.service(item['rubricId']).provider_model_review)]
         if snapshot.service(item['rubricId']).provider_technical_review:
             lines += ['Provider technical review: ' + '; '.join(snapshot.service(item['rubricId']).provider_technical_review)]
@@ -545,7 +546,10 @@ def provider_package(state):
     lines += ['Project ZIP: ' + state['projectZip']]
     if state.get('destinationZip'):
         lines += ['Destination ZIP: ' + state['destinationZip']]
-    lines += ['Model attachment is context only; requested scope above controls inclusions. The intake agent has not viewed the scan.']
+    if state.get('mediaType') == 'walkthrough':
+        lines += ['Walkthrough video is visual context only; requested scope above controls inclusions. No measured dimensions or 3D model are supplied. The intake agent has not viewed the video. The provider can confirm dimensions on site if needed.']
+    else:
+        lines += ['Model attachment is context only; requested scope above controls inclusions. The intake agent has not viewed the scan.']
     description = '\n'.join(lines)
     if len(description) > 10000:
         raise ValueError('Provider brief exceeds submission limit')

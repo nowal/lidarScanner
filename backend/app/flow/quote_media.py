@@ -51,7 +51,8 @@ async def capture(record) -> dict:
         raise HTTPException(403, 'This scan belongs to another homeowner')
     raw = state['publishedIndex']
     upload = raw.get('upload') or {}
-    if not upload.get('modelsReady') or not upload.get('revision'):
+    from .walkthroughs import ready
+    if not ready(raw) or not upload.get('revision'):
         return {}  # Older indexes have no revision-pinned context gallery.
     if state.get('revision') != upload['revision']:
         # The submit gate raced a new build. Do not silently quote the old scan.
@@ -98,6 +99,8 @@ async def capture(record) -> dict:
              'models': models, 'photos': [dict(label=p['fileName'], object=p['storagePath'],
                                                 thumbnail=p['thumbnailPath'], supplemental=True)
                                          for p in supplemental]}
+    if index.media_type == 'walkthrough':
+        media.update(mediaType='walkthrough', video=dict(index.video), context={}, photosPrepared=True)
     if all(r.provider_frames is not None for r in rooms):
         media['version'] = 2
         versions = sorted({f.get('selectionVersion', 1) for r in rooms for f in r.provider_frames})

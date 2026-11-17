@@ -203,6 +203,17 @@ viewer.addEventListener('measurement-mode-change', toggleCameras);
 viewer.addEventListener('camera-change', scheduleDirections);
 new ResizeObserver(scheduleDirections).observe(viewer);
 function showModel() {
+  if (snapshot.mediaType === 'walkthrough') {
+    document.getElementById('model-section').hidden = true;
+    document.getElementById('walkthrough-section').hidden = false;
+    document.querySelector('h1').textContent = 'Explore the project';
+    document.title = 'TakeShape · Walkthrough video';
+    document.getElementById('photos-title').textContent = 'Project photos';
+    document.getElementById('gallery-status').textContent = snapshot.photos.length ? 'Supplemental project photos.' : 'No supplemental photos.';
+    const video = document.getElementById('walkthrough-video');
+    if (!video.getAttribute('src')) video.src = `${base}/video`;
+    return;
+  }
   const model = snapshot.models[selected];
   measurements.setModel(model?.key, model?.status === 'ready');
   if (!model) {

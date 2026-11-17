@@ -745,7 +745,11 @@ async def save_request_snapshot(record: QuoteRequestRecord, *, require_model: bo
     if expected_revision and record.scanMedia.get('revision') != expected_revision:
         from fastapi import HTTPException
         raise HTTPException(409, 'The scan changed while submitting. Please wait for the latest upload.')
-    if require_model and (not record.scanMedia.get('snapshotId') or not record.scanMedia.get('models')
+    is_video = record.scanMedia.get('mediaType') == 'walkthrough'
+    if require_model and is_video and (not record.scanMedia.get('snapshotId') or not record.scanMedia.get('video', {}).get('object')):
+        from fastapi import HTTPException
+        raise HTTPException(409, 'Your latest video is still uploading. Please wait and try again.')
+    if require_model and not is_video and (not record.scanMedia.get('snapshotId') or not record.scanMedia.get('models')
                           or not record.scanMedia.get('context', {}).get('object')):
         from fastapi import HTTPException
         raise HTTPException(409, 'The latest scan model and photos must finish uploading before requesting a quote.')

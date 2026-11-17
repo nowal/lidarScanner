@@ -335,6 +335,8 @@ def coverage_gap_note(record: Any) -> str:
 
 
 def _scan_facts(record: Any) -> list[str]:
+    if (getattr(record, "scanMedia", None) or {}).get("mediaType") == "walkthrough":
+        return []
     rubric = getattr(record, "rubric", None) or {}
     facts = rubric.get("fromScan") or []
     if facts:
@@ -376,7 +378,7 @@ def build_ops_email(
     lines.extend(["", "Address and contact details are withheld until the homeowner selects a quote."])
     media_url = media_link(record)
     if media_url:
-        lines.extend(["", "Review scan and submit quote", media_url, "Private link expires in 30 days."])
+        lines.extend(["", "Review video and submit quote" if record.scanMedia.get("mediaType") == "walkthrough" else "Review scan and submit quote", media_url, "Private link expires in 30 days."])
     return f"New {request_kind}: {title}", "\n".join(lines)
 
 
@@ -405,9 +407,10 @@ def build_ops_email_html(
                   f'<div style="margin-top:7px;color:#3D4852;font-size:14px;line-height:1.5">{e(item["summary"])}{details}</div></div>')
     confirmations = "".join(f'<li style="margin:4px 0"><strong>{e(d["label"])}:</strong> {e(d["value"])}</li>' for d in brief['confirmations'])
     media_url = media_link(record)
+    media_label = "Review video and submit quote" if record.scanMedia.get("mediaType") == "walkthrough" else "Review scan and submit quote"
     viewer = (f'<a href="{e(media_url)}" style="display:inline-block;background:#980612;color:#FFFFFF;'
               'border-radius:8px;padding:12px 18px;font-size:14px;font-weight:600;text-decoration:none">'
-              'Review scan and submit quote</a>'
+              f'{media_label}</a>'
               '<p style="font-size:12px;color:#8794A0;margin:12px 0 0">Private link expires in 30 days.</p>') if media_url else ""
     return f"""<!doctype html><html><body style="margin:0;padding:0;background:#F5EFE4">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5EFE4;padding:28px 12px"><tr><td align="center">
